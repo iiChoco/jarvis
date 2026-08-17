@@ -182,13 +182,18 @@ class VoiceConfig:
     silently bricks the assistant would be worse than the strangers it
     filters."""
 
-    threshold: float = 0.5
-    """Cosine similarity against the enrolled profile at or above which an
-    utterance counts as you. CAM++ on VoxCeleb typically scores the same
-    speaker 0.55-0.75 and different speakers under 0.3, so 0.5 leaves margin
-    on both sides. The enrollment script measures *your* numbers and suggests
-    a value; raise it if others get through, lower it if Ciel ignores you
-    when you're hoarse."""
+    threshold: float | None = None
+    """Cosine similarity at or above which an utterance counts as you.
+
+    ``None`` — the default, and the right setting — uses the threshold the
+    enrollment script *calibrated* and stored with the profile: it scores a
+    set of impostor voices against your actual takes and places the bar
+    between their best score and your worst, which no fixed number can do.
+    (0.5 is the fallback for an uncalibrated profile.) Set a number here
+    only to override the calibration, and prefer re-running
+    ``enroll_voice.py --calibrate`` instead: best-match scoring over a
+    growing take set shifts the impostor statistics, so any hand-set number
+    quietly goes stale as the profile grows."""
 
     min_utterance_ms: int = 600
     """Utterances shorter than this pass unjudged. Half a word embeds as

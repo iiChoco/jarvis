@@ -104,17 +104,28 @@ class SherpaEncoder:
 
 # ── the profile ──────────────────────────────────────────────────────────────
 
-def save_profile(path: Path, embeddings: list[np.ndarray]) -> None:
-    """Persist enrollment embeddings plus their normalized mean."""
+def save_profile(
+    path: Path,
+    embeddings: list[np.ndarray],
+    threshold: float | None = None,
+) -> None:
+    """Persist enrollment embeddings, their normalized mean, and optionally a
+    calibrated threshold.
+
+    The threshold lives with the profile because it is a *property of the
+    profile*: best-match scoring over N takes has different impostor
+    statistics than over 3, so every change to the takes deserves a
+    recalibration, and a number in a config file silently goes stale."""
     path = path.expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     stacked = np.stack([e / (np.linalg.norm(e) or 1.0) for e in embeddings])
     mean = stacked.mean(axis=0)
     mean /= np.linalg.norm(mean) or 1.0
-    np.savez(path, mean=mean, embeddings=stacked)
+    extra = {} if threshold is None else {"threshold": np.float64(threshold)}
+    np.savez(path, mean=mean, embeddings=stacked, **extra)
 
 
-def _load_takes(path: Path) -> np.ndarray | None:
+def load_takes(path: Path) -> np.ndarray | None:
     """The raw enrollment takes only — no centroid row."""
     path = path.expanduser()
     if not path.exists():
@@ -127,6 +138,20 @@ def _load_takes(path: Path) -> np.ndarray | None:
         return None
 
 
+def load_threshold(path: Path) -> float | None:
+    """The calibrated threshold stored with the profile, if any."""
+    path = path.expanduser()
+    if not path.exists():
+        return None
+    try:
+        with np.load(path) as data:
+            if "threshold" in data:
+                return float(data["threshold"])
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def add_to_profile(path: Path, embeddings: list[np.ndarray]) -> int:
     """Append takes to an existing profile; returns the new take count.
 
@@ -135,8 +160,10 @@ def add_to_profile(path: Path, embeddings: list[np.ndarray]) -> int:
     the dishwasher, at 7am — and those accumulate over days, not in one
     sitting. Loads the raw takes, not ``load_profile``'s scoring matrix,
     which carries a derived centroid row that must not be re-saved as if it
-    were a take."""
-    existing = _load_takes(path)
+    were a take. The stored calibration is dropped on purpose: it was
+    measured against the old take set, and stale-but-present is worse than
+    absent — recalibrate after growing."""
+    existing = load_takes(path)
     combined = ([*existing, *embeddings] if existing is not None
                 else list(embeddings))
     save_profile(path, combined)
@@ -171,6 +198,7 @@ class SpeakerGate:
         self._config = config
         self._encoder = encoder
         self._references: np.ndarray | None = None
+        self._threshold: float = config.threshold if config.threshold is not None else 0.5
         self._min_samples = int(SAMPLE_RATE * config.min_utterance_ms / 1000)
         self._last_pass: float | None = None
         self._rejected_dir = config.profile.expanduser().parent / "rejected"
@@ -181,6 +209,21 @@ class SpeakerGate:
 
     async def warm_up(self) -> None:
         self._references = load_profile(self._config.profile)
+        # Config wins when the user set a number; otherwise the calibrated
+        # threshold stored with the profile; 0.5 as the uncalibrated default.
+        self._threshold = (
+            self._config.threshold
+            if self._config.threshold is not None
+            else load_threshold(self._config.profile) or 0.5
+        )
+        if self._references is not None:
+            log.info(
+                "voice gate: %d takes, threshold %.2f (%s)",
+                self._references.shape[0] - 1,
+                self._threshold,
+                "from config" if self._config.threshold is not None
+                else "calibrated",
+            )
         if self._references is None:
             # Fail open, loudly: see the module docstring.
             print(
@@ -214,18 +257,27 @@ class SpeakerGate:
             return True, float("nan")
 
         embedding = await asyncio.to_thread(self._encoder.embed, utterance)
-        similarity = float(np.max(self._references @ embedding))
+        scores = self._references @ embedding
+        similarity = float(np.max(scores))
 
-        threshold = self._config.threshold - self._short_discount(len(utterance))
-        if (
+        # The two leniencies cover distinct failure modes (weak measurement;
+        # mid-conversation continuity). When both apply, take the larger —
+        # summing them is how a gate quietly drops to two-thirds of its
+        # threshold and lets the room in.
+        recent = (
             self._last_pass is not None
             and time.monotonic() - self._last_pass < self._config.recent_window_s
-        ):
-            threshold -= self._config.recent_margin
+        )
+        discount = max(
+            self._short_discount(len(utterance)),
+            self._config.recent_margin if recent else 0.0,
+        )
+        threshold = self._threshold - discount
 
         if similarity >= threshold:
             self._last_pass = time.monotonic()
-            log.info("voice recognized (%.2f)", similarity)
+            log.info("voice recognized (%.2f, take %d)",
+                     similarity, int(np.argmax(scores)) + 1)
             return True, similarity
 
         await asyncio.to_thread(self._keep_rejected, utterance, similarity)
@@ -307,4 +359,6 @@ __all__ = [
     "save_profile",
     "add_to_profile",
     "load_profile",
+    "load_takes",
+    "load_threshold",
 ]

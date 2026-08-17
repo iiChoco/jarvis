@@ -24,6 +24,7 @@ from ciel.audio.speaker import (
     add_to_profile,
     build_speaker_gate,
     load_profile,
+    load_threshold,
     save_profile,
 )
 from ciel.brain.recorder import ActionRecorder
@@ -474,6 +475,37 @@ async def main() -> None:
     ok_short, _ = await gate.check(np.zeros(int(0.8 * 16000), dtype=np.float32))
     check("borderline fails long but passes short (duration taper)",
           not ok_long and ok_short)
+
+    # Leniencies must not stack: short utterance (discount ~0.107) inside the
+    # grace window (margin 0.05) gets max(0.107, 0.05), never the sum. A
+    # 0.37 speaker fails 0.393 but would pass a summed 0.343 bar.
+    encoder.next = me
+    await gate.check(one_second)  # verified pass opens the grace window
+    barely = np.zeros(8, dtype=np.float32)
+    barely[0], barely[2] = 0.37, np.sqrt(1 - 0.37**2)
+    encoder.next = barely
+    ok, sim = await gate.check(np.zeros(int(0.8 * 16000), dtype=np.float32))
+    check("leniencies take the max, not the sum", not ok and 0.36 < sim < 0.38)
+
+    # Calibrated threshold: stored with the profile, used when config leaves
+    # threshold unset, dropped (stale) when the take set grows.
+    save_profile(profile_path, [me, other_mode], threshold=0.65)
+    check("calibrated threshold round-trips",
+          load_threshold(profile_path) == 0.65)
+    calibrated_gate = SpeakerGate(
+        VoiceConfig(enabled=True, threshold=None, profile=profile_path,
+                    recent_margin=0.0, keep_rejected=0),
+        encoder,
+    )
+    await calibrated_gate.warm_up()
+    sixty = np.zeros(8, dtype=np.float32)
+    sixty[0], sixty[2] = 0.60, 0.80
+    encoder.next = sixty
+    ok, sim = await calibrated_gate.check(np.zeros(3 * 16000, dtype=np.float32))
+    check("stored threshold governs when config is unset", not ok and sim > 0.55)
+    add_to_profile(profile_path, [also_me])
+    check("growing the profile drops the stale calibration",
+          load_threshold(profile_path) is None)
 
     unenrolled = SpeakerGate(
         VoiceConfig(enabled=True, profile=iff_tmp / "missing.npz"), FakeEncoder()

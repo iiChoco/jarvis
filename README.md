@@ -217,12 +217,17 @@ uv run python scripts/enroll_voice.py --test   # score yourself live
 ```toml
 [voice]
 enabled = true
-# threshold = 0.5   # the enrollment script suggests a value measured on you
+# threshold: leave unset — enrollment *calibrates* one and stores it with
+# the profile (impostor voices vs your takes); a number here overrides it.
 ```
 
-Measured with synthesized voices: the enrolled voice speaking a different
-sentence scores ~0.90; a different speaker on the same sentence ~0.18; a
-similar-sounding speaker ~0.48 — all correctly sorted at the 0.5 threshold.
+The threshold is measured, not guessed: every profile change ends with a
+calibration pass that scores a set of macOS `say` voices against your takes
+exactly the way the gate scores, compares that with your takes'
+leave-one-out agreement, and places the bar between the two distributions.
+Takes that disagree with the rest of the profile get flagged for pruning —
+with best-match scoring, every take is another chance for a lucky impostor
+hit.
 
 Honesty section: an embedding is a filter, not authentication. It turns away
 the TV, guests, and background chatter; it will not resist a recording of
