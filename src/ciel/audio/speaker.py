@@ -17,10 +17,13 @@ your own score. Three design choices follow from that:
   gate enabled, means everything passes and the console says so on startup.
   An identity *filter* that silently bricks the assistant would be worse than
   the strangers it filters.
-* **Short utterances pass.** Below ``min_utterance_ms`` there is not enough
-  speech to judge (embeddings of half a word are noise), so brief follow-ups
-  like "yes" are allowed through. They only matter inside a conversation your
-  verified utterance already started.
+* **Short utterances are judged leniently, not waved through.** Weak evidence
+  is not zero evidence: down to ``min_judge_ms`` an utterance is scored
+  against the profile with the short-utterance discount at its maximum — a
+  clearly different voice still fails a lenient bar. Below that there is
+  genuinely nothing to measure, and *context* substitutes for audio: an
+  unjudgeable blip passes inside the grace window of a verified conversation
+  and is ignored cold.
 * **Confirmations inherit the turn's trust.** The Tower Clearance answer
   window opens seconds after a verified command; it is not separately
   verified, for the same short-utterance reason.
@@ -238,6 +241,7 @@ class SpeakerGate:
         self._references: np.ndarray | None = None
         self._threshold: float = config.threshold if config.threshold is not None else 0.5
         self._min_samples = int(SAMPLE_RATE * config.min_utterance_ms / 1000)
+        self._min_judge_samples = int(SAMPLE_RATE * config.min_judge_ms / 1000)
         self._last_pass: float | None = None
         self._rejected_dir = config.profile.expanduser().parent / "rejected"
 
@@ -275,14 +279,14 @@ class SpeakerGate:
         await self._encoder.warm_up()
 
     async def check(self, utterance: np.ndarray) -> tuple[bool, float]:
-        """(is the enrolled speaker, similarity). Unjudgeable audio passes.
+        """(is the enrolled speaker, similarity).
 
         Similarity is the *best* match across the enrolled takes and their
         centroid, not the centroid alone: a voice is multimodal (morning
         voice, excited voice, across-the-room voice), and averaging modes
         produces a reference nobody actually sounds like. ``nan`` marks the
-        pass-through cases — no profile, or too short to judge — so a caller
-        logging scores can tell "matched" from "waved through".
+        unjudged cases — no profile, or below ``min_judge_ms``, where the
+        verdict came from context (grace window) rather than the audio.
 
         A small grace margin applies shortly after a verified pass: the
         costliest false rejection is the one mid-conversation, and the
@@ -291,8 +295,19 @@ class SpeakerGate:
         """
         if self._references is None:
             return True, float("nan")
-        if len(utterance) < self._min_samples:
-            return True, float("nan")
+
+        recent = (
+            self._last_pass is not None
+            and time.monotonic() - self._last_pass < self._config.recent_window_s
+        )
+
+        if len(utterance) < self._min_judge_samples:
+            # Genuinely unjudgeable — a syllable, a cough. Inside a verified
+            # conversation these are the "yes"/"no" that matter, so they
+            # pass; from cold, an unverifiable sound is not a command. This
+            # asymmetry is the whole answer to "short words let anyone in":
+            # context is evidence when the audio can't be.
+            return (True, float("nan")) if recent else (False, float("nan"))
 
         embedding = await asyncio.to_thread(self._encoder.embed, utterance)
         scores = self._references @ embedding
@@ -302,10 +317,6 @@ class SpeakerGate:
         # mid-conversation continuity). When both apply, take the larger —
         # summing them is how a gate quietly drops to two-thirds of its
         # threshold and lets the room in.
-        recent = (
-            self._last_pass is not None
-            and time.monotonic() - self._last_pass < self._config.recent_window_s
-        )
         discount = max(
             self._short_discount(len(utterance)),
             self._config.recent_margin if recent else 0.0,

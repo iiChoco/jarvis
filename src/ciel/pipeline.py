@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 import re
 import time
@@ -256,10 +257,14 @@ class Pipeline:
                 # brain, or a follow-up window.
                 recognized, similarity = await self._speaker.check(utterance)
                 if not recognized:
-                    log.info("unrecognized voice (similarity %.2f)", similarity)
-                    print(f"\n  [unrecognized voice — ignored ({similarity:.2f})]",
-                          flush=True)
-                    self._record("event", f"unrecognized voice ({similarity:.2f})")
+                    reason = (
+                        "too short to verify outside a conversation"
+                        if math.isnan(similarity)
+                        else f"unrecognized voice ({similarity:.2f})"
+                    )
+                    log.info("%s", reason)
+                    print(f"\n  [{reason} — ignored]", flush=True)
+                    self._record("event", reason)
                     return
 
             if utterance is not None:

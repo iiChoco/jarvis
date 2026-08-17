@@ -218,6 +218,10 @@ async def test(config, encoder) -> None:
         while True:
             utterance = await capture(mic, endpointer)
             seconds = len(utterance) / SAMPLE_RATE
+            if seconds < voice.min_judge_ms / 1000:
+                print(f"  {seconds:.1f}s — too short to verify (the pipeline "
+                      "passes this only mid-conversation, ignores it cold)")
+                continue
             embedding = encoder.embed(utterance)
             sims = references @ embedding
             best, centroid = float(np.max(sims)), float(sims[-1])

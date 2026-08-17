@@ -196,9 +196,19 @@ class VoiceConfig:
     quietly goes stale as the profile grows."""
 
     min_utterance_ms: int = 600
-    """Utterances shorter than this pass unjudged. Half a word embeds as
-    noise, and the short utterances that matter ("yes", "no") occur inside a
-    conversation your verified command already started."""
+    """Where the short-utterance leniency reaches its maximum: at and below
+    this duration the full ``short_discount`` applies, tapering away toward
+    ``full_confidence_s``. Short utterances are still *judged* — weak
+    evidence is not zero evidence, and a half-second "yes" from a clearly
+    different voice scores low enough to reject even against a lenient
+    bar."""
+
+    min_judge_ms: int = 350
+    """Below this there is genuinely too little audio to embed — a cough, a
+    syllable — and no bar would mean anything. Such blips pass only inside
+    the grace window of a verified conversation (where "yes" and "no"
+    actually matter) and are ignored cold: an unverifiable sound from
+    nowhere is not a command."""
 
     short_discount: float = 0.12
     """Extra threshold leniency for short utterances, at its maximum right

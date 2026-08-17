@@ -461,8 +461,32 @@ async def main() -> None:
     rejected_wavs = sorted((iff_tmp / "rejected").glob("*.wav"))
     check("rejections kept as a bounded wav ring", len(rejected_wavs) == 2)
 
-    ok, sim = await gate.check(np.zeros(4800, dtype=np.float32))  # 0.3 s
-    check("too-short utterance passes unjudged", ok and math.isnan(sim))
+    # Unjudgeable blips (< min_judge_ms): context decides. Inside the grace
+    # window they pass — that's where "yes"/"no" live — and cold they are
+    # ignored, because an unverifiable sound from nowhere is not a command.
+    blip = np.zeros(4800, dtype=np.float32)  # 0.3 s
+    encoder.next = me
+    await gate.check(one_second)  # verified pass opens the window
+    ok, sim = await gate.check(blip)
+    check("unjudgeable blip passes mid-conversation", ok and math.isnan(sim))
+    gate._last_pass = None
+    ok, sim = await gate.check(blip)
+    check("unjudgeable blip ignored cold", not ok and math.isnan(sim))
+
+    # Short-but-judgeable is scored against the max-discount bar, not waved
+    # through: weak evidence is not zero evidence.
+    half_second = np.zeros(8000, dtype=np.float32)
+    encoder.next = stranger
+    gate._last_pass = None
+    ok, sim = await gate.check(half_second)
+    check("half-second stranger judged and rejected", not ok and sim < 0.1)
+    nearme = np.zeros(8, dtype=np.float32)
+    nearme[0], nearme[2] = 0.40, np.sqrt(1 - 0.40**2)
+    encoder.next = nearme
+    gate._last_pass = None
+    ok, sim = await gate.check(half_second)
+    check("half-second near-match passes the max-discount bar",
+          ok and 0.39 < sim < 0.41)
 
     # Duration taper: a 0.43-similarity speaker fails at full length but
     # passes on a short utterance, where the same speaker legitimately
