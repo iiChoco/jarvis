@@ -28,16 +28,16 @@ class SessionRecord:
     updated_at: float
 
     @property
-    def age_hours(self) -> float:
-        return (time.time() - self.updated_at) / 3600.0
+    def age_minutes(self) -> float:
+        return (time.time() - self.updated_at) / 60.0
 
 
 class SessionStore:
     """Remembers the last session id, so the next launch can resume it."""
 
-    def __init__(self, path: Path, resume_window_hours: float) -> None:
+    def __init__(self, path: Path, resume_window_minutes: float) -> None:
         self._path = path
-        self._window = resume_window_hours
+        self._window = resume_window_minutes
 
     def load(self) -> SessionRecord | None:
         """Return the previous session, or ``None`` if there isn't a usable one."""
@@ -55,15 +55,15 @@ class SessionStore:
             log.warning("session state at %s is unreadable — starting fresh", self._path)
             return None
 
-        if record.age_hours > self._window:
+        if record.age_minutes > self._window:
             log.info(
-                "last conversation was %.1f hours ago (window %.1f) — starting fresh",
-                record.age_hours,
+                "last conversation was %.0f minutes ago (window %.0f) — starting fresh",
+                record.age_minutes,
                 self._window,
             )
             return None
 
-        log.info("resuming conversation from %.0f minutes ago", record.age_hours * 60)
+        log.info("resuming conversation from %.1f minutes ago", record.age_minutes)
         return record
 
     def save(self, session_id: str) -> None:

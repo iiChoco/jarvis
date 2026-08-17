@@ -168,7 +168,8 @@ class WakeConfig:
 class VoiceConfig:
     """Speaker verification — only the enrolled voice gets a response.
 
-    Codename IFF. Every utterance is embedded (~30 ms, local ONNX model) and
+    Codename Eigenvoice. Every utterance is embedded (~30 ms, local ONNX
+    model) and
     compared against the enrolled profile before transcription; strangers,
     the TV, and background conversations are dropped silently. This is a
     *filter*, not authentication — it will not resist a recording of your
@@ -400,6 +401,63 @@ class ShellConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ReflectionConfig:
+    """Closure — commit a conversation's limit points before it's discarded.
+
+    Sessions are short-lived by design (see ``brain.resume_window_minutes``);
+    what makes that safe is this: shortly after a conversation ends, Ciel
+    gets one silent turn to review what was said and commit anything durable
+    to memory and projects, while the session still remembers it. Always
+    reflect, rarely save — the scheduler never guesses importance, the model
+    does."""
+
+    enabled: bool = True
+    """On by default: with short sessions, reflection is where continuity
+    comes from. Turn off only if the one extra model turn per conversation
+    bothers you more than Ciel forgetting your afternoon."""
+
+    idle_delay_s: float = 60.0
+    """Silence after a conversation before reflection runs. Long enough that
+    an ordinary conversational pause doesn't trigger it, short enough that
+    the reflection lands well before the session can rotate away."""
+
+    timeout_s: float = 120.0
+    """Hard cap on one reflection turn. A hung reflection holds the turn
+    lock, and a held turn lock is a mute assistant — the cap converts that
+    failure into a logged shrug."""
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectsConfig:
+    """Atlas — durable named workspaces, the charts covering ongoing work.
+
+    Projects hold working *state* ("attempt three, threshold zero point
+    seven"), memories hold *facts* ("the user is training a wake word
+    model"). A project survives any number of session rotations: the system
+    prompt carries a one-line index, and the model opens a project before
+    working on it."""
+
+    enabled: bool = True
+
+    dir: Path = field(default_factory=lambda: Path.home() / ".ciel" / "projects")
+    """One Markdown file per project — inspectable, editable, greppable,
+    same reasoning as the memory directory."""
+
+    max_index_entries: int = 30
+    """The index rides in every system prompt. Past this, old projects need
+    closing out (status done), not more index budget."""
+
+    max_state_chars: int = 4000
+    """An opened project's state lands in context whole. Updates beyond this
+    are refused with an instruction to condense — a refusal teaches the
+    model to summarize; a silent truncation just loses whatever was last."""
+
+    log_tail: int = 15
+    """Log lines returned when a project is opened. The file keeps all of
+    them; the tail is what fits a working context."""
+
+
+@dataclass(frozen=True, slots=True)
 class JournalConfig:
     """The action journal: what Ciel did recently, kept so it can be undone.
 
@@ -471,9 +529,14 @@ class BrainConfig:
 
     max_turns: int | None = None
 
-    resume_window_hours: float = 12.0
-    """Resume the previous conversation if it's newer than this; otherwise
-    start fresh. Stops Ciel from picking up a week-old thread mid-sentence."""
+    resume_window_minutes: float = 10.0
+    """How long a conversational thread survives silence. Within the window,
+    a restart resumes the thread and a running process keeps it; past it, the
+    session is rotated away and continuity comes from memory instead — the
+    reflection pass has already committed anything durable by then. Short on
+    purpose: context is for the *current* conversation, and a session that
+    accumulates all day is why response time degrades by evening. Ten
+    minutes still forgives "wait, one more thing"."""
 
     sentence_flush_chars: int = 180
     """If a "sentence" runs past this without terminal punctuation, flush it to
@@ -655,6 +718,8 @@ class Config:
     tts: TTSConfig = field(default_factory=TTSConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    reflection: ReflectionConfig = field(default_factory=ReflectionConfig)
+    projects: ProjectsConfig = field(default_factory=ProjectsConfig)
     files: FilesConfig = field(default_factory=FilesConfig)
     shell: ShellConfig = field(default_factory=ShellConfig)
     journal: JournalConfig = field(default_factory=JournalConfig)
@@ -683,6 +748,8 @@ _SECTIONS = {
     "tts": TTSConfig,
     "brain": BrainConfig,
     "memory": MemoryConfig,
+    "reflection": ReflectionConfig,
+    "projects": ProjectsConfig,
     "files": FilesConfig,
     "shell": ShellConfig,
     "journal": JournalConfig,

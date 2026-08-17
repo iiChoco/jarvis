@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from contextlib import aclosing
 from types import TracebackType
 from typing import AsyncIterator, Awaitable, Callable, Self
 
@@ -74,21 +75,37 @@ class Brain:
     def __init__(
         self,
         config: Config,
-        memory_index: str | None = None,
+        memory_index_provider: "Callable[[], str | None] | None" = None,
         confirmer: "Callable[[str], Awaitable[bool]] | None" = None,
         journal: ActionJournal | None = None,
+        projects_index_provider: "Callable[[], str | None] | None" = None,
     ) -> None:
         self._config = config
         self._brain_config: BrainConfig = config.brain
-        self._memory_index = memory_index
+        # Providers, not strings: the indexes are read at every connect, so a
+        # rotation picks up whatever reflection just wrote. A string would
+        # freeze the indexes at construction time.
+        self._memory_index_provider = memory_index_provider
+        self._projects_index_provider = projects_index_provider
         self._client: ClaudeSDKClient | None = None
         self._sessions = SessionStore(
-            config.session_file, config.brain.resume_window_hours
+            config.session_file, config.brain.resume_window_minutes
         )
         self._session_id: str | None = None
-        self._total_cost = 0.0
+        # Cost is split because the SDK's total_cost_usd is cumulative *per
+        # session*: rotation rolls the finished session's cost into lifetime
+        # and restarts the session counter, so per-turn deltas stay correct
+        # and the total never jumps backwards.
+        self._session_cost = 0.0
+        self._lifetime_cost = 0.0
         self._last_turn_cost = 0.0
         self._needs_drain = False
+        # One lock serializes everything that touches the client's message
+        # stream — user turns, reflection turns, rotation. Two concurrent
+        # receive_response() readers interleave and both corrupt.
+        self._turn_lock = asyncio.Lock()
+        self._mcp_servers: dict | None = None
+        self._extra_tools: list[str] | None = None
 
         self._guard: WorkspaceGuard | None = None
         if config.files.enabled:
@@ -137,14 +154,15 @@ class Brain:
 
     @property
     def total_cost_usd(self) -> float:
-        """Spend for the current session.
+        """Spend across the whole process — every session, rotations included.
 
         Note ``ResultMessage.total_cost_usd`` is *cumulative for the session*,
         not the cost of one turn — summing it across turns overstates spend
-        dramatically. We track the running total and derive per-turn cost by
-        difference.
+        dramatically. We mirror the session's running total and derive
+        per-turn cost by difference; rotation banks the finished session into
+        the lifetime sum.
         """
-        return self._total_cost
+        return self._lifetime_cost + self._session_cost
 
     @property
     def last_turn_cost_usd(self) -> float:
@@ -172,11 +190,14 @@ class Brain:
         return ClaudeAgentOptions(
             model=self._brain_config.model,
             system_prompt=build_system_prompt(
-                self._memory_index,
+                self._memory_index_provider() if self._memory_index_provider else None,
                 workspace=str(self._guard.workspace) if self._guard else None,
                 shell=self._shell_guard is not None,
                 confirmed_actions=self._tool_guard is not None,
                 undo=self._recorder is not None,
+                projects_index=self._projects_index_provider()
+                if self._projects_index_provider
+                else None,
             ),
             # Explicit allowlist. The Agent SDK ships the full Claude Code
             # toolset — Bash, Write, Edit — and a voice assistant that can
@@ -266,10 +287,23 @@ class Brain:
         mcp_servers: dict | None = None,
         extra_tools: list[str] | None = None,
     ) -> None:
+        async with self._turn_lock:
+            await self._connect_locked(mcp_servers, extra_tools)
+
+    async def _connect_locked(
+        self,
+        mcp_servers: dict | None = None,
+        extra_tools: list[str] | None = None,
+    ) -> None:
+        """The actual connect; callers must hold the turn lock."""
         if self._client is not None:
             return
+        # Remembered so rotation can rebuild the client without the pipeline
+        # having to re-thread them.
+        self._mcp_servers = mcp_servers if mcp_servers is not None else self._mcp_servers
+        self._extra_tools = extra_tools if extra_tools is not None else self._extra_tools
         self._client = ClaudeSDKClient(
-            options=self._build_options(mcp_servers, extra_tools)
+            options=self._build_options(self._mcp_servers, self._extra_tools)
         )
         await self._client.connect()
         log.info("brain connected (model=%s)", self._brain_config.model)
@@ -279,6 +313,31 @@ class Brain:
             await self._client.disconnect()
             self._client = None
             self._needs_drain = False  # nothing stale survives a new client
+
+    async def rotate(self) -> None:
+        """Retire the current session and start a clean one.
+
+        Post-rotate invariant: a new SDK session; no resumable reference to
+        the old one; fresh memory and project indexes in the system prompt.
+        """
+        async with self._turn_lock:
+            if self._client is None:
+                return
+            await self._client.disconnect()
+            self._client = None
+            self._needs_drain = False
+            # Reflection (or any turn) may have persisted the current session
+            # again minutes ago — well inside the resume window. Rotation
+            # intentionally breaks conversational continuity, so the
+            # persisted resume state must be cleared before reconnecting;
+            # otherwise the reconnect resumes the very session this method
+            # exists to discard. Not redundant. Do not remove.
+            self._sessions.clear()
+            self._lifetime_cost += self._session_cost
+            self._session_cost = 0.0
+            self._session_id = None
+            await self._connect_locked()
+            log.info("session rotated (lifetime cost $%.4f)", self._lifetime_cost)
 
     async def interrupt(self) -> None:
         """Abort the turn in flight, so a barge-in doesn't leave the model
@@ -301,20 +360,28 @@ class Brain:
         Yields whole sentences rather than raw deltas because that's the unit
         the speech synthesizer needs — half a sentence has the wrong prosody
         and lands as a stutter.
+
+        Holds the turn lock for its whole lifetime, which puts an obligation
+        on every consumer: if you stop iterating early, you MUST close the
+        generator (``async with contextlib.aclosing(brain.ask(...))``).
+        An abandoned generator keeps the lock until garbage collection gets
+        around to finalizing it, and everything that needs a turn —
+        including the next user question — deadlocks behind it.
         """
-        if self._client is None:
-            await self.connect()
-        assert self._client is not None
-
-        await self._drain_stale()
-        await self._client.query(text)
-
         buffer = ""
         spoken_any = False
         saw_result = False
         last_kind: str | None = None
 
+        await self._turn_lock.acquire()
         try:
+            if self._client is None:
+                await self._connect_locked()
+            assert self._client is not None
+
+            await self._drain_stale()
+            await self._client.query(text)
+
             async for message in self._client.receive_response():
                 if isinstance(message, StreamEvent):
                     kind, delta = _delta(message)
@@ -348,30 +415,48 @@ class Brain:
                 elif isinstance(message, ResultMessage):
                     saw_result = True
                     self._record_result(message)
+
+            # Whatever is left has no terminal punctuation but still needs
+            # saying. Inside the lock scope: this yield is part of the turn.
+            tail = buffer.strip()
+            if tail:
+                yield _label(last_kind), tail
         finally:
             # Abandoned mid-stream (barge-in): the rest of this turn's
             # messages — including its terminal ResultMessage — are still
             # queued, and receive_response() stops at the first ResultMessage
             # it sees, so they would otherwise be consumed as the start of the
-            # *next* turn's response.
+            # *next* turn's response. Runs promptly only because consumers
+            # close the generator (see the docstring) — that close is also
+            # what releases the lock.
             if not saw_result:
                 self._needs_drain = True
+            self._turn_lock.release()
 
-        # Whatever is left has no terminal punctuation but still needs saying.
-        tail = buffer.strip()
-        if tail:
-            yield _label(last_kind), tail
+    async def reflect(self, prompt: str) -> None:
+        """One silent turn: send the prompt, discard everything it says.
+
+        Serialized with user turns by the same lock, because it *is* a turn —
+        the model may call memory and project tools. Consuming the stream to
+        exhaustion is the point: even a reflection hastened by interrupt()
+        ends at its own ResultMessage, so the next user turn starts clean
+        with no drain debt.
+        """
+        async with aclosing(self.ask(prompt)) as stream:
+            async for _kind, _sentence in stream:
+                pass
 
     def _record_result(self, message: ResultMessage) -> None:
         if message.session_id:
             self._session_id = message.session_id
             self._sessions.save(message.session_id)
         if message.total_cost_usd:
-            # Cumulative for the session, so assign rather than add.
+            # Cumulative for the current session, so assign rather than add;
+            # rotation resets the session baseline, never this math.
             self._last_turn_cost = max(
-                0.0, message.total_cost_usd - self._total_cost
+                0.0, message.total_cost_usd - self._session_cost
             )
-            self._total_cost = message.total_cost_usd
+            self._session_cost = message.total_cost_usd
         if message.is_error:
             log.error("turn failed: %s", message.result or message.errors)
 

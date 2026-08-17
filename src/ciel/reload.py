@@ -1,7 +1,7 @@
 """Hot reload — pick up code changes without anyone restarting Ciel by hand.
 
-Codename: **Touch-and-Go** — lands, swaps code, takes off with the session
-intact.
+Codename: **Analytic Continuation** — the same conversation extended onto a
+new domain, agreeing with the old one everywhere they overlap.
 
 True in-process reloading (importlib.reload) is a minefield for a system like
 this: a running asyncio loop, loaded models, live audio streams, and object

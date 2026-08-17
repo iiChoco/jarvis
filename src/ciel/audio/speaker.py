@@ -1,6 +1,7 @@
 """Speaker verification — Ciel answers its enrolled user and nobody else.
 
-Codename: **IFF** — identification friend or foe.
+Codename: **Eigenvoice** — a voice identified by its characteristic
+components.
 
 Every captured utterance is embedded (CAM++ speaker model via sherpa-onnx,
 ~30 ms on CPU) and cosine-compared against the enrolled profile *before*

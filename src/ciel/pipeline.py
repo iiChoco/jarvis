@@ -9,10 +9,11 @@ frame means completely different things depending on where we are: before the
 wake word it's noise to be scored, during an utterance it's speech to be
 buffered, and while Ciel is talking it's a possible interruption.
 
-Three of this file's behaviors carry codenames: **Holding Pattern** (the
-filler hold — a trailing "um…" keeps the mic circling), **Break-Break**
-(barge-in, the radio phrase for interrupting a transmission), and **Open
-Channel** (the follow-up window — no callsign needed for a reply).
+Three of this file's behaviors carry codenames: **Cauchy** (the filler hold —
+a trailing "um…" means the tail hasn't settled yet, so don't declare the
+sequence finished), **Discontinuity** (barge-in — a jump that ends the
+current segment), and **Neighborhood** (the follow-up window — an open ball
+around the last turn, inside which no wake word is required).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import math
 import random
 import re
 import time
+from contextlib import aclosing
 from enum import Enum, auto
 
 import numpy as np
@@ -33,6 +35,7 @@ from ciel.audio.speaker import build_speaker_gate
 from ciel.audio.vad import Endpointer
 from ciel.audio.wake import WakeDetector, build_wake_detector
 from ciel.brain.agent import Brain
+from ciel.brain.prompt import REFLECTION_PROMPT
 from ciel.brain.tools import build_tool_server
 from ciel.config import SAMPLE_RATE, Config
 from ciel.confirm import VoiceConfirmBroker
@@ -73,6 +76,48 @@ def build_tts(config: Config) -> TextToSpeech:
     return SayTTS(config.tts)
 
 
+class IdleSchedule:
+    """Arms Closure and rotation when a spoken conversation ends.
+
+    Pure timer logic, injectable clock via the ``now`` arguments, so the
+    probe can drive it without waiting ten real minutes.
+
+    The invariant: reflection gets one *opportunity* before rotation, and
+    rotation is guaranteed regardless of how reflection went. ``due()``
+    tracks reflect-*attempted*, never reflect-*succeeded* — a failed or
+    timed-out reflection still counts as consumed, because a schedule that
+    waits for a successful reflection is a schedule that can quietly
+    recreate the permanent-session problem rotation exists to end.
+    """
+
+    def __init__(self, reflect_delay_s: float | None, rotate_delay_s: float) -> None:
+        self._reflect_delay = reflect_delay_s
+        self._rotate_delay = rotate_delay_s
+        self._reflect_at: float | None = None
+        self._rotate_at: float | None = None
+
+    def conversation_ended(self, now: float) -> None:
+        """Re-arms both deadlines — rotation is always relative to the
+        *latest* conversation, not the first."""
+        self._reflect_at = (
+            now + self._reflect_delay if self._reflect_delay is not None else None
+        )
+        self._rotate_at = now + self._rotate_delay
+
+    def due(self, now: float) -> str | None:
+        if self._reflect_at is not None and now >= self._reflect_at:
+            self._reflect_at = None
+            return "reflect"
+        if (
+            self._rotate_at is not None
+            and self._reflect_at is None
+            and now >= self._rotate_at
+        ):
+            self._rotate_at = None
+            return "rotate"
+        return None
+
+
 class Pipeline:
     """Runs Ciel until stopped."""
 
@@ -87,11 +132,10 @@ class Pipeline:
         # Custom tools (memory today, whatever lands in the registry later) are
         # assembled before the brain, because the memory index they expose has
         # to be baked into the system prompt at connect time.
-        self._mcp_servers, self._custom_tools, self._memory, self._journal = (
+        self._mcp_servers, self._custom_tools, self._memory, self._projects, self._journal = (
             build_tool_server(config)
         )
-        memory_index = self._memory.index_prompt() if self._memory else None
-        if memory_index:
+        if self._memory is not None and self._memory.all():
             log.info("loaded %d memories", len(self._memory.all()))
 
         self._indicator: Indicator = build_indicator(config.ui)
@@ -99,11 +143,15 @@ class Pipeline:
         # someone calls ask(), and the brain only builds a ShellGuard around
         # it when config.shell.enabled says to.
         self._confirm = VoiceConfirmBroker(config)
+        # Bound methods, not strings: the brain re-reads these at every
+        # connect, so a rotated session's prompt carries whatever the last
+        # reflection wrote.
         self._brain = Brain(
             config,
-            memory_index=memory_index,
+            memory_index_provider=self._memory.index_prompt if self._memory else None,
             confirmer=self._confirm.ask,
             journal=self._journal,
+            projects_index_provider=self._projects.index_prompt if self._projects else None,
         )
         self._transcript: Transcript | None = (
             Transcript(config.transcripts.dir) if config.transcripts.enabled else None
@@ -114,8 +162,17 @@ class Pipeline:
         self._noise_floor: float | None = None
         self._followup_until: float | None = None
         self._spoke = False
+        self._conversed = False  # any speech since the last WAITING — outlives _spoke
         self._pending_text: str | None = None
         self._continue_listening = False
+
+        self._schedule = IdleSchedule(
+            config.reflection.idle_delay_s if config.reflection.enabled else None,
+            config.brain.resume_window_minutes * 60,
+        )
+        self._maintenance: asyncio.Task[None] | None = None
+        """Closure/rotation in flight. Deliberately not the ``turn`` variable:
+        turns re-raise via turn.result(); maintenance swallows its failures."""
 
         self._watcher: SourceWatcher | None = (
             SourceWatcher(default_roots(config.state_dir))
@@ -164,6 +221,15 @@ class Pipeline:
                         # from under a conversation in progress.
                         if self._watcher is not None and self._watcher.changed:
                             print(f"\nsource changed ({self._watcher.changed.name}) — reloading")
+                            # Let maintenance land first: re-exec'ing while
+                            # rotate() is mid-connect leaves a half-built SDK
+                            # subprocess behind. Bounded — a hung task is
+                            # cancelled rather than blocking the reload.
+                            if self._maintenance is not None and not self._maintenance.done():
+                                try:
+                                    await asyncio.wait_for(self._maintenance, timeout=10.0)
+                                except (asyncio.TimeoutError, asyncio.CancelledError):
+                                    self._maintenance.cancel()
                             try:
                                 await player.play(self._tts.stream("Reloading."))
                             except Exception:  # noqa: BLE001
@@ -171,10 +237,34 @@ class Pipeline:
                             self.reload_requested = True
                             break
 
+                        # Idle is when maintenance runs — Closure shortly
+                        # after a conversation ends, rotation when the thread
+                        # has been silent past the resume window. Same
+                        # only-from-idle reasoning as the reload above.
+                        if self._maintenance is not None and self._maintenance.done():
+                            self._maintenance = None  # _run_* swallow their errors
+                        if self._maintenance is None:
+                            due = self._schedule.due(time.monotonic())
+                            if due == "reflect":
+                                self._maintenance = asyncio.create_task(
+                                    self._run_reflection()
+                                )
+                            elif due == "rotate":
+                                self._maintenance = asyncio.create_task(
+                                    self._run_rotation()
+                                )
+
                         # Only sampled here: while idle and silent, what the
                         # microphone hears is the room itself.
                         self._track_noise_floor(frame)
                         if self._wake.push(frame):
+                            if self._maintenance is not None and not self._maintenance.done():
+                                # Hasten an in-flight reflection (it still
+                                # consumes to its ResultMessage, so no drain
+                                # debt); a rotation just finishes — either
+                                # way the user's turn serializes on the
+                                # brain's lock, masked by the ack.
+                                await self._brain.interrupt()
                             await self._acknowledge(player, mic)
                             self._enter_listening()
 
@@ -225,6 +315,8 @@ class Pipeline:
             # and leaving it unresolved would hang brain.close() in shutdown.
             self._confirm.cancel("shutting down")
             self._confirm.unbind()
+            if self._maintenance is not None and not self._maintenance.done():
+                self._maintenance.cancel()
             if turn is not None and not turn.done():
                 turn.cancel()
             await self._shutdown()
@@ -343,46 +435,52 @@ class Pipeline:
         self._interrupted = False
 
         prev_kind: str | None = None
-        async for kind, sentence in self._brain.ask(text):
-            if self._interrupted:
-                break
+        # aclosing is load-bearing, not tidiness: ask() holds the brain's
+        # turn lock, and a `break` below abandons the generator — without an
+        # explicit close, the lock stays held until garbage collection, and
+        # the next turn (or a reflection) deadlocks behind it.
+        async with aclosing(self._brain.ask(text)) as stream:
+            async for kind, sentence in stream:
+                if self._interrupted:
+                    break
 
-            if first_spoken is None:
-                first_spoken = time.monotonic() - started
+                if first_spoken is None:
+                    first_spoken = time.monotonic() - started
 
-            if kind == "thinking":
-                print(f"  ciel (thinking): {sentence}")
-                self._record("ciel-thinking", sentence)
-                self._indicator.set_state("reasoning")
-            else:
-                if prev_kind == "thinking" and self._config.brain.thinking_chime:
-                    # The audible boundary: reasoning is over, what follows
-                    # is the answer.
-                    await self._play_chime(player)
-                print(f"  ciel: {sentence}")
-                self._record("ciel", sentence)
-                self._indicator.set_state("speaking")
-            prev_kind = kind
+                if kind == "thinking":
+                    print(f"  ciel (thinking): {sentence}")
+                    self._record("ciel-thinking", sentence)
+                    self._indicator.set_state("reasoning")
+                else:
+                    if prev_kind == "thinking" and self._config.brain.thinking_chime:
+                        # The audible boundary: reasoning is over, what follows
+                        # is the answer.
+                        await self._play_chime(player)
+                    print(f"  ciel: {sentence}")
+                    self._record("ciel", sentence)
+                    self._indicator.set_state("speaking")
+                prev_kind = kind
 
-            completed = await player.play(self._tts.stream(sentence))
-            self._spoke = True
-            # Back to "thinking" between sentences: the model is still
-            # generating, and leaving it on "speaking" during the gap would
-            # misreport what Ciel is actually doing.
-            self._indicator.set_state("thinking")
+                completed = await player.play(self._tts.stream(sentence))
+                self._spoke = True
+                self._conversed = True
+                # Back to "thinking" between sentences: the model is still
+                # generating, and leaving it on "speaking" during the gap would
+                # misreport what Ciel is actually doing.
+                self._indicator.set_state("thinking")
 
-            if not completed:
-                # The user talked over us. Everything still queued behind
-                # this sentence is a reply to a question they've moved on
-                # from, so abandon the turn rather than finishing it. A
-                # confirmation racing in from this dying turn's hook is
-                # resolved to deny for the same reason.
-                self._interrupted = True
-                self._confirm.cancel("interrupted")
-                await self._brain.interrupt()
-                print("  (interrupted)")
-                self._record("event", "interrupted")
-                break
+                if not completed:
+                    # The user talked over us. Everything still queued behind
+                    # this sentence is a reply to a question they've moved on
+                    # from, so abandon the turn rather than finishing it. A
+                    # confirmation racing in from this dying turn's hook is
+                    # resolved to deny for the same reason.
+                    self._interrupted = True
+                    self._confirm.cancel("interrupted")
+                    await self._brain.interrupt()
+                    print("  (interrupted)")
+                    self._record("event", "interrupted")
+                    break
 
         if first_spoken is not None:
             log.info(
@@ -540,6 +638,39 @@ class Pipeline:
         self._followup_until = None
         self._pending_text = None  # a held thought never outlives listening
         self._indicator.set_state("idle")
+        if self._conversed:
+            # A real conversation just ended: arm Closure and the rotation
+            # clock. _conversed (not _spoke, which resets per turn and can be
+            # False after a trailing noise blip) is consumed here so a later
+            # false wake — which also funnels through this method — can't
+            # re-arm and reflect the same conversation twice.
+            self._schedule.conversation_ended(time.monotonic())
+            self._conversed = False
+
+    async def _run_reflection(self) -> None:
+        """One silent Closure turn; failures are logged shrugs, never crashes."""
+        print("\n  [reflecting]", flush=True)
+        self._record("event", "reflection")
+        try:
+            # Suppressed confirmations: nobody is listening, so a stray
+            # confirm-tier tool call inside the reflection denies silently
+            # instead of voicing a question into an empty room.
+            with self._confirm.suppress():
+                await asyncio.wait_for(
+                    self._brain.reflect(REFLECTION_PROMPT),
+                    timeout=self._config.reflection.timeout_s,
+                )
+        except Exception:  # noqa: BLE001 - reflection is best-effort
+            log.debug("reflection failed", exc_info=True)
+
+    async def _run_rotation(self) -> None:
+        """Retire the idle session; the next conversation starts clean."""
+        try:
+            await self._brain.rotate()
+            print("\n  [fresh session]", flush=True)
+            self._record("event", "session rotated")
+        except Exception:  # noqa: BLE001 - ask() reconnects on demand anyway
+            log.exception("rotation failed")
 
     def _announce_ready(self) -> None:
         mode = self._config.wake.mode

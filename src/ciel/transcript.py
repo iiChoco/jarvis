@@ -1,6 +1,6 @@
 """Conversation transcripts — a local record of everything said.
 
-Codename: **CVR** — the cockpit voice recorder, literally.
+Codename: **Trace** — the record of the path actually taken.
 
 One CSV file per conversation rather than one ever-growing log: a conversation
 is the natural unit to read back, grep, or delete, and per-file layout means

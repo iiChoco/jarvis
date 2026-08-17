@@ -1,6 +1,6 @@
 """Durable memory — facts that outlive the conversation they were learned in.
 
-Codename: **Logbook**.
+Codename: **Invariant** — what survives every session transformation.
 
 This is the deeper half of memory. Session resume (see ``brain/session.py``)
 picks up a thread you were already on; this is what lets Ciel know your name
@@ -21,6 +21,7 @@ files is far cheaper than the class of bug that avoids.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 import unicodedata
@@ -68,6 +69,16 @@ class Memory:
             "---\n\n"
             f"{self.content.strip()}\n"
         )
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Write via temp-file-and-replace, so a crash mid-write can't leave a
+    half-written file. These files are the truth their stores read back;
+    "mostly written" is worse than "previous version". Same pattern as the
+    session store, shared here for every file-backed store to use."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def slugify(text: str, *, max_length: int = 60) -> str:
@@ -210,7 +221,7 @@ class MemoryStore:
         )
 
         self._dir.mkdir(parents=True, exist_ok=True)
-        path.write_text(memory.to_markdown(), encoding="utf-8")
+        atomic_write(path, memory.to_markdown())
         self._write_human_index()
         log.info("%s memory: %s", "updated" if existing else "saved", name)
         return memory
@@ -317,7 +328,7 @@ class MemoryStore:
                 lines.append(f"- [{memory.description}]({memory.path.name})")
             lines.append("")
 
-        (self._dir / "MEMORY.md").write_text("\n".join(lines), encoding="utf-8")
+        atomic_write(self._dir / "MEMORY.md", "\n".join(lines))
 
 
-__all__ = ["MemoryStore", "Memory", "MemoryKind", "VALID_KINDS", "slugify"]
+__all__ = ["MemoryStore", "Memory", "MemoryKind", "VALID_KINDS", "slugify", "atomic_write"]

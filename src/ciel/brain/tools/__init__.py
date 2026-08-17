@@ -27,17 +27,19 @@ from ciel.brain.tools.actions import ACTION_TOOLS, bind_journal
 from ciel.brain.tools.memory import MEMORY_TOOLS, bind_store
 from ciel.brain.tools.messages import MESSAGE_TOOLS, SEND_TOOLS
 from ciel.brain.tools.messages import bind_client as bind_messages
+from ciel.brain.tools.projects import PROJECT_TOOLS, bind_projects
 from ciel.config import Config, MCPServerConfig
 from ciel.journal import ActionJournal
 from ciel.memory.store import MemoryStore
 from ciel.messages import MessagesClient
+from ciel.projects import ProjectStore
 
 log = logging.getLogger(__name__)
 
 SERVER_NAME = "ciel"
 
 # Every custom tool Ciel can call. Append to this list to add a capability.
-TOOLS = [*MEMORY_TOOLS, *MESSAGE_TOOLS, *ACTION_TOOLS]
+TOOLS = [*MEMORY_TOOLS, *MESSAGE_TOOLS, *ACTION_TOOLS, *PROJECT_TOOLS]
 
 
 def _qualified(tool_name: str) -> str:
@@ -64,16 +66,20 @@ def _external_server(entry: MCPServerConfig) -> dict[str, Any] | None:
 
 def build_tool_server(
     config: Config,
-) -> tuple[dict[str, Any], list[str], MemoryStore | None, ActionJournal | None]:
+) -> tuple[
+    dict[str, Any], list[str], MemoryStore | None, ProjectStore | None, ActionJournal | None
+]:
     """Assemble Ciel's MCP servers: the in-process one plus external connectors.
 
     Returns the ``mcp_servers`` mapping, the tool names to add to
-    ``allowed_tools``, the memory store (so the caller can build the index
-    for the system prompt), and the action journal (so the brain can hook
-    its recorder up to the same instance this registry's tool reads).
+    ``allowed_tools``, the memory and project stores (so the caller can wire
+    their index providers into the system prompt), and the action journal
+    (so the brain can hook its recorder up to the same instance this
+    registry's tool reads).
     """
     store: MemoryStore | None = None
     journal: ActionJournal | None = None
+    projects: ProjectStore | None = None
     tools = list(TOOLS)
 
     if config.memory.enabled:
@@ -84,6 +90,18 @@ def build_tool_server(
         # call, which wastes a turn and confuses the model. Better to not offer
         # them at all.
         tools = [t for t in tools if t not in MEMORY_TOOLS]
+
+    if config.projects.enabled:
+        projects = ProjectStore(
+            config.projects.dir,
+            config.projects.max_index_entries,
+            config.projects.max_state_chars,
+            config.projects.log_tail,
+        )
+        bind_projects(projects)
+    else:
+        # Same reasoning as memory: an always-unavailable tool wastes turns.
+        tools = [t for t in tools if t not in PROJECT_TOOLS]
 
     if config.journal.enabled:
         journal = ActionJournal(config.journal)
@@ -148,7 +166,7 @@ def build_tool_server(
 
     if allowed:
         log.debug("allowed tools: %s", ", ".join(allowed))
-    return servers, allowed, store, journal
+    return servers, allowed, store, projects, journal
 
 
 __all__ = ["TOOLS", "SERVER_NAME", "build_tool_server"]

@@ -1,4 +1,4 @@
-"""Enroll, grow, and tune the IFF voice profile.
+"""Enroll, grow, and tune the Eigenvoice profile.
 
     uv run python scripts/enroll_voice.py             # fresh enrollment, varied takes
     uv run python scripts/enroll_voice.py --add       # append 3 more takes

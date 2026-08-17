@@ -1,7 +1,7 @@
 """The connector gate: spoken confirmation for outward-acting MCP tools.
 
-Codename: **Tower Clearance**, ground-crew division — the connectors service
-the aircraft, but departures still clear through the tower.
+Codename: **Proof Obligation**, connector side — reading a calendar is free,
+but anything that acts on the world still owes a discharge.
 
 Connector tools run under ``permission_mode="dontAsk"``, which is fine for
 reading a calendar and indefensible for sending mail off a misheard sentence.

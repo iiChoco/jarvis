@@ -1,7 +1,8 @@
 """Tool permission guards.
 
-Codename: **Geofence** (the workspace boundary) and the **No-Fly List**
-(``FORBIDDEN_NAMES`` — grounded even if you say yes).
+Codename: **Compact Support** (the workspace boundary — identically zero
+outside it) and **Singularities** (``FORBIDDEN_NAMES`` — points where Ciel is
+simply undefined, however much you insist).
 
 Ciel's threat model is unusual enough to be worth stating plainly, because it
 is why this file exists rather than just adding ``Write`` to a list.

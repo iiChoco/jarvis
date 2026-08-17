@@ -1,6 +1,6 @@
 """Hooks that feed the action journal.
 
-Codename: **Black Box**, sensor side — the instruments that write the tape.
+Codename: **Inverse**, construction side — what records enough to invert.
 
 Two hooks around every watched tool call: PreToolUse snapshots the target of
 a file edit *before* it changes, PostToolUse writes the journal entry once the

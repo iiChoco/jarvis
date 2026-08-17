@@ -30,7 +30,7 @@ dependencies = [
 [project.optional-dependencies]
 # Better-sounding TTS than macOS `say`. Optional so v1 runs with zero downloads.
 piper = ["piper-tts>=1.7.0"]
-# Speaker verification (the IFF gate): embeds utterances with an ONNX
+# Speaker verification (the Eigenvoice gate): embeds utterances with an ONNX
 # speaker model so Ciel can tell the enrolled voice from anyone else's.
 # Optional for the same reason piper is — Ciel runs without it, just
 # without the gate. Pinned below 1.11: the 1.11+ macOS wheels ship without

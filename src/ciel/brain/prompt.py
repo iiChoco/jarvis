@@ -231,12 +231,35 @@ Say that plainly, and offer the nearest real remedy — a follow-up correction,
 usually — instead of pretending."""
 
 
+REFLECTION_PROMPT = """\
+(Automatic check-in — this is not the user speaking, and no one will hear \
+your reply. The conversation appears to be over. Before it fades, commit \
+anything durable to long-term memory.
+
+Review what was said. Save each new durable fact — things about the user, \
+decisions made, preferences expressed, people and plans that will matter in \
+future conversations — one memory per fact. If an existing memory represents \
+the same fact, update that memory using the EXACT description shown in your \
+memory index, so it overwrites rather than duplicating; do not create a \
+semantically duplicate memory under a newly-worded description. Use forget \
+only for memories that are now simply wrong. If an ongoing project moved, \
+update its state with update_project or add a log_progress entry.
+
+Do not save small talk, one-off details, or anything shared in confidence \
+for this conversation only. Take no other actions — no messages, no \
+calendar, no files, no searches.
+
+If nothing durable came up, save nothing. Either way, reply with one short \
+plain sentence saying what you did.)"""
+
+
 def build_system_prompt(
     memory_index: str | None = None,
     workspace: str | None = None,
     shell: bool = False,
     confirmed_actions: bool = False,
     undo: bool = False,
+    projects_index: str | None = None,
 ) -> str:
     """Assemble the full system prompt.
 
@@ -258,6 +281,9 @@ def build_system_prompt(
     if undo:
         sections.append(UNDO)
 
+    if projects_index:
+        sections.append(projects_index)
+
     if memory_index:
         sections.append(memory_index)
 
@@ -266,6 +292,7 @@ def build_system_prompt(
 
 __all__ = [
     "build_system_prompt",
+    "REFLECTION_PROMPT",
     "IDENTITY",
     "SPEECH_RULES",
     "RESEARCH_RUBRIC",

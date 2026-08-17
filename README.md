@@ -30,26 +30,30 @@ Say **"hey jarvis"**, then talk.
 
 ## The protocols
 
-Ciel means *sky*, so the subsystems fly under air-traffic-control codenames.
-The identifiers in the code stay literal (`WorkspaceGuard` is a
-`WorkspaceGuard`); these are the names the docs — and you — get to use.
+The subsystems carry mathematical codenames. The identifiers in the code
+stay literal (`WorkspaceGuard` is a `WorkspaceGuard`); these are the names
+the docs — and you — get to use.
 
 | Codename | System |
 |---|---|
-| **Tower Clearance** | The voice-confirmation gate (`confirm.py`, `shellguard.py`, `toolguard.py`) — nothing side-effectful takes off without a spoken "cleared" |
-| **Flight Rules** | The shell's three tiers — no-fly / VFR (quiet) / IFR (clearance required) |
-| **No-Fly List** | `FORBIDDEN_NAMES` — credentials and startup files, grounded even if you say yes |
-| **Geofence** | The workspace guard — every path resolved and checked against the fence |
-| **Ground Crew** | The MCP connectors — Gmail, Calendar, servicing from outside the cockpit |
-| **Black Box** | The action journal and snapshots (`journal.py`, `recorder.py`) — the flight data recorder undo works from |
-| **CVR** | Conversation transcripts — the cockpit voice recorder, literally |
-| **IFF** | Speaker verification — Ciel answers the enrolled voice and nobody else |
-| **Callsign** | The wake word |
-| **Holding Pattern** | The filler hold — a trailing "um…" keeps the mic circling |
-| **Break-Break** | Barge-in — the radio phrase for cutting into a transmission |
-| **Touch-and-Go** | Autoreload — lands, swaps code, takes off with the session intact |
-| **Open Channel** | The follow-up window — no callsign needed for a reply |
-| **Logbook** | Long-term memory |
+| **Proof Obligation** | The voice-confirmation gate (`confirm.py`, `shellguard.py`, `toolguard.py`) — nothing side-effectful proceeds without a spoken proof |
+| **Trichotomy** | The shell's three tiers — deny / quiet / confirm, every command in exactly one |
+| **Compact Support** | The workspace guard and `FORBIDDEN_NAMES` — file access vanishes outside a bounded region |
+| **Inverse** | The action journal and snapshots (`journal.py`, `recorder.py`) — kept so operations can be run backwards |
+| **Trace** | Conversation transcripts — the record of the path actually taken |
+| **Eigenvoice** | Speaker verification — a voice identified by its characteristic components |
+| **Characteristic** | The wake word — membership test for "being addressed" |
+| **Cauchy** | The filler hold — a trailing "um…" means the sequence hasn't converged |
+| **Discontinuity** | Barge-in — a jump that ends the current segment |
+| **Analytic Continuation** | Autoreload — the process is replaced, the conversation extends through it |
+| **Neighborhood** | The follow-up window — an open ball around the last turn, no wake word inside |
+| **Invariant** | Long-term memory — what survives every session transformation |
+| **Closure** | End-of-conversation reflection — capturing the limit points before the session is discarded |
+| **Atlas** | Projects — durable charts of ongoing work, with an index that says which chart to open |
+
+Closure and Atlas together are the continuity design (the "loving partner
+protocol"): sessions are deliberately short-lived, and continuity comes from
+what Ciel chooses to remember, not from an ever-growing context.
 
 ## Setup
 
@@ -86,7 +90,7 @@ environment variables for one-off runs.
 ```toml
 [brain]
 model = "claude-opus-5"      # "claude-sonnet-5" is ~3x cheaper and faster
-resume_window_hours = 12.0   # resume the last conversation if newer than this
+resume_window_minutes = 10.0  # silence beyond this rotates to a fresh session
 
 [stt]
 model = "small.en"           # base.en is 3x faster and noticeably worse
@@ -201,7 +205,7 @@ correspondingly thorough. Refused anywhere under home:
 Everything else under home is fair game, including every repo you have checked
 out — Ciel can edit her own source at `~/jarvis`.
 
-## Voice identity (IFF)
+## Voice identity (Eigenvoice)
 
 Off by default; needs a one-time enrollment. With it on, every utterance is
 embedded by a local speaker model (CAM++ via sherpa-onnx, ~30 ms on CPU) and
@@ -293,12 +297,20 @@ Ciel saves things it learns, without being asked, as one Markdown file per fact
 in `~/.ciel/memory/`. Open the directory to see exactly what it believes about
 you; delete a file to make it forget.
 
-Two mechanisms, deliberately separate:
+Three mechanisms, deliberately separate:
 
-- **Conversation continuity** — resumes your last conversation if it's recent
-  (12 h by default). This is what `--new` skips.
-- **Durable knowledge** — outlives any session. A conversation eventually gets
-  compacted and its details dissolve; these files don't.
+- **Conversation continuity** — a thread survives 10 minutes of silence
+  (resume across restarts included); past that the session is rotated away
+  and the next conversation starts on a clean, fast context. This is what
+  `--new` forces early.
+- **Durable knowledge (Invariant)** — outlives any session. About a minute
+  after each conversation ends, Ciel runs one silent reflection turn
+  (Closure — you'll see `[reflecting]` in the console) and commits anything
+  durable to these files while the session still remembers it.
+- **Projects (Atlas)** — durable working state for anything spanning
+  conversations, one file per project in `~/.ciel/projects/`. Say "let's get
+  back to the wake word project" and Ciel opens the file rather than trusting
+  its recollection; it updates the state and logs milestones as work moves.
 
 Only the one-line summaries go into the prompt each turn. Full contents load on
 demand, which is what keeps memory affordable as it grows.

@@ -1,6 +1,7 @@
 """The shell gate: command classification plus a voice-confirmed hook.
 
-Codename: **Flight Rules** — no-fly, VFR (quiet), or IFR (clearance required).
+Codename: **Trichotomy** — every command falls into exactly one of three
+classes: forbidden, allowed silently, or allowed once confirmed.
 
 The workspace guard next door confines paths; it cannot confine a shell,
 because a shell reaches any path by construction (``sh -c 'cat > ~/.zshrc'``).

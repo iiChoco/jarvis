@@ -1,7 +1,7 @@
 """Spoken yes-or-no confirmation, bridging a brain hook to the mic loop.
 
-Codename: **Tower Clearance** — nothing side-effectful takes off without a
-spoken "cleared".
+Codename: **Proof Obligation** — a side-effectful step is not permitted until
+its obligation has been discharged out loud.
 
 The tool guards — the shell gate, the connector gate, whatever fronts an
 outward-acting tool next — need to ask the user a question and hear the
@@ -34,8 +34,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextlib import contextmanager
 from enum import Enum, auto
-from typing import Callable
+from typing import Callable, Iterator
 
 import numpy as np
 
@@ -97,6 +98,7 @@ class VoiceConfirmBroker:
         self._lock = asyncio.Lock()
         self._cancelled = asyncio.Event()
         self._phase = _Phase.IDLE
+        self._suppressed = 0
         self._utterance: asyncio.Future[np.ndarray | None] | None = None
         self._barge_run = 0
 
@@ -161,6 +163,21 @@ class VoiceConfirmBroker:
         # WAIT_IDLE: dropped. The playing sentence belongs to _respond;
         # interrupting it here would read as barge-in and abandon the turn.
 
+    @contextmanager
+    def suppress(self) -> "Iterator[None]":
+        """Deny every confirmation inside the block, silently and instantly.
+
+        For turns with nobody listening — the reflection pass runs at idle,
+        and a stray confirm-tier tool call must not voice a question into an
+        empty room. A depth counter rather than a flag, so nested use and
+        exceptions can never leave suppression stuck on.
+        """
+        self._suppressed += 1
+        try:
+            yield
+        finally:
+            self._suppressed -= 1
+
     def cancel(self, reason: str = "") -> None:
         """Resolve any pending ask to deny, immediately.
 
@@ -182,6 +199,9 @@ class VoiceConfirmBroker:
         email to Sam — okay?" — because only the guard that built it knows
         what the action is. This broker owns the choreography, not the words.
         """
+        if self._suppressed:
+            log.info("confirmation suppressed (nobody listening): %s", question)
+            return False
         if self._player is None or self._mic is None or self._stt is None or self._tts is None:
             return False
         if self._lock.locked():
