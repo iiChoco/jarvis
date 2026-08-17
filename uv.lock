@@ -131,6 +131,9 @@ dependencies = [
 piper = [
     { name = "piper-tts" },
 ]
+voice = [
+    { name = "sherpa-onnx" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -141,10 +144,11 @@ requires-dist = [
     { name = "openwakeword", specifier = ">=0.6.0" },
     { name = "piper-tts", marker = "extra == 'piper'", specifier = ">=1.7.0" },
     { name = "pyobjc-framework-cocoa", specifier = ">=10.1" },
+    { name = "sherpa-onnx", marker = "extra == 'voice'", specifier = ">=1.10,<1.11" },
     { name = "sounddevice", specifier = ">=0.5.1" },
     { name = "webrtcvad-wheels", specifier = ">=2.0.14" },
 ]
-provides-extras = ["piper"]
+provides-extras = ["piper", "voice"]
 
 [[package]]
 name = "claude-agent-sdk"
@@ -753,6 +757,20 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/6d/44/f5da03a8ef95d369145c5bb53050e7877c9f3d312e128605fd9504829143/setuptools-84.0.0.tar.gz", hash = "sha256:f4695c21257f0d9b537ec2692c941d02ee143b7cc1276941349a546573b2ef73", size = 1168449, upload-time = "2026-08-08T18:27:58.365Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl", hash = "sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670", size = 818216, upload-time = "2026-08-08T18:27:56.719Z" },
+]
+
+[[package]]
+name = "sherpa-onnx"
+version = "1.10.46"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e9/c8/7f7b36713686cbba8645e7644c589181ed6b77caaca96c1ce175e17e032c/sherpa-onnx-1.10.46.tar.gz", hash = "sha256:db8c79c088792a5b11b65b1abb2ca2f8185af10551e4b7fc788507844cc3e33a", size = 494730, upload-time = "2025-02-26T11:58:23.646Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/62/b6/3b8dd6c337cf57298da118466750a1391b77f9904ae02edfd9092ad4864b/sherpa_onnx-1.10.46-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:31502324777c42217f1e531f72825ddc2021e2aeb404c7f10ef44994c0f4c470", size = 17033060, upload-time = "2025-02-26T11:56:37.622Z" },
+    { url = "https://files.pythonhosted.org/packages/16/31/ce277ce9466fd7fd7cb379a3e56383f428def67cf953386dfa300bc26887/sherpa_onnx-1.10.46-cp312-cp312-macosx_11_0_universal2.whl", hash = "sha256:0835d231c489b782edde91939a7f541865ca34384ea8aa8f165122ef512ec2ae", size = 35280453, upload-time = "2025-02-26T12:13:24.805Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/6d/5f6dc96ac6a1cb4b200e3cbc127f0d7b60dd120d6416940286e27eb790cd/sherpa_onnx-1.10.46-cp312-cp312-macosx_11_0_x86_64.whl", hash = "sha256:a5a9c4036fc67d94e44aa8de87817fdf0d7525764171f5d048f80b438ca3ed77", size = 19338076, upload-time = "2025-02-26T12:27:44.125Z" },
+    { url = "https://files.pythonhosted.org/packages/12/f0/2c008cdfb07fd34e1f1add39bc179f286dbdcb0323371b1fbc0251bd8d5a/sherpa_onnx-1.10.46-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:6200ff583f55d15816672562b3c229ffd470b7e6cfcc717b42bba4fd958c734b", size = 17033144, upload-time = "2025-02-26T11:58:02.597Z" },
+    { url = "https://files.pythonhosted.org/packages/73/1e/04a88777e3da9d46d8b16400257fbef53fbf0280781cceed7e26c081d79e/sherpa_onnx-1.10.46-cp313-cp313-macosx_11_0_universal2.whl", hash = "sha256:3c2c7e13e559592d174785d0b26d27bfa0622d93588782ce69d89612d0476f7a", size = 35280525, upload-time = "2025-02-26T12:06:56.1Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/e6/d9775f048ed2f6e331ae3566bdd4b3dba0275e718e4396a2b3c8d4d77553/sherpa_onnx-1.10.46-cp313-cp313-macosx_11_0_x86_64.whl", hash = "sha256:de77f111db2d115adff5d0600741043f97fb11b57364c290dbab99eca8cfaecd", size = 19338082, upload-time = "2025-02-26T12:36:30.248Z" },
 ]
 
 [[package]]

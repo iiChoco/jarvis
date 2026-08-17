@@ -28,6 +28,7 @@ import numpy as np
 
 from ciel.audio.input import MicStream, float_to_pcm
 from ciel.audio.output import Player
+from ciel.audio.speaker import build_speaker_gate
 from ciel.audio.vad import Endpointer
 from ciel.audio.wake import WakeDetector, build_wake_detector
 from ciel.brain.agent import Brain
@@ -80,6 +81,7 @@ class Pipeline:
         self._tts: TextToSpeech = build_tts(config)
         self._wake: WakeDetector = build_wake_detector(config.wake)
         self._endpointer = Endpointer(config.audio)
+        self._speaker = build_speaker_gate(config.voice)
 
         # Custom tools (memory today, whatever lands in the registry later) are
         # assembled before the brain, because the memory index they expose has
@@ -248,6 +250,18 @@ class Pipeline:
         # ``turn.result()`` in the frame loop — taking down the whole
         # assistant instead of just this turn.
         try:
+            if utterance is not None and self._speaker is not None:
+                # Identity first, transcription second: a stranger's sentence
+                # costs one ~30 ms embedding and never reaches Whisper, the
+                # brain, or a follow-up window.
+                recognized, similarity = await self._speaker.check(utterance)
+                if not recognized:
+                    log.info("unrecognized voice (similarity %.2f)", similarity)
+                    print(f"\n  [unrecognized voice — ignored ({similarity:.2f})]",
+                          flush=True)
+                    self._record("event", f"unrecognized voice ({similarity:.2f})")
+                    return
+
             if utterance is not None:
                 heard = await self._stt.transcribe(utterance)
                 pending = self._pending_text
@@ -544,6 +558,8 @@ class Pipeline:
             self._indicator.start(),
             self._brain.connect(self._mcp_servers, self._custom_tools),
         ]
+        if self._speaker is not None:
+            startup.append(self._speaker.warm_up())
         if self._watcher is not None:
             startup.append(self._watcher.start())
         await asyncio.gather(*startup)
@@ -576,6 +592,8 @@ class Pipeline:
             self._brain.close(),
             self._indicator.close(),
         ]
+        if self._speaker is not None:
+            closers.append(self._speaker.close())
         if self._watcher is not None:
             closers.append(self._watcher.close())
         await asyncio.gather(*closers, return_exceptions=True)

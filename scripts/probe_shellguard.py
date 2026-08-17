@@ -11,6 +11,7 @@ fakes, the same way the pipeline itself is verified. Run it directly:
 from __future__ import annotations
 
 import asyncio
+import math
 import shutil
 import sys
 import tempfile
@@ -18,11 +19,17 @@ from pathlib import Path
 
 import numpy as np
 
+from ciel.audio.speaker import (
+    SpeakerGate,
+    build_speaker_gate,
+    load_profile,
+    save_profile,
+)
 from ciel.brain.recorder import ActionRecorder
 from ciel.brain.shellguard import ShellGuard, classify
 from ciel.brain.toolguard import ConfirmToolGuard, describe_call
 from ciel.brain.tools.actions import bind_journal, recent_actions
-from ciel.config import Config, JournalConfig, ShellConfig, load_config
+from ciel.config import Config, JournalConfig, ShellConfig, VoiceConfig, load_config
 from ciel.confirm import VoiceConfirmBroker, yes_no
 from ciel.journal import ActionJournal
 
@@ -372,6 +379,58 @@ async def main() -> None:
     check("pruning removed the dropped entry's snapshot",
           not Path(write_snapshot).exists())
     shutil.rmtree(tmp)
+
+    print("speaker gate (IFF):")
+    iff_tmp = Path(tempfile.mkdtemp(prefix="ciel-iff-"))
+    profile_path = iff_tmp / "profile.npz"
+
+    me = np.zeros(8, dtype=np.float32)
+    me[0] = 1.0
+    also_me = np.array([0.95, 0.1, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+    also_me /= np.linalg.norm(also_me)
+    stranger = np.zeros(8, dtype=np.float32)
+    stranger[1] = 1.0
+
+    save_profile(profile_path, [me, also_me])
+    mean = load_profile(profile_path)
+    check("profile round-trips normalized",
+          mean is not None and abs(float(np.linalg.norm(mean)) - 1.0) < 1e-5)
+
+    class FakeEncoder:
+        def __init__(self) -> None:
+            self.next = me
+
+        async def warm_up(self) -> None:
+            pass
+
+        def embed(self, pcm):
+            return self.next
+
+        async def close(self) -> None:
+            pass
+
+    voice_cfg = VoiceConfig(enabled=True, threshold=0.5, profile=profile_path)
+    encoder = FakeEncoder()
+    gate = SpeakerGate(voice_cfg, encoder)
+    await gate.warm_up()
+    one_second = np.zeros(16000, dtype=np.float32)
+    ok, sim = await gate.check(one_second)
+    check("enrolled voice passes", ok and sim > 0.9)
+    encoder.next = stranger
+    ok, sim = await gate.check(one_second)
+    check("stranger rejected", not ok and sim < 0.5)
+    ok, sim = await gate.check(np.zeros(4800, dtype=np.float32))  # 0.3 s
+    check("too-short utterance passes unjudged", ok and math.isnan(sim))
+
+    unenrolled = SpeakerGate(
+        VoiceConfig(enabled=True, profile=iff_tmp / "missing.npz"), FakeEncoder()
+    )
+    await unenrolled.warm_up()
+    ok, sim = await unenrolled.check(one_second)
+    check("no profile fails open", ok and math.isnan(sim))
+    check("disabled build returns None",
+          build_speaker_gate(VoiceConfig(enabled=False)) is None)
+    shutil.rmtree(iff_tmp)
 
     print("config:")
     with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:

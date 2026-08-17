@@ -43,6 +43,7 @@ The identifiers in the code stay literal (`WorkspaceGuard` is a
 | **Ground Crew** | The MCP connectors — Gmail, Calendar, servicing from outside the cockpit |
 | **Black Box** | The action journal and snapshots (`journal.py`, `recorder.py`) — the flight data recorder undo works from |
 | **CVR** | Conversation transcripts — the cockpit voice recorder, literally |
+| **IFF** | Speaker verification — Ciel answers the enrolled voice and nobody else |
 | **Callsign** | The wake word |
 | **Holding Pattern** | The filler hold — a trailing "um…" keeps the mic circling |
 | **Break-Break** | Barge-in — the radio phrase for cutting into a transmission |
@@ -199,6 +200,38 @@ correspondingly thorough. Refused anywhere under home:
 
 Everything else under home is fair game, including every repo you have checked
 out — Ciel can edit her own source at `~/jarvis`.
+
+## Voice identity (IFF)
+
+Off by default; needs a one-time enrollment. With it on, every utterance is
+embedded by a local speaker model (CAM++ via sherpa-onnx, ~30 ms on CPU) and
+compared against your enrolled profile *before* transcription — a stranger's
+sentence never reaches Whisper, the brain, or a follow-up window.
+
+```bash
+uv sync --extra voice
+uv run python scripts/enroll_voice.py          # record 4 phrases (Ciel stopped)
+uv run python scripts/enroll_voice.py --test   # score yourself live
+```
+
+```toml
+[voice]
+enabled = true
+# threshold = 0.5   # the enrollment script suggests a value measured on you
+```
+
+Measured with synthesized voices: the enrolled voice speaking a different
+sentence scores ~0.90; a different speaker on the same sentence ~0.18; a
+similar-sounding speaker ~0.48 — all correctly sorted at the 0.5 threshold.
+
+Honesty section: an embedding is a filter, not authentication. It turns away
+the TV, guests, and background chatter; it will not resist a recording of
+your voice, and a heavy cold moves your own score (lower the threshold that
+week). Utterances under 600 ms ("yes") pass unjudged — half a word embeds as
+noise — which is fine because they only matter inside a conversation your
+verified utterance already started. No profile enrolled? The gate fails open
+and says so at startup, because an identity filter that silently bricks the
+assistant is worse than the strangers it filters.
 
 ## Shell access
 

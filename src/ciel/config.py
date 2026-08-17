@@ -165,6 +165,50 @@ class WakeConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class VoiceConfig:
+    """Speaker verification — only the enrolled voice gets a response.
+
+    Codename IFF. Every utterance is embedded (~30 ms, local ONNX model) and
+    compared against the enrolled profile before transcription; strangers,
+    the TV, and background conversations are dropped silently. This is a
+    *filter*, not authentication — it will not resist a recording of your
+    voice — but combined with Tower Clearance it means a stranger can
+    neither start an action nor plausibly confirm one."""
+
+    enabled: bool = False
+    """Off by default because it needs enrollment first: run
+    ``scripts/enroll_voice.py``, then turn this on. Enabled without a
+    profile, the gate fails open and says so at startup — a filter that
+    silently bricks the assistant would be worse than the strangers it
+    filters."""
+
+    threshold: float = 0.5
+    """Cosine similarity against the enrolled profile at or above which an
+    utterance counts as you. CAM++ on VoxCeleb typically scores the same
+    speaker 0.55-0.75 and different speakers under 0.3, so 0.5 leaves margin
+    on both sides. The enrollment script measures *your* numbers and suggests
+    a value; raise it if others get through, lower it if Ciel ignores you
+    when you're hoarse."""
+
+    min_utterance_ms: int = 600
+    """Utterances shorter than this pass unjudged. Half a word embeds as
+    noise, and the short utterances that matter ("yes", "no") occur inside a
+    conversation your verified command already started."""
+
+    profile: Path = field(
+        default_factory=lambda: Path.home() / ".ciel" / "voice" / "profile.npz"
+    )
+    """Where enrollment lives: the per-phrase embeddings and their mean.
+    Delete the file to unenroll; re-running the script overwrites it."""
+
+    model: Path = field(
+        default_factory=lambda: Path.home() / ".ciel" / "models"
+        / "speaker_campplus_voxceleb_16k.onnx"
+    )
+    """The ONNX speaker model, downloaded here on first use (~28 MB)."""
+
+
+@dataclass(frozen=True, slots=True)
 class STTConfig:
     engine: Literal["faster-whisper"] = "faster-whisper"
 
@@ -557,6 +601,7 @@ class UIConfig:
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     wake: WakeConfig = field(default_factory=WakeConfig)
+    voice: VoiceConfig = field(default_factory=VoiceConfig)
     stt: STTConfig = field(default_factory=STTConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
@@ -584,6 +629,7 @@ class Config:
 _SECTIONS = {
     "audio": AudioConfig,
     "wake": WakeConfig,
+    "voice": VoiceConfig,
     "stt": STTConfig,
     "tts": TTSConfig,
     "brain": BrainConfig,
