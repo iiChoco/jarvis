@@ -150,10 +150,11 @@ and symlinks pointing out of the tree.
 Credentials and shell startup files (`.ssh`, `.env`, `.zshrc`, …) are refused
 even if they somehow appear inside the workspace.
 
-**Bash is never granted**, and that isn't an oversight. A shell walks straight
-around path confinement — `sh -c 'cat > ~/.zshrc'` — so allowing it would make
-the guard decorative. It's in `disallowed_tools` explicitly rather than merely
-left out, so a stray config edit can't quietly re-enable it.
+**Bash is guarded separately** — see the shell section below. A shell walks
+straight around path confinement — `sh -c 'cat > ~/.zshrc'` — so it never gets
+a place on the file allowlist. With `[shell]` disabled it sits in
+`disallowed_tools` explicitly rather than merely left out, so a stray config
+edit can't quietly re-enable it.
 
 > The check is a `PreToolUse` hook, not a `can_use_tool` callback. An entry in
 > `allowed_tools` auto-approves its tool *before* that callback is consulted,
@@ -176,6 +177,38 @@ correspondingly thorough. Refused anywhere under home:
 
 Everything else under home is fair game, including every repo you have checked
 out — Ciel can edit her own source at `~/jarvis`.
+
+## Shell access
+
+Off by default. Turn it on and Ciel can run shell commands — behind a voice
+gate that the model cannot bypass.
+
+```toml
+[shell]
+enabled = true
+```
+
+Every command is classified into one of three tiers:
+
+- **Denied outright**, even if you say yes: privilege escalation (`sudo`,
+  `launchctl`, `security`, `osascript`, …), anything touching credential or
+  shell-startup paths, `curl | sh` shapes, and recursive-forced `rm` aimed at
+  home or root. A "yes" to a misheard question must not be able to do these.
+- **Quietly allowed**: a conservative read-only allowlist (`git status`,
+  `git log`, `ls`, `pwd`, …) runs without asking. Configurable via
+  `auto_allow`; asking aloud for every status check would train you to say
+  yes reflexively.
+- **Confirmed**: everything else. Ciel reads the command aloud — *"Run: touch
+  notes dot txt — okay?"* — and waits for a spoken yes or no. Silence (about
+  eight seconds), a "no", or two unclear answers all refuse the command.
+
+The confirmation is enforced, not requested: it lives in a `PreToolUse` hook
+that blocks the tool call until the pipeline has captured and transcribed your
+answer, so neither a misheard instruction nor a prompt-injected web page can
+run a side-effectful command without your voiced yes. Commands the classifier
+can't see through — redirections, substitutions, backgrounding — always land
+in the confirm tier. `scripts/probe_shellguard.py` drives the whole
+choreography with fakes.
 
 ### macOS may block folders independently
 

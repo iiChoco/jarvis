@@ -28,6 +28,7 @@ from ciel.audio.wake import WakeDetector, build_wake_detector
 from ciel.brain.agent import Brain
 from ciel.brain.tools import build_tool_server
 from ciel.config import SAMPLE_RATE, Config
+from ciel.confirm import VoiceConfirmBroker
 from ciel.reload import SourceWatcher, default_roots
 from ciel.stt.base import SpeechToText
 from ciel.stt.local_whisper import WhisperSTT
@@ -84,7 +85,13 @@ class Pipeline:
             log.info("loaded %d memories", len(self._memory.all()))
 
         self._indicator: Indicator = build_indicator(config.ui)
-        self._brain = Brain(config, memory_index=memory_index)
+        # The broker exists even when the shell is disabled — it's inert until
+        # someone calls ask(), and the brain only builds a ShellGuard around
+        # it when config.shell.enabled says to.
+        self._confirm = VoiceConfirmBroker(config)
+        self._brain = Brain(
+            config, memory_index=memory_index, confirmer=self._confirm.ask
+        )
         self._transcript: Transcript | None = (
             Transcript(config.transcripts.dir) if config.transcripts.enabled else None
         )
@@ -114,6 +121,13 @@ class Pipeline:
 
         try:
             async with MicStream(self._config.audio) as mic, player:
+                self._confirm.bind(
+                    player=player,
+                    mic=mic,
+                    stt=self._stt,
+                    tts=self._tts,
+                    noise_floor=lambda: self._noise_floor,
+                )
                 await player.play(self._tts.stream("Ciel here."))
                 mic.drain()
                 self._announce_ready()
@@ -123,6 +137,14 @@ class Pipeline:
                 # pulling frames, barge-in becomes impossible — there is
                 # nothing left listening for the user talking over Ciel.
                 async for frame in mic.frames():
+                    # Checked above the state dispatch, not inside BUSY: a
+                    # turn abandoned by barge-in leaves BUSY while its hook
+                    # can still be pending, and a pending confirmation that
+                    # stops receiving frames never resolves.
+                    if self._confirm.active:
+                        self._confirm.feed(frame)
+                        continue
+
                     if self._state is State.WAITING:
                         # Reload only from idle: never yank the process out
                         # from under a conversation in progress.
@@ -184,6 +206,11 @@ class Pipeline:
                                 else:
                                     self._enter_waiting()
         finally:
+            # Resolve any pending confirmation to deny *before* cancelling the
+            # turn: the Agent SDK subprocess is awaiting that hook's decision,
+            # and leaving it unresolved would hang brain.close() in shutdown.
+            self._confirm.cancel("shutting down")
+            self._confirm.unbind()
             if turn is not None and not turn.done():
                 turn.cancel()
             await self._shutdown()
@@ -317,8 +344,11 @@ class Pipeline:
             if not completed:
                 # The user talked over us. Everything still queued behind
                 # this sentence is a reply to a question they've moved on
-                # from, so abandon the turn rather than finishing it.
+                # from, so abandon the turn rather than finishing it. A
+                # confirmation racing in from this dying turn's hook is
+                # resolved to deny for the same reason.
                 self._interrupted = True
+                self._confirm.cancel("interrupted")
                 await self._brain.interrupt()
                 print("  (interrupted)")
                 self._record("event", "interrupted")

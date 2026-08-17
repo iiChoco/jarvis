@@ -20,7 +20,7 @@ import asyncio
 import logging
 import re
 from types import TracebackType
-from typing import AsyncIterator, Self
+from typing import AsyncIterator, Awaitable, Callable, Self
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -34,6 +34,7 @@ from claude_agent_sdk import (
 from ciel.brain.permissions import FILE_TOOLS, WorkspaceGuard
 from ciel.brain.prompt import build_system_prompt
 from ciel.brain.session import SessionStore
+from ciel.brain.shellguard import ShellGuard
 from ciel.config import BrainConfig, Config
 
 log = logging.getLogger(__name__)
@@ -67,7 +68,12 @@ def _is_real_boundary(candidate: str) -> bool:
 class Brain:
     """A conversational Claude session that yields speakable sentences."""
 
-    def __init__(self, config: Config, memory_index: str | None = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        memory_index: str | None = None,
+        confirmer: "Callable[[str], Awaitable[bool]] | None" = None,
+    ) -> None:
         self._config = config
         self._brain_config: BrainConfig = config.brain
         self._memory_index = memory_index
@@ -87,6 +93,14 @@ class Brain:
             )
             self._guard.ensure_workspace()
             log.info("file access enabled, confined to %s", self._guard.workspace)
+
+        # The shell needs both halves to exist: the config saying yes AND a
+        # confirmer to route the spoken yes/no through. Absent either, Bash
+        # stays in disallowed_tools exactly as before.
+        self._shell_guard: ShellGuard | None = None
+        if config.shell.enabled and confirmer is not None:
+            self._shell_guard = ShellGuard(config.shell, confirmer)
+            log.info("shell enabled behind the voice gate")
 
     @property
     def session_id(self) -> str | None:
@@ -124,6 +138,7 @@ class Brain:
             system_prompt=build_system_prompt(
                 self._memory_index,
                 workspace=str(self._guard.workspace) if self._guard else None,
+                shell=self._shell_guard is not None,
             ),
             # Explicit allowlist. The Agent SDK ships the full Claude Code
             # toolset — Bash, Write, Edit — and a voice assistant that can
@@ -133,18 +148,27 @@ class Brain:
             allowed_tools=[
                 *self._brain_config.allowed_tools,
                 *file_tools,
+                *(["Bash"] if self._shell_guard else []),
                 *(extra_tools or []),
             ],
-            # Bash is never granted alongside file access: a shell walks
-            # straight around the workspace guard, which would make the
-            # confinement theatre. Denied explicitly rather than merely
-            # omitted, so a stray config edit can't quietly re-enable it.
-            disallowed_tools=["Bash", "KillShell", "BashOutput"],
-            # A PreToolUse hook, deliberately not can_use_tool: an
+            # Bash is granted only behind the ShellGuard voice gate; without
+            # it a shell walks straight around the workspace guard, which
+            # would make the confinement theatre. Denied explicitly rather
+            # than merely omitted when the gate is off, so a stray config
+            # edit can't quietly re-enable it. KillShell and BashOutput stay
+            # denied either way: they serve backgrounded commands, which the
+            # gate refuses — a confirmation is for the command you heard,
+            # not for whatever it keeps doing after the conversation moves on.
+            disallowed_tools=[
+                *([] if self._shell_guard else ["Bash"]),
+                "KillShell",
+                "BashOutput",
+            ],
+            # PreToolUse hooks, deliberately not can_use_tool: an
             # allowed_tools entry auto-approves its tool *before* that callback
             # runs, so a guard wired there is never consulted for the tools it
-            # exists to constrain. The hook runs on every call regardless.
-            hooks=self._guard.as_hooks() if self._guard else None,
+            # exists to constrain. Hooks run on every call regardless.
+            hooks=self._hooks(),
             permission_mode="dontAsk",
             # Ignore ~/.claude and any project .claude directory. Without this
             # Ciel inherits the user's Claude Code config, skills, and memory,
@@ -166,6 +190,15 @@ class Brain:
             cwd=str(self._guard.workspace) if self._guard else None,
             resume=previous.session_id if previous else None,
         )
+
+    def _hooks(self) -> dict | None:
+        """Merge the PreToolUse matchers of whichever guards exist."""
+        matchers = []
+        if self._guard is not None:
+            matchers.extend(self._guard.as_hooks()["PreToolUse"])
+        if self._shell_guard is not None:
+            matchers.extend(self._shell_guard.as_hooks()["PreToolUse"])
+        return {"PreToolUse": matchers} if matchers else None
 
     async def __aenter__(self) -> Self:
         await self.connect()

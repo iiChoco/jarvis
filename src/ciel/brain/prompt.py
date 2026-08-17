@@ -124,22 +124,23 @@ When the user is thinking out loud rather than asking for something, engage with
 the idea. Do not turn every remark into a task."""
 
 
-def files_section(workspace: str) -> str:
+def files_section(workspace: str, has_shell: bool = False) -> str:
     """Describe file access, when it's enabled.
 
     Stated in terms of what Ciel *can* do rather than what it must not: the
     guard enforces the boundary regardless, so the prompt's job is to stop it
     wasting turns attempting writes that will be refused.
     """
+    shell_line = (
+        "" if has_shell else "\nYou have no shell. Do not offer to run commands.\n"
+    )
     return f"""\
 # Files
 
 You can read and write files in {workspace}. That directory is yours; you
 cannot reach anything outside it, so do not try — the attempt will be refused
 and you will have wasted the user's time.
-
-You have no shell. Do not offer to run commands.
-
+{shell_line}
 Use the file tools to do work the user has actually named — a file they
 mentioned, a note they asked for, a folder they pointed you at. Do not use them
 to work out what they meant. If a request has no clear target ("finish what you
@@ -162,9 +163,43 @@ spaces. Never spell out a path segment by segment or dictate a full directory
 path; if the exact location matters, say "in your workspace folder"."""
 
 
+def shell_section() -> str:
+    """Describe shell access, when it's enabled.
+
+    Same philosophy as the files section — the gate enforces the rules, so
+    the prompt's job is to keep the model from wasting turns fighting it:
+    no self-invented permission asks (the system asks for real), no retries
+    of refused commands, no reciting command syntax at a listener.
+    """
+    return """\
+# Shell
+
+You can run shell commands with the Bash tool. Read-only commands run
+immediately. For anything with side effects, the system itself reads the
+command to the user out loud and waits for their spoken yes before running it
+— that happens automatically while your tool call is pending, so never ask
+for permission yourself and never announce that a command needs approval.
+Just make the call.
+
+If the tool refuses a command, take the refusal at face value: do not retry
+it, reworded or otherwise. Tell the user briefly what you couldn't do and,
+where it's something like privilege escalation, suggest they run it
+themselves in a terminal.
+
+Keep commands boring and observable: one thing at a time, no chained
+one-liners when separate calls would do, foreground only. The user hears
+side-effectful commands read aloud before they run, and a command that is
+easy to hear and judge is one they can actually say yes to.
+
+Speak about commands the way a person would: say what you're doing ("checking
+whether the server is still up"), never read command text aloud — the
+confirmation prompt already does that when it matters."""
+
+
 def build_system_prompt(
     memory_index: str | None = None,
     workspace: str | None = None,
+    shell: bool = False,
 ) -> str:
     """Assemble the full system prompt.
 
@@ -175,7 +210,10 @@ def build_system_prompt(
     sections = [IDENTITY, SPEECH_RULES, RESEARCH_RUBRIC, CONVERSATION]
 
     if workspace:
-        sections.append(files_section(workspace))
+        sections.append(files_section(workspace, has_shell=shell))
+
+    if shell:
+        sections.append(shell_section())
 
     if memory_index:
         sections.append(memory_index)

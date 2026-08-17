@@ -25,10 +25,11 @@ never invoked for the very tools it exists to constrain — verified the hard
 way: the callback logged nothing while the model wrote happily to ``/tmp``.
 PreToolUse runs for every call regardless of the allowlist.
 
-**Bash is deliberately not offered.** A shell escapes path confinement
-trivially (`sh -c 'cat > ~/.zshrc'`), so allowing it would make everything here
-decorative. If you genuinely want Ciel running commands, that is a different
-decision made with open eyes, not a checkbox next to file writes.
+**Bash is guarded separately, not here.** A shell escapes path confinement
+trivially (`sh -c 'cat > ~/.zshrc'`), so it never gets a place on the file
+allowlist — it has its own gate in ``shellguard.py``, which hard-denies the
+dangerous shapes (including these forbidden names, which it imports) and
+requires a spoken yes from the user for anything not provably read-only.
 """
 
 from __future__ import annotations
@@ -67,8 +68,9 @@ _PATH_FIELDS: dict[str, tuple[str, ...]] = {
 # every stored credential, and the browser and Messages databases.
 #
 # Matched against any component of the resolved path, so `~/.ssh/id_rsa` and
-# `~/backup/.ssh/id_rsa` are both refused.
-_FORBIDDEN_NAMES = frozenset({
+# `~/backup/.ssh/id_rsa` are both refused. Public because the shell gate
+# scans command strings against the same names — one list, one place to grow.
+FORBIDDEN_NAMES = frozenset({
     # Shell startup — writable shell config is arbitrary code execution on the
     # user's next login, which makes it the highest-value target here.
     ".zshrc", ".zshenv", ".zprofile", ".zlogin",
@@ -160,7 +162,7 @@ class WorkspaceGuard:
         except (OSError, RuntimeError, ValueError) as exc:
             return f"That path could not be resolved ({exc})."
 
-        if any(part in _FORBIDDEN_NAMES for part in resolved.parts):
+        if any(part in FORBIDDEN_NAMES for part in resolved.parts):
             return (
                 "That path touches credentials, shell configuration, or agent "
                 "state, which is off limits."
@@ -189,4 +191,4 @@ class WorkspaceGuard:
         )
 
 
-__all__ = ["WorkspaceGuard", "FILE_TOOLS"]
+__all__ = ["WorkspaceGuard", "FILE_TOOLS", "FORBIDDEN_NAMES"]

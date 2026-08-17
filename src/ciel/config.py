@@ -236,9 +236,10 @@ class FilesConfig:
     """Whether Ciel can touch the filesystem, and where."""
 
     enabled: bool = False
-    """Off by default. Ciel acts on transcribed speech with no confirmation
-    step, and reads web pages into its context — so file access is a real
-    decision, not a default. Turn it on deliberately."""
+    """Off by default. Ciel acts on transcribed speech, reads web pages into
+    its context, and file tools run without a confirmation step (only shell
+    commands get one) — so file access is a real decision, not a default.
+    Turn it on deliberately."""
 
     workspace: Path = field(
         default_factory=lambda: Path.home() / ".ciel" / "workspace"
@@ -256,6 +257,56 @@ class FilesConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ShellConfig:
+    """Whether Ciel may run shell commands, and which ones need a spoken yes.
+
+    A shell walks around the file guard's path checks by construction, so this
+    is not another file permission — it is its own gate with its own rules
+    (``brain/shellguard.py``). Every command lands in one of three tiers:
+    hard-denied (never runs, even if you say yes), quietly allowed (read-only
+    prefixes below), or confirmed — Ciel reads the command aloud and waits for
+    a spoken yes or no before running it. The confirmation is enforced in a
+    PreToolUse hook, not requested in the prompt: the model cannot run a
+    confirm-tier command without your voiced yes."""
+
+    enabled: bool = False
+    """Off by default for the same reason file access is: instructions arrive
+    as transcribed speech and untrusted web text enters the context. The voice
+    gate is what makes enabling this defensible at all — turn it on knowing
+    the gate is the defense."""
+
+    auto_allow: tuple[str, ...] = (
+        "git status", "git log", "git diff", "git show", "git branch",
+        "ls", "pwd", "date", "whoami", "uname",
+    )
+    """Command prefixes that run without a spoken confirmation. Matched per
+    pipeline segment against leading whole tokens — "git status" covers
+    "git status -sb" — and only for commands with no redirection,
+    substitution, or backgrounding, which escalate to a confirmation
+    regardless. Deliberately absent: ``cat``, ``head``, ``tail`` — a quiet
+    read-anything is ``files.read_only_outside`` by another name, minus the
+    path checks."""
+
+    deny_extra: tuple[str, ...] = ()
+    """Extra leading tokens to hard-refuse, on top of the built-in set (sudo,
+    launchctl, security, osascript, shutdown, and friends). For tools you know
+    you never want run by voice — "docker", say."""
+
+    confirm_timeout_ms: int = 8000
+    """How long a confirmation question hangs in the air before silence counts
+    as no. Covers *starting* to answer only — once you're speaking, the
+    endpointer takes over and a slow "hmm... yes, go ahead" is never cut off
+    at the deadline. Matches ``wake_timeout_ms`` because it is the same social
+    contract: a question waits about this long for an answer."""
+
+    max_command_display_chars: int = 120
+    """Commands longer than this are truncated in the spoken prompt. The point
+    of reading a command aloud is that you hear what is about to run, but past
+    a couple of lines nobody absorbs shell syntax by ear — the truncation
+    ("...and so on") at least tells you there is more than you heard."""
+
+
+@dataclass(frozen=True, slots=True)
 class BrainConfig:
     model: str = "claude-opus-5"
 
@@ -263,7 +314,10 @@ class BrainConfig:
     """The Agent SDK ships the full Claude Code toolset — Bash, Write, Edit and
     all. A voice assistant that can silently run shell commands is not what we
     want, so this is an explicit allowlist, paired with permission_mode
-    "dontAsk" to deny everything absent from it."""
+    "dontAsk" to deny everything absent from it. File tools ride in via
+    ``[files]`` and Bash via ``[shell]`` (with its voice gate) rather than
+    this list, so enabling those features can't be done without also enabling
+    their guards."""
 
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
     """Reasoning depth. ``None`` uses the model default (high).
@@ -373,7 +427,9 @@ class MCPServerConfig:
         url = "https://mcp.notion.com/mcp"
 
     Remember what Ciel is before connecting anything that can *act*: it
-    executes tools off transcribed speech with no confirmation step. Reading
+    executes tools off transcribed speech, and connector tools run with no
+    confirmation step (the spoken yes/no gate covers shell commands only).
+    Reading
     a calendar is comfortable; anything that sends, posts, or deletes
     deserves a `tools` allowlist that simply leaves those tools out."""
 
@@ -467,6 +523,7 @@ class Config:
     brain: BrainConfig = field(default_factory=BrainConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     files: FilesConfig = field(default_factory=FilesConfig)
+    shell: ShellConfig = field(default_factory=ShellConfig)
     messages: MessagesConfig = field(default_factory=MessagesConfig)
     transcripts: TranscriptConfig = field(default_factory=TranscriptConfig)
     dev: DevConfig = field(default_factory=DevConfig)
@@ -492,6 +549,7 @@ _SECTIONS = {
     "brain": BrainConfig,
     "memory": MemoryConfig,
     "files": FilesConfig,
+    "shell": ShellConfig,
     "messages": MessagesConfig,
     "transcripts": TranscriptConfig,
     "dev": DevConfig,
