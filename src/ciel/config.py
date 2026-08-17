@@ -195,6 +195,26 @@ class VoiceConfig:
     noise, and the short utterances that matter ("yes", "no") occur inside a
     conversation your verified command already started."""
 
+    recent_margin: float = 0.05
+    """How much the threshold relaxes shortly after a verified pass. The
+    costliest false rejection is the mid-conversation one — you asked,
+    Ciel answered, your follow-up bounces — and the person speaking two
+    sentences after a verified sentence is overwhelmingly the same person.
+    Set to 0 for a strict gate."""
+
+    recent_window_s: float = 30.0
+    """How long the relaxed threshold lasts after a verified pass. A pass
+    within the window extends it, so an ongoing conversation stays easy and
+    the margin evaporates once you walk away."""
+
+    keep_rejected: int = 10
+    """Rejected utterances kept as wav files next to the profile (a ring of
+    the newest N; 0 disables). This is the training loop: run
+    ``enroll_voice.py --adopt`` to listen to each rejection and fold the
+    ones that are actually you into the profile — the gate learns precisely
+    the conditions it failed in. Local, bounded, and worth knowing about:
+    a stranger's rejected sentence sits in that ring until it ages out."""
+
     profile: Path = field(
         default_factory=lambda: Path.home() / ".ciel" / "voice" / "profile.npz"
     )

@@ -1,14 +1,18 @@
-"""Enroll your voice for the IFF gate, or test an existing enrollment.
+"""Enroll, grow, and tune the IFF voice profile.
 
-    uv run python scripts/enroll_voice.py          # record 4 phrases, save profile
-    uv run python scripts/enroll_voice.py --test   # score yourself against it
+    uv run python scripts/enroll_voice.py           # fresh enrollment (8 varied takes)
+    uv run python scripts/enroll_voice.py --add     # append 3 more takes
+    uv run python scripts/enroll_voice.py --adopt   # review rejected clips, adopt yours
+    uv run python scripts/enroll_voice.py --test    # score yourself live
 
-Enrollment records a handful of natural sentences, embeds each, checks they
-agree with each other (a TV in the background or a second speaker shows up as
-low pairwise similarity), and saves the profile. It also prints your
-self-similarity spread and a suggested `[voice] threshold` — the gate's
-default of 0.5 is sensible, but your microphone and room are the numbers
-that actually matter.
+Consistency comes from *variety*, not repetition: the gate scores against
+your best-matching take, so the profile should contain your morning voice,
+your fast voice, your across-the-room voice — not eight copies of one careful
+reading. Fresh enrollment walks through varied styles; ``--add`` grows the
+profile whenever you find a condition it dislikes; ``--adopt`` is the real
+training loop — every rejection Ciel makes is kept as a clip, and the ones
+you confirm as yourself join the profile, teaching it exactly the conditions
+it failed in.
 
 Like the probe scripts, this opens its own microphone — run it while Ciel
 itself is stopped, or they will fight over the device.
@@ -19,21 +23,44 @@ from __future__ import annotations
 import argparse
 import asyncio
 import itertools
+import subprocess
 import sys
+import wave
+from pathlib import Path
 
 import numpy as np
 
 from ciel.audio.input import MicStream
-from ciel.audio.speaker import SherpaEncoder, load_profile, save_profile
+from ciel.audio.speaker import (
+    SherpaEncoder,
+    add_to_profile,
+    load_profile,
+    save_profile,
+)
 from ciel.audio.vad import Endpointer
 from ciel.config import SAMPLE_RATE, load_config
 
-PHRASES = [
-    "Hey jarvis, what's the weather looking like tomorrow?",
-    "Add a reminder to call the dentist on Thursday afternoon.",
-    "Actually, cancel that — I'll deal with it next week instead.",
-    "Read me the last email from the university, please.",
+# (instruction, example) — the variety is the point; see the module docstring.
+TAKES = [
+    ("normally, like asking from your desk",
+     "Hey jarvis, what's the weather looking like tomorrow?"),
+    ("normally",
+     "Add a reminder to call the dentist on Thursday afternoon."),
+    ("quickly, like you're on your way out the door",
+     "Actually cancel that, I'll deal with it next week instead."),
+    ("softly, like someone's asleep nearby",
+     "Read me the last email from the university, please."),
+    ("louder, from a step or two away from the microphone",
+     "Hey jarvis, did anything land on my calendar this morning?"),
+    ("casually, mid-thought, like talking to a friend",
+     "So I was thinking we could move that meeting to Friday maybe."),
+    ("normally, first thing in the morning voice if you can fake it",
+     "What time is it right now?"),
+    ("however you actually talk to Ciel",
+     "Send a quick email to myself with the grocery list."),
 ]
+
+ADD_TAKES = 3
 
 
 async def capture(mic: MicStream, endpointer: Endpointer) -> np.ndarray:
@@ -47,65 +74,134 @@ async def capture(mic: MicStream, endpointer: Endpointer) -> np.ndarray:
     raise RuntimeError("microphone stream ended")
 
 
-async def enroll(config, encoder: SherpaEncoder) -> None:
+async def record_takes(config, encoder, prompts) -> list[np.ndarray]:
     embeddings: list[np.ndarray] = []
     async with MicStream(config.audio) as mic:
-        for i, phrase in enumerate(PHRASES, 1):
-            print(f"\n[{i}/{len(PHRASES)}] Say something like:\n    “{phrase}”")
-            utterance = await capture(mic, Endpointer(config.audio))
-            seconds = len(utterance) / SAMPLE_RATE
-            if seconds < 1.0:
-                print(f"    only {seconds:.1f}s of speech — say a full sentence, retrying")
+        for i, (style, example) in enumerate(prompts, 1):
+            print(f"\n[{i}/{len(prompts)}] Say — {style}:\n    “{example}”")
+            while True:
                 utterance = await capture(mic, Endpointer(config.audio))
+                seconds = len(utterance) / SAMPLE_RATE
+                if seconds >= 1.0:
+                    break
+                print(f"    only {seconds:.1f}s — say a full sentence, retrying")
             embeddings.append(encoder.embed(utterance))
             print(f"    captured {seconds:.1f}s")
+    return embeddings
 
-    pairs = [
-        float(a @ b) for a, b in itertools.combinations(embeddings, 2)
-    ]
+
+def report(embeddings: list[np.ndarray], config) -> None:
+    if len(embeddings) < 2:
+        return
+    pairs = [float(a @ b) for a, b in itertools.combinations(embeddings, 2)]
     lo, hi = min(pairs), max(pairs)
     print(f"\nself-similarity across takes: {lo:.2f} to {hi:.2f}")
-    if lo < 0.45:
+    if lo < 0.40:
         print(
-            "warning: the takes disagree with each other — background voices "
-            "or a noisy room? A clean enrollment usually sits above 0.55. "
-            "Consider re-running somewhere quieter."
+            "warning: some takes disagree strongly — background voices, or a "
+            "style so different it may be worth its own extra --add takes "
+            "later. Not fatal: scoring uses your best-matching take."
         )
-
-    save_profile(config.voice.profile, embeddings)
-    print(f"profile saved to {config.voice.profile}")
-
-    # Suggest a threshold below the observed self-similarity floor, but never
-    # so low that it stops meaning anything.
-    suggested = max(0.35, round(lo - 0.12, 2))
+    suggested = max(0.35, round(min(0.5, lo) - 0.08, 2))
     print(
         f"suggested [voice] threshold: {suggested} "
-        f"(config default is {config.voice.threshold})"
+        f"(currently configured: {config.voice.threshold})"
     )
-    print("\nNow set in ~/.ciel/config.toml:\n\n[voice]\nenabled = true\n")
 
 
-async def test(config, encoder: SherpaEncoder) -> None:
-    profile = load_profile(config.voice.profile)
-    if profile is None:
-        print("no profile enrolled yet — run without --test first")
+async def enroll(config, encoder) -> None:
+    embeddings = await record_takes(config, encoder, TAKES)
+    save_profile(config.voice.profile, embeddings)
+    report(embeddings, config)
+    print(f"\nprofile saved to {config.voice.profile} ({len(embeddings)} takes)")
+
+
+async def add(config, encoder) -> None:
+    if load_profile(config.voice.profile) is None:
+        print("no profile yet — run without --add first")
         sys.exit(1)
-    print("Say anything; ctrl-C to stop.")
+    print("Three more takes. Use the voice or distance the gate keeps missing.")
+    prompts = [
+        ("in the condition that's been failing",
+         "Hey jarvis, can you check my calendar for tomorrow?"),
+        ("same condition, different words",
+         "What's the latest email in my inbox right now?"),
+        ("same condition once more",
+         "Remind me to water the plants this evening."),
+    ][:ADD_TAKES]
+    embeddings = await record_takes(config, encoder, prompts)
+    total = add_to_profile(config.voice.profile, embeddings)
+    print(f"\nprofile now holds {total} takes")
+
+
+async def adopt(config, encoder) -> None:
+    rejected_dir = config.voice.profile.expanduser().parent / "rejected"
+    clips = sorted(rejected_dir.glob("*.wav"))
+    if not clips:
+        print("no rejected clips waiting — nothing to adopt")
+        return
+    if load_profile(config.voice.profile) is None:
+        print("no profile yet — run a fresh enrollment first")
+        sys.exit(1)
+
+    print(f"{len(clips)} rejected clip(s). For each: listen, then decide.")
+    adopted: list[np.ndarray] = []
+    for clip in clips:
+        print(f"\n▶ {clip.name} (similarity at rejection: {clip.stem.split('-')[-1]})")
+        subprocess.run(["afplay", str(clip)], check=False)
+        answer = (await asyncio.to_thread(
+            input, "  your voice? [y = adopt / n = discard / r = replay / s = skip] "
+        )).strip().lower()
+        while answer == "r":
+            subprocess.run(["afplay", str(clip)], check=False)
+            answer = (await asyncio.to_thread(input, "  y/n/s? ")).strip().lower()
+        if answer == "y":
+            with wave.open(str(clip)) as f:
+                pcm = np.frombuffer(f.readframes(f.getnframes()), dtype=np.int16)
+            adopted.append(encoder.embed(pcm.astype(np.float32) / 32768.0))
+            clip.unlink()
+            print("  adopted")
+        elif answer == "n":
+            clip.unlink()
+            print("  discarded")
+        else:
+            print("  left in place")
+
+    if adopted:
+        total = add_to_profile(config.voice.profile, adopted)
+        print(f"\nprofile now holds {total} takes — the gate just learned "
+              f"{len(adopted)} condition(s) it used to fail in")
+
+
+async def test(config, encoder) -> None:
+    references = load_profile(config.voice.profile)
+    if references is None:
+        print("no profile enrolled yet — run without flags first")
+        sys.exit(1)
+    print(f"Profile holds {len(references) - 1} takes (+centroid). "
+          "Say anything; ctrl-C to stop.")
     async with MicStream(config.audio) as mic:
         endpointer = Endpointer(config.audio)
         while True:
             utterance = await capture(mic, endpointer)
             embedding = encoder.embed(utterance)
-            similarity = float(embedding @ profile)
-            verdict = "you" if similarity >= config.voice.threshold else "NOT you"
-            print(f"  similarity {similarity:.2f} → {verdict} "
+            sims = references @ embedding
+            best, centroid = float(np.max(sims)), float(sims[-1])
+            verdict = "you" if best >= config.voice.threshold else "NOT you"
+            print(f"  best {best:.2f} (centroid {centroid:.2f}, "
+                  f"best take #{int(np.argmax(sims)) + 1}) → {verdict} "
                   f"(threshold {config.voice.threshold})")
 
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--test", action="store_true",
-                        help="score live utterances against the saved profile")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--add", action="store_true",
+                      help="append takes to the existing profile")
+    mode.add_argument("--adopt", action="store_true",
+                      help="review rejected clips and adopt the ones that are you")
+    mode.add_argument("--test", action="store_true",
+                      help="score live utterances against the saved profile")
     args = parser.parse_args()
 
     config = load_config()
@@ -115,6 +211,10 @@ async def main() -> None:
 
     if args.test:
         await test(config, encoder)
+    elif args.add:
+        await add(config, encoder)
+    elif args.adopt:
+        await adopt(config, encoder)
     else:
         await enroll(config, encoder)
 

@@ -21,6 +21,7 @@ import numpy as np
 
 from ciel.audio.speaker import (
     SpeakerGate,
+    add_to_profile,
     build_speaker_gate,
     load_profile,
     save_profile,
@@ -389,12 +390,22 @@ async def main() -> None:
     also_me = np.array([0.95, 0.1, 0, 0, 0, 0, 0, 0], dtype=np.float32)
     also_me /= np.linalg.norm(also_me)
     stranger = np.zeros(8, dtype=np.float32)
-    stranger[1] = 1.0
+    stranger[7] = 1.0
 
     save_profile(profile_path, [me, also_me])
-    mean = load_profile(profile_path)
-    check("profile round-trips normalized",
-          mean is not None and abs(float(np.linalg.norm(mean)) - 1.0) < 1e-5)
+    references = load_profile(profile_path)
+    check("profile round-trips as takes plus centroid",
+          references is not None and references.shape[0] == 3
+          and np.allclose(np.linalg.norm(references, axis=1), 1.0, atol=1e-5))
+    check("add_to_profile grows the take count",
+          add_to_profile(profile_path, [also_me]) == 3
+          and load_profile(profile_path).shape[0] == 4)
+
+    # A deliberately multimodal profile for the gate tests: two orthogonal
+    # "modes" of the same voice, whose centroid matches neither well.
+    other_mode = np.zeros(8, dtype=np.float32)
+    other_mode[1] = 1.0
+    save_profile(profile_path, [me, other_mode])
 
     class FakeEncoder:
         def __init__(self) -> None:
@@ -409,16 +420,43 @@ async def main() -> None:
         async def close(self) -> None:
             pass
 
-    voice_cfg = VoiceConfig(enabled=True, threshold=0.5, profile=profile_path)
+    voice_cfg = VoiceConfig(
+        enabled=True, threshold=0.5, profile=profile_path,
+        recent_margin=0.05, recent_window_s=30.0, keep_rejected=2,
+    )
     encoder = FakeEncoder()
     gate = SpeakerGate(voice_cfg, encoder)
     await gate.warm_up()
     one_second = np.zeros(16000, dtype=np.float32)
     ok, sim = await gate.check(one_second)
     check("enrolled voice passes", ok and sim > 0.9)
-    encoder.next = stranger
+
+    # An embedding matching the second take exactly: centroid similarity is
+    # only ~0.71 here, so a score near 1.0 proves best-match scoring — the
+    # mean of your voices is a voice nobody has.
+    encoder.next = other_mode
     ok, sim = await gate.check(one_second)
+    check("matches a single take, not just the centroid", ok and sim > 0.98)
+
+    # Borderline speaker (0.47 vs one take, orthogonal to the rest): rejected
+    # cold, accepted within the grace window of the pass above (0.5 - 0.05
+    # margin), rejected again outside it.
+    borderline = np.zeros(8, dtype=np.float32)
+    borderline[0], borderline[2] = 0.47, np.sqrt(1 - 0.47**2)
+    encoder.next = borderline
+    ok, sim = await gate.check(one_second)
+    check("borderline passes inside the grace window", ok and 0.45 < sim < 0.5)
+    gate._last_pass = None  # simulate the window expiring
+    ok, sim = await gate.check(one_second)
+    check("borderline rejected outside the window", not ok)
+
+    encoder.next = stranger
+    for _ in range(3):
+        ok, sim = await gate.check(one_second)
     check("stranger rejected", not ok and sim < 0.5)
+    rejected_wavs = sorted((iff_tmp / "rejected").glob("*.wav"))
+    check("rejections kept as a bounded wav ring", len(rejected_wavs) == 2)
+
     ok, sim = await gate.check(np.zeros(4800, dtype=np.float32))  # 0.3 s
     check("too-short utterance passes unjudged", ok and math.isnan(sim))
 

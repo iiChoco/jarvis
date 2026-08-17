@@ -35,6 +35,7 @@ import asyncio
 import logging
 import time
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -107,20 +108,55 @@ def save_profile(path: Path, embeddings: list[np.ndarray]) -> None:
     """Persist enrollment embeddings plus their normalized mean."""
     path = path.expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
-    stacked = np.stack(embeddings)
+    stacked = np.stack([e / (np.linalg.norm(e) or 1.0) for e in embeddings])
     mean = stacked.mean(axis=0)
     mean /= np.linalg.norm(mean) or 1.0
     np.savez(path, mean=mean, embeddings=stacked)
 
 
-def load_profile(path: Path) -> np.ndarray | None:
-    """The enrolled mean embedding, or None if never enrolled."""
+def _load_takes(path: Path) -> np.ndarray | None:
+    """The raw enrollment takes only — no centroid row."""
     path = path.expanduser()
     if not path.exists():
         return None
     try:
         with np.load(path) as data:
-            return np.asarray(data["mean"], dtype=np.float32)
+            return np.asarray(data["embeddings"], dtype=np.float32)
+    except Exception:  # noqa: BLE001
+        log.warning("could not read the voice profile at %s", path, exc_info=True)
+        return None
+
+
+def add_to_profile(path: Path, embeddings: list[np.ndarray]) -> int:
+    """Append takes to an existing profile; returns the new take count.
+
+    Growing beats re-recording: the takes that fix inconsistency are the ones
+    captured in the conditions where the gate failed — across the room, over
+    the dishwasher, at 7am — and those accumulate over days, not in one
+    sitting. Loads the raw takes, not ``load_profile``'s scoring matrix,
+    which carries a derived centroid row that must not be re-saved as if it
+    were a take."""
+    existing = _load_takes(path)
+    combined = ([*existing, *embeddings] if existing is not None
+                else list(embeddings))
+    save_profile(path, combined)
+    return len(combined)
+
+
+def load_profile(path: Path) -> np.ndarray | None:
+    """All enrolled reference embeddings as a matrix, or None if unenrolled.
+
+    Rows are the individual takes plus their centroid; scoring takes the best
+    match across rows. The centroid is what a *consistent* voice matches
+    best; the takes are what catch the mornings and the moods."""
+    path = path.expanduser()
+    if not path.exists():
+        return None
+    try:
+        with np.load(path) as data:
+            takes = np.asarray(data["embeddings"], dtype=np.float32)
+            mean = np.asarray(data["mean"], dtype=np.float32)
+            return np.vstack([takes, mean[None, :]])
     except Exception:  # noqa: BLE001 - a corrupt profile means "not enrolled"
         log.warning("could not read the voice profile at %s", path, exc_info=True)
         return None
@@ -134,16 +170,18 @@ class SpeakerGate:
     def __init__(self, config: VoiceConfig, encoder: SpeakerEncoder) -> None:
         self._config = config
         self._encoder = encoder
-        self._profile: np.ndarray | None = None
+        self._references: np.ndarray | None = None
         self._min_samples = int(SAMPLE_RATE * config.min_utterance_ms / 1000)
+        self._last_pass: float | None = None
+        self._rejected_dir = config.profile.expanduser().parent / "rejected"
 
     @property
     def enrolled(self) -> bool:
-        return self._profile is not None
+        return self._references is not None
 
     async def warm_up(self) -> None:
-        self._profile = load_profile(self._config.profile)
-        if self._profile is None:
+        self._references = load_profile(self._config.profile)
+        if self._references is None:
             # Fail open, loudly: see the module docstring.
             print(
                 "\nvoice gate: enabled but no profile enrolled — everyone "
@@ -158,17 +196,69 @@ class SpeakerGate:
     async def check(self, utterance: np.ndarray) -> tuple[bool, float]:
         """(is the enrolled speaker, similarity). Unjudgeable audio passes.
 
-        ``nan`` similarity marks the pass-through cases — no profile, or too
-        short to judge — so a caller logging scores can tell "matched" from
-        "waved through".
+        Similarity is the *best* match across the enrolled takes and their
+        centroid, not the centroid alone: a voice is multimodal (morning
+        voice, excited voice, across-the-room voice), and averaging modes
+        produces a reference nobody actually sounds like. ``nan`` marks the
+        pass-through cases — no profile, or too short to judge — so a caller
+        logging scores can tell "matched" from "waved through".
+
+        A small grace margin applies shortly after a verified pass: the
+        costliest false rejection is the one mid-conversation, and the
+        speaker two sentences after a verified sentence is overwhelmingly
+        the same person.
         """
-        if self._profile is None:
+        if self._references is None:
             return True, float("nan")
         if len(utterance) < self._min_samples:
             return True, float("nan")
+
         embedding = await asyncio.to_thread(self._encoder.embed, utterance)
-        similarity = float(embedding @ self._profile)
-        return similarity >= self._config.threshold, similarity
+        similarity = float(np.max(self._references @ embedding))
+
+        threshold = self._config.threshold
+        if (
+            self._last_pass is not None
+            and time.monotonic() - self._last_pass < self._config.recent_window_s
+        ):
+            threshold -= self._config.recent_margin
+
+        if similarity >= threshold:
+            self._last_pass = time.monotonic()
+            log.info("voice recognized (%.2f)", similarity)
+            return True, similarity
+
+        await asyncio.to_thread(self._keep_rejected, utterance, similarity)
+        return False, similarity
+
+    def _keep_rejected(self, utterance: np.ndarray, similarity: float) -> None:
+        """Save a rejected utterance so a false rejection can teach the gate.
+
+        The loop that actually fixes inconsistency: rejections land as wav
+        files, `enroll_voice.py --adopt` plays each one back, and the ones
+        the user confirms as their own voice join the profile — the gate
+        learns precisely the conditions it failed in. A ring of the last few
+        keeps disk (and any stranger's audio) bounded and local.
+        """
+        if self._config.keep_rejected <= 0:
+            return
+        try:
+            import wave
+
+            self._rejected_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            dest = self._rejected_dir / f"{stamp}-{similarity:.2f}.wav"
+            pcm = (np.clip(utterance, -1.0, 1.0) * 32767).astype(np.int16)
+            with wave.open(str(dest), "wb") as f:
+                f.setnchannels(1)
+                f.setsampwidth(2)
+                f.setframerate(SAMPLE_RATE)
+                f.writeframes(pcm.tobytes())
+            kept = sorted(self._rejected_dir.glob("*.wav"))
+            for old in kept[: -self._config.keep_rejected]:
+                old.unlink(missing_ok=True)
+        except OSError:
+            log.debug("could not keep the rejected utterance", exc_info=True)
 
     async def close(self) -> None:
         await self._encoder.close()
@@ -200,5 +290,6 @@ __all__ = [
     "SherpaEncoder",
     "build_speaker_gate",
     "save_profile",
+    "add_to_profile",
     "load_profile",
 ]
