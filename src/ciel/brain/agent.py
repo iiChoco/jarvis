@@ -34,9 +34,11 @@ from claude_agent_sdk import (
 from ciel.brain.permissions import FILE_TOOLS, WorkspaceGuard
 from ciel.brain.prompt import build_system_prompt
 from ciel.brain.session import SessionStore
+from ciel.brain.recorder import ActionRecorder
 from ciel.brain.shellguard import ShellGuard
 from ciel.brain.toolguard import ConfirmToolGuard
 from ciel.config import BrainConfig, Config
+from ciel.journal import ActionJournal
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +76,7 @@ class Brain:
         config: Config,
         memory_index: str | None = None,
         confirmer: "Callable[[str], Awaitable[bool]] | None" = None,
+        journal: ActionJournal | None = None,
     ) -> None:
         self._config = config
         self._brain_config: BrainConfig = config.brain
@@ -117,6 +120,16 @@ class Brain:
         if self._gated_tools and confirmer is not None:
             self._tool_guard = ConfirmToolGuard(self._gated_tools, confirmer)
             log.info("%d connector tools behind the voice gate", len(self._gated_tools))
+
+        # The recorder watches whatever can mutate: the file tools and Bash
+        # (built into it), every confirm-gated connector tool, and the
+        # iMessage send. It observes only — journaling lives outside the
+        # guards so nothing here can grow into an enforcement path.
+        self._recorder: ActionRecorder | None = None
+        if journal is not None:
+            self._recorder = ActionRecorder(
+                journal, self._gated_tools | {"mcp__ciel__send_message"}
+            )
 
     @property
     def session_id(self) -> str | None:
@@ -163,6 +176,7 @@ class Brain:
                 workspace=str(self._guard.workspace) if self._guard else None,
                 shell=self._shell_guard is not None,
                 confirmed_actions=self._tool_guard is not None,
+                undo=self._recorder is not None,
             ),
             # Explicit allowlist. The Agent SDK ships the full Claude Code
             # toolset — Bash, Write, Edit — and a voice assistant that can
@@ -216,15 +230,24 @@ class Brain:
         )
 
     def _hooks(self) -> dict | None:
-        """Merge the PreToolUse matchers of whichever guards exist."""
-        matchers = []
+        """Merge the hook matchers of whichever guards and observers exist.
+
+        Guards first, recorder last: when a guard denies, the recorder's
+        pre-hook should never have snapshotted a call that won't run.
+        """
+        hooks: dict[str, list] = {}
+        pre = hooks.setdefault("PreToolUse", [])
         if self._guard is not None:
-            matchers.extend(self._guard.as_hooks()["PreToolUse"])
+            pre.extend(self._guard.as_hooks()["PreToolUse"])
         if self._shell_guard is not None:
-            matchers.extend(self._shell_guard.as_hooks()["PreToolUse"])
+            pre.extend(self._shell_guard.as_hooks()["PreToolUse"])
         if self._tool_guard is not None:
-            matchers.extend(self._tool_guard.as_hooks()["PreToolUse"])
-        return {"PreToolUse": matchers} if matchers else None
+            pre.extend(self._tool_guard.as_hooks()["PreToolUse"])
+        if self._recorder is not None:
+            recorder_hooks = self._recorder.as_hooks()
+            pre.extend(recorder_hooks["PreToolUse"])
+            hooks["PostToolUse"] = recorder_hooks["PostToolUse"]
+        return {k: v for k, v in hooks.items() if v} or None
 
     async def __aenter__(self) -> Self:
         await self.connect()

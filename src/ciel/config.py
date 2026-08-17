@@ -307,6 +307,38 @@ class ShellConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class JournalConfig:
+    """The action journal: what Ciel did recently, kept so it can be undone.
+
+    Mishearings surface *after* the action — the wrong file edited, an event
+    on the wrong day — so alongside the confirmation gate (consent) there is
+    a journal (regret). Every mutating tool call is recorded, and file edits
+    snapshot the previous contents first. Undo is the model using its normal
+    tools against this record, which keeps undo actions inside the same
+    guards and confirmations as everything else."""
+
+    enabled: bool = True
+    """On by default, unlike the capabilities it watches: recording what
+    happened has no blast radius, and the first time it is needed is exactly
+    the moment it is too late to enable."""
+
+    max_entries: int = 50
+    """How many actions are kept. Floor of 10 enforced in the journal —
+    fewer than that and "undo what you did a few minutes ago" already fell
+    off the end. Snapshots are pruned with their entries, so this also
+    bounds disk."""
+
+    max_snapshot_kb: int = 1024
+    """Files larger than this are not snapshotted before an edit; the journal
+    entry says so instead. Bounds the cost of editing something huge — and a
+    file that size is usually generated, not precious."""
+
+    dir: Path = field(default_factory=lambda: Path.home() / ".ciel" / "undo")
+    """Where the journal and its snapshots live. Inside the state dir, so
+    Ciel can read its own snapshots back when restoring one."""
+
+
+@dataclass(frozen=True, slots=True)
 class BrainConfig:
     model: str = "claude-opus-5"
 
@@ -531,6 +563,7 @@ class Config:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     files: FilesConfig = field(default_factory=FilesConfig)
     shell: ShellConfig = field(default_factory=ShellConfig)
+    journal: JournalConfig = field(default_factory=JournalConfig)
     messages: MessagesConfig = field(default_factory=MessagesConfig)
     transcripts: TranscriptConfig = field(default_factory=TranscriptConfig)
     dev: DevConfig = field(default_factory=DevConfig)
@@ -557,6 +590,7 @@ _SECTIONS = {
     "memory": MemoryConfig,
     "files": FilesConfig,
     "shell": ShellConfig,
+    "journal": JournalConfig,
     "messages": MessagesConfig,
     "transcripts": TranscriptConfig,
     "dev": DevConfig,

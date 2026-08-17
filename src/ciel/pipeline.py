@@ -79,7 +79,9 @@ class Pipeline:
         # Custom tools (memory today, whatever lands in the registry later) are
         # assembled before the brain, because the memory index they expose has
         # to be baked into the system prompt at connect time.
-        self._mcp_servers, self._custom_tools, self._memory = build_tool_server(config)
+        self._mcp_servers, self._custom_tools, self._memory, self._journal = (
+            build_tool_server(config)
+        )
         memory_index = self._memory.index_prompt() if self._memory else None
         if memory_index:
             log.info("loaded %d memories", len(self._memory.all()))
@@ -90,7 +92,10 @@ class Pipeline:
         # it when config.shell.enabled says to.
         self._confirm = VoiceConfirmBroker(config)
         self._brain = Brain(
-            config, memory_index=memory_index, confirmer=self._confirm.ask
+            config,
+            memory_index=memory_index,
+            confirmer=self._confirm.ask,
+            journal=self._journal,
         )
         self._transcript: Transcript | None = (
             Transcript(config.transcripts.dir) if config.transcripts.enabled else None

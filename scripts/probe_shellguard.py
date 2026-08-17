@@ -11,16 +11,20 @@ fakes, the same way the pipeline itself is verified. Run it directly:
 from __future__ import annotations
 
 import asyncio
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 import numpy as np
 
+from ciel.brain.recorder import ActionRecorder
 from ciel.brain.shellguard import ShellGuard, classify
 from ciel.brain.toolguard import ConfirmToolGuard, describe_call
-from ciel.config import Config, ShellConfig, load_config
+from ciel.brain.tools.actions import bind_journal, recent_actions
+from ciel.config import Config, JournalConfig, ShellConfig, load_config
 from ciel.confirm import VoiceConfirmBroker, yes_no
+from ciel.journal import ActionJournal
 
 FRAME = b"\x00" * 960  # one 30 ms frame of silence
 
@@ -306,6 +310,62 @@ async def main() -> None:
     check("crashing confirmer denies, not raises",
           denied(await ConfirmToolGuard(
               frozenset({"mcp__x__y"}), broken)(mcp_payload("mcp__x__y", {}), None, None)))
+
+    print("journal:")
+    tmp = Path(tempfile.mkdtemp(prefix="ciel-probe-"))
+    journal = ActionJournal(JournalConfig(max_entries=12, dir=tmp))
+    journal.ensure()
+
+    target = tmp / "note.txt"
+    target.write_text("original contents")
+    snap, note = journal.snapshot(target)
+    check("snapshot copies previous contents",
+          snap is not None and Path(snap).read_text() == "original contents")
+    missing_snap, missing_note = journal.snapshot(tmp / "missing.txt")
+    check("missing file yields a note, not a snapshot",
+          missing_snap is None and "did not exist" in (missing_note or ""))
+
+    recorder = ActionRecorder(journal, frozenset({"mcp__gmail__send_email"}))
+    write_payload = {
+        "tool_name": "Write",
+        "tool_input": {"file_path": str(target), "content": "overwritten"},
+    }
+    await recorder.before(write_payload, "tu1", None)
+    await recorder.after(
+        {**write_payload,
+         "tool_response": {"content": [{"type": "text", "text": "ok"}]}},
+        "tu1", None)
+    top = journal.recent(5)[0]
+    write_snapshot = top["snapshot"]
+    check("write journaled with a snapshot of the previous state",
+          top["tool"] == "Write" and write_snapshot
+          and Path(write_snapshot).read_text() == "original contents")
+
+    await recorder.after(
+        {"tool_name": "Read", "tool_input": {}, "tool_response": "x"}, "tu2", None)
+    check("unwatched tool not journaled", journal.recent(5)[0]["tool"] == "Write")
+
+    await recorder.after(
+        {"tool_name": "mcp__gmail__send_email",
+         "tool_input": {"to": "a@b.c", "subject": "s", "body": "x" * 1000},
+         "tool_response": [{"type": "text", "text": "Message sent, id 12345"}]},
+        "tu3", None)
+    top = journal.recent(1)[0]
+    check("send journaled with the response id and trimmed args",
+          "12345" in top["response"] and "[truncated]" in top["args"]["body"])
+
+    bind_journal(journal)
+    listing = (await recent_actions.handler({"count": 10}))["content"][0]["text"]
+    check("recent_actions lists newest first with snapshot path",
+          listing.index("send_email") < listing.index("Write")
+          and "previous contents saved at" in listing)
+
+    for i in range(20):
+        journal.record(tool="Bash", args={"command": f"echo {i}"})
+    check("journal pruned to max_entries", len(journal.recent(50)) == 12)
+    check("pruning removed the dropped entry's snapshot",
+          not Path(write_snapshot).exists())
+    shutil.rmtree(tmp)
 
     print("config:")
     with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:

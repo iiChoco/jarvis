@@ -23,10 +23,12 @@ from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server
 
+from ciel.brain.tools.actions import ACTION_TOOLS, bind_journal
 from ciel.brain.tools.memory import MEMORY_TOOLS, bind_store
 from ciel.brain.tools.messages import MESSAGE_TOOLS, SEND_TOOLS
 from ciel.brain.tools.messages import bind_client as bind_messages
 from ciel.config import Config, MCPServerConfig
+from ciel.journal import ActionJournal
 from ciel.memory.store import MemoryStore
 from ciel.messages import MessagesClient
 
@@ -35,7 +37,7 @@ log = logging.getLogger(__name__)
 SERVER_NAME = "ciel"
 
 # Every custom tool Ciel can call. Append to this list to add a capability.
-TOOLS = [*MEMORY_TOOLS, *MESSAGE_TOOLS]
+TOOLS = [*MEMORY_TOOLS, *MESSAGE_TOOLS, *ACTION_TOOLS]
 
 
 def _qualified(tool_name: str) -> str:
@@ -60,14 +62,18 @@ def _external_server(entry: MCPServerConfig) -> dict[str, Any] | None:
     return None
 
 
-def build_tool_server(config: Config) -> tuple[dict[str, Any], list[str], MemoryStore | None]:
+def build_tool_server(
+    config: Config,
+) -> tuple[dict[str, Any], list[str], MemoryStore | None, ActionJournal | None]:
     """Assemble Ciel's MCP servers: the in-process one plus external connectors.
 
     Returns the ``mcp_servers`` mapping, the tool names to add to
-    ``allowed_tools``, and the memory store (so the caller can build the index
-    for the system prompt).
+    ``allowed_tools``, the memory store (so the caller can build the index
+    for the system prompt), and the action journal (so the brain can hook
+    its recorder up to the same instance this registry's tool reads).
     """
     store: MemoryStore | None = None
+    journal: ActionJournal | None = None
     tools = list(TOOLS)
 
     if config.memory.enabled:
@@ -78,6 +84,15 @@ def build_tool_server(config: Config) -> tuple[dict[str, Any], list[str], Memory
         # call, which wastes a turn and confuses the model. Better to not offer
         # them at all.
         tools = [t for t in tools if t not in MEMORY_TOOLS]
+
+    if config.journal.enabled:
+        journal = ActionJournal(config.journal)
+        journal.ensure()
+        bind_journal(journal)
+    else:
+        # Same reasoning as memory: a recent_actions that always answers
+        # "unavailable" wastes a turn and teaches the model not to try.
+        tools = [t for t in tools if t not in ACTION_TOOLS]
 
     if config.messages.enabled:
         bind_messages(MessagesClient(config.messages))
@@ -133,7 +148,7 @@ def build_tool_server(config: Config) -> tuple[dict[str, Any], list[str], Memory
 
     if allowed:
         log.debug("allowed tools: %s", ", ".join(allowed))
-    return servers, allowed, store
+    return servers, allowed, store, journal
 
 
 __all__ = ["TOOLS", "SERVER_NAME", "build_tool_server"]
