@@ -132,6 +132,7 @@ class Pipeline:
                     stt=self._stt,
                     tts=self._tts,
                     noise_floor=lambda: self._noise_floor,
+                    record=self._record,
                 )
                 await player.play(self._tts.stream("Ciel here."))
                 mic.drain()

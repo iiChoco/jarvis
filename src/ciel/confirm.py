@@ -102,6 +102,7 @@ class VoiceConfirmBroker:
         self._stt: SpeechToText | None = None
         self._tts: TextToSpeech | None = None
         self._noise_floor: Callable[[], float | None] = lambda: None
+        self._record: Callable[[str, str], None] | None = None
 
     # ── pipeline-side wiring ─────────────────────────────────────────────────
 
@@ -113,13 +114,21 @@ class VoiceConfirmBroker:
         stt: SpeechToText,
         tts: TextToSpeech,
         noise_floor: Callable[[], float | None],
+        record: Callable[[str, str], None] | None = None,
     ) -> None:
-        """Attach the audio machinery, which only exists inside ``run()``."""
+        """Attach the audio machinery, which only exists inside ``run()``.
+
+        ``record`` is the pipeline's transcript writer, so the confirmation
+        exchange lands in the conversation record like every other spoken
+        sentence — a gate whose questions are missing from the transcript
+        reads later as actions that ran unasked.
+        """
         self._player = player
         self._mic = mic
         self._stt = stt
         self._tts = tts
         self._noise_floor = noise_floor
+        self._record = record
 
     def unbind(self) -> None:
         self._player = None
@@ -127,6 +136,7 @@ class VoiceConfirmBroker:
         self._stt = None
         self._tts = None
         self._noise_floor = lambda: None
+        self._record = None
 
     @property
     def active(self) -> bool:
@@ -203,7 +213,9 @@ class VoiceConfirmBroker:
                             await self._speak("No answer — skipping it.")
                         return False
                     heard = (await self._stt.transcribe(utterance)).strip()
-                    print(f"\n  you (confirm): {heard}", flush=True)
+                    print(f"  you (confirm): {heard}", flush=True)
+                    if self._record is not None:
+                        self._record("you-confirm", heard)
                     verdict = yes_no(heard)
                     if verdict is True:
                         return True
@@ -229,6 +241,12 @@ class VoiceConfirmBroker:
         assert self._player is not None and self._tts is not None
         self._phase = _Phase.PROMPT
         self._barge_run = 0
+        # Echoed like every other spoken sentence: the console and transcript
+        # are the record of what was said, and a gate that asks invisibly
+        # reads later as an action that ran unasked.
+        print(f"\n  ciel (confirm): {text}", flush=True)
+        if self._record is not None:
+            self._record("ciel-confirm", text)
         try:
             await self._player.play(self._tts.stream(text))
         except Exception:  # noqa: BLE001

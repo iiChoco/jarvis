@@ -115,9 +115,12 @@ async def run_ask(
     config = Config(shell=ShellConfig(confirm_timeout_ms=timeout_ms))
     broker = VoiceConfirmBroker(config, endpointer=FakeEndpointer(every))
     tts, player, mic = FakeTTS(), FakePlayer(), FakeMic()
+    recorded: list[tuple[str, str]] = []
+    tts.recorded = recorded
     broker.bind(
         player=player, mic=mic, stt=FakeSTT(transcripts), tts=tts,
         noise_floor=lambda: 0.01,
+        record=lambda speaker, text: recorded.append((speaker, text)),
     )
     task = asyncio.create_task(broker.ask("Run: touch note.txt — okay?"))
     for i in range(3000):
@@ -184,6 +187,9 @@ async def main() -> None:
     check("yes -> approved", result is True)
     check("prompt spoken first", tts.spoken[0].startswith("Run: touch note.txt"))
     check("mic drained before listening", mic.drains >= 1)
+    check("exchange recorded to the transcript",
+          ("ciel-confirm", "Run: touch note.txt — okay?") in tts.recorded
+          and ("you-confirm", "yes") in tts.recorded)
 
     result, tts, _ = await run_ask(["no thanks"])
     check("no -> denied", result is False)
