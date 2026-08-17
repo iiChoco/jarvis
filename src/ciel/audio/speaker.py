@@ -216,7 +216,7 @@ class SpeakerGate:
         embedding = await asyncio.to_thread(self._encoder.embed, utterance)
         similarity = float(np.max(self._references @ embedding))
 
-        threshold = self._config.threshold
+        threshold = self._config.threshold - self._short_discount(len(utterance))
         if (
             self._last_pass is not None
             and time.monotonic() - self._last_pass < self._config.recent_window_s
@@ -230,6 +230,21 @@ class SpeakerGate:
 
         await asyncio.to_thread(self._keep_rejected, utterance, similarity)
         return False, similarity
+
+    def _short_discount(self, samples: int) -> float:
+        """Threshold leniency that tapers with utterance length.
+
+        A one-second embedding is a weak measurement and the same speaker
+        legitimately scores lower on it; demanding full-sentence confidence
+        from "what time is it" is what makes the gate feel broken. Maximal at
+        the min-utterance floor, zero at ``full_confidence_s`` and beyond.
+        """
+        full = self._config.full_confidence_s * SAMPLE_RATE
+        floor = self._min_samples
+        if full <= floor:
+            return 0.0
+        fraction = (full - samples) / (full - floor)
+        return self._config.short_discount * float(np.clip(fraction, 0.0, 1.0))
 
     def _keep_rejected(self, utterance: np.ndarray, similarity: float) -> None:
         """Save a rejected utterance so a false rejection can teach the gate.

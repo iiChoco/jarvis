@@ -40,27 +40,34 @@ from ciel.audio.speaker import (
 from ciel.audio.vad import Endpointer
 from ciel.config import SAMPLE_RATE, load_config
 
-# (instruction, example) — the variety is the point; see the module docstring.
+# (instruction, example, minimum seconds) — the variety is the point; see the
+# module docstring. The short takes matter as much as the long ones: scoring
+# is best-match, and a one-second command can only match well against a
+# reference that is itself short — an embedding of "what time is it" looks
+# systematically different from one of a full sentence, even from the same
+# mouth.
 TAKES = [
     ("normally, like asking from your desk",
-     "Hey jarvis, what's the weather looking like tomorrow?"),
+     "Hey jarvis, what's the weather looking like tomorrow?", 1.0),
     ("normally",
-     "Add a reminder to call the dentist on Thursday afternoon."),
+     "Add a reminder to call the dentist on Thursday afternoon.", 1.0),
     ("quickly, like you're on your way out the door",
-     "Actually cancel that, I'll deal with it next week instead."),
+     "Actually cancel that, I'll deal with it next week instead.", 1.0),
     ("softly, like someone's asleep nearby",
-     "Read me the last email from the university, please."),
+     "Read me the last email from the university, please.", 1.0),
     ("louder, from a step or two away from the microphone",
-     "Hey jarvis, did anything land on my calendar this morning?"),
+     "Hey jarvis, did anything land on my calendar this morning?", 1.0),
     ("casually, mid-thought, like talking to a friend",
-     "So I was thinking we could move that meeting to Friday maybe."),
+     "So I was thinking we could move that meeting to Friday maybe.", 1.0),
     ("normally, first thing in the morning voice if you can fake it",
-     "What time is it right now?"),
+     "What time is it right now?", 0.6),
+    ("briefly — just these few words",
+     "What's the time?", 0.6),
+    ("briefly again",
+     "Yes, go ahead.", 0.6),
     ("however you actually talk to Ciel",
-     "Send a quick email to myself with the grocery list."),
+     "Send a quick email to myself with the grocery list.", 1.0),
 ]
-
-ADD_TAKES = 3
 
 
 async def capture(mic: MicStream, endpointer: Endpointer) -> np.ndarray:
@@ -77,14 +84,14 @@ async def capture(mic: MicStream, endpointer: Endpointer) -> np.ndarray:
 async def record_takes(config, encoder, prompts) -> list[np.ndarray]:
     embeddings: list[np.ndarray] = []
     async with MicStream(config.audio) as mic:
-        for i, (style, example) in enumerate(prompts, 1):
+        for i, (style, example, min_s) in enumerate(prompts, 1):
             print(f"\n[{i}/{len(prompts)}] Say — {style}:\n    “{example}”")
             while True:
                 utterance = await capture(mic, Endpointer(config.audio))
                 seconds = len(utterance) / SAMPLE_RATE
-                if seconds >= 1.0:
+                if seconds >= min_s:
                     break
-                print(f"    only {seconds:.1f}s — say a full sentence, retrying")
+                print(f"    only {seconds:.1f}s — a little more, retrying")
             embeddings.append(encoder.embed(utterance))
             print(f"    captured {seconds:.1f}s")
     return embeddings
@@ -120,15 +127,16 @@ async def add(config, encoder) -> None:
     if load_profile(config.voice.profile) is None:
         print("no profile yet — run without --add first")
         sys.exit(1)
-    print("Three more takes. Use the voice or distance the gate keeps missing.")
+    print("Three more takes. Use the voice, distance, or sentence length "
+          "the gate keeps missing.")
     prompts = [
         ("in the condition that's been failing",
-         "Hey jarvis, can you check my calendar for tomorrow?"),
+         "Hey jarvis, can you check my calendar for tomorrow?", 0.6),
         ("same condition, different words",
-         "What's the latest email in my inbox right now?"),
+         "What's the latest email in my inbox right now?", 0.6),
         ("same condition once more",
-         "Remind me to water the plants this evening."),
-    ][:ADD_TAKES]
+         "Remind me to water the plants this evening.", 0.6),
+    ]
     embeddings = await record_takes(config, encoder, prompts)
     total = add_to_profile(config.voice.profile, embeddings)
     print(f"\nprofile now holds {total} takes")
@@ -180,17 +188,30 @@ async def test(config, encoder) -> None:
         sys.exit(1)
     print(f"Profile holds {len(references) - 1} takes (+centroid). "
           "Say anything; ctrl-C to stop.")
+    voice = config.voice
+    floor_s = voice.min_utterance_ms / 1000
     async with MicStream(config.audio) as mic:
         endpointer = Endpointer(config.audio)
         while True:
             utterance = await capture(mic, endpointer)
+            seconds = len(utterance) / SAMPLE_RATE
             embedding = encoder.embed(utterance)
             sims = references @ embedding
             best, centroid = float(np.max(sims)), float(sims[-1])
-            verdict = "you" if best >= config.voice.threshold else "NOT you"
-            print(f"  best {best:.2f} (centroid {centroid:.2f}, "
-                  f"best take #{int(np.argmax(sims)) + 1}) → {verdict} "
-                  f"(threshold {config.voice.threshold})")
+            # Mirror the gate's duration taper so the verdict here matches
+            # what the pipeline would decide (grace margin aside).
+            fraction = 0.0
+            if voice.full_confidence_s > floor_s:
+                fraction = min(1.0, max(
+                    0.0,
+                    (voice.full_confidence_s - seconds)
+                    / (voice.full_confidence_s - floor_s),
+                ))
+            effective = voice.threshold - voice.short_discount * fraction
+            verdict = "you" if best >= effective else "NOT you"
+            print(f"  {seconds:.1f}s, best {best:.2f} (centroid {centroid:.2f}, "
+                  f"take #{int(np.argmax(sims)) + 1}) → {verdict} "
+                  f"(effective threshold {effective:.2f})")
 
 
 async def main() -> None:

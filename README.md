@@ -229,7 +229,9 @@ the TV, guests, and background chatter; it will not resist a recording of
 your voice, and a heavy cold moves your own score (lower the threshold that
 week). Utterances under 600 ms ("yes") pass unjudged — half a word embeds as
 noise — which is fine because they only matter inside a conversation your
-verified utterance already started. No profile enrolled? The gate fails open
+verified utterance already started. Between 600 ms and ~2.5 s the threshold
+tapers: a one-second embedding is a weaker measurement, and the same speaker
+legitimately scores lower on "what's the time" than on a full sentence. No profile enrolled? The gate fails open
 and says so at startup, because an identity filter that silently bricks the
 assistant is worse than the strangers it filters.
 

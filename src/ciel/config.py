@@ -195,6 +195,20 @@ class VoiceConfig:
     noise, and the short utterances that matter ("yes", "no") occur inside a
     conversation your verified command already started."""
 
+    short_discount: float = 0.12
+    """Extra threshold leniency for short utterances, at its maximum right
+    at the ``min_utterance_ms`` floor and tapering to zero by
+    ``full_confidence_s``. An embedding of one second of speech is a much
+    weaker measurement than one of three — the same speaker legitimately
+    scores lower on short commands — and demanding full-sentence confidence
+    from "what time is it" is what makes a gate feel broken. A clearly
+    different voice still fails the relaxed bar by a wide margin."""
+
+    full_confidence_s: float = 2.5
+    """Speech duration at which the embedding is trusted in full and the
+    short-utterance discount reaches zero. Beyond a couple of seconds, more
+    audio stops changing the embedding much."""
+
     recent_margin: float = 0.05
     """How much the threshold relaxes shortly after a verified pass. The
     costliest false rejection is the mid-conversation one — you asked,

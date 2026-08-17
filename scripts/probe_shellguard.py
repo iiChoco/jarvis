@@ -438,16 +438,18 @@ async def main() -> None:
     ok, sim = await gate.check(one_second)
     check("matches a single take, not just the centroid", ok and sim > 0.98)
 
-    # Borderline speaker (0.47 vs one take, orthogonal to the rest): rejected
-    # cold, accepted within the grace window of the pass above (0.5 - 0.05
-    # margin), rejected again outside it.
+    # Borderline speaker (0.47 vs one take, orthogonal to the rest), tested
+    # at full length so the duration taper is zero and only the grace margin
+    # is in play: accepted within the window of the pass above (0.5 - 0.05),
+    # rejected once the window expires.
     borderline = np.zeros(8, dtype=np.float32)
     borderline[0], borderline[2] = 0.47, np.sqrt(1 - 0.47**2)
     encoder.next = borderline
-    ok, sim = await gate.check(one_second)
+    full_length = np.zeros(3 * 16000, dtype=np.float32)
+    ok, sim = await gate.check(full_length)
     check("borderline passes inside the grace window", ok and 0.45 < sim < 0.5)
     gate._last_pass = None  # simulate the window expiring
-    ok, sim = await gate.check(one_second)
+    ok, sim = await gate.check(full_length)
     check("borderline rejected outside the window", not ok)
 
     encoder.next = stranger
@@ -459,6 +461,19 @@ async def main() -> None:
 
     ok, sim = await gate.check(np.zeros(4800, dtype=np.float32))  # 0.3 s
     check("too-short utterance passes unjudged", ok and math.isnan(sim))
+
+    # Duration taper: a 0.43-similarity speaker fails at full length but
+    # passes on a short utterance, where the same speaker legitimately
+    # scores lower. (grace window cleared so only the taper is in play)
+    shortish = np.zeros(8, dtype=np.float32)
+    shortish[0], shortish[2] = 0.43, np.sqrt(1 - 0.43**2)
+    encoder.next = shortish
+    gate._last_pass = None
+    ok_long, _ = await gate.check(np.zeros(3 * 16000, dtype=np.float32))
+    gate._last_pass = None
+    ok_short, _ = await gate.check(np.zeros(int(0.8 * 16000), dtype=np.float32))
+    check("borderline fails long but passes short (duration taper)",
+          not ok_long and ok_short)
 
     unenrolled = SpeakerGate(
         VoiceConfig(enabled=True, profile=iff_tmp / "missing.npz"), FakeEncoder()
