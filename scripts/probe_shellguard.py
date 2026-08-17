@@ -121,6 +121,7 @@ async def run_ask(
     every: int | None = 5,
     timeout_ms: int = 8000,
     cancel_after: int | None = None,
+    typed: list[tuple[int, str]] | None = None,
 ) -> tuple[bool, FakeTTS, FakeMic]:
     config = Config(shell=ShellConfig(confirm_timeout_ms=timeout_ms))
     broker = VoiceConfirmBroker(config, endpointer=FakeEndpointer(every))
@@ -132,11 +133,17 @@ async def run_ask(
         noise_floor=lambda: 0.01,
         record=lambda speaker, text: recorded.append((speaker, text)),
     )
+    # (iteration, text) pairs offered via the typed path, the way the frame
+    # loop offers stdin lines: retried until the broker takes them.
+    pending_typed = list(typed or [])
     task = asyncio.create_task(broker.ask("Run: touch note.txt — okay?"))
     for i in range(3000):
         if task.done():
             break
         if broker.active:
+            if pending_typed and i >= pending_typed[0][0]:
+                if broker.answer(pending_typed[0][1]):
+                    pending_typed.pop(0)
             broker.feed(FRAME)
         if cancel_after is not None and i == cancel_after:
             broker.cancel("test")
@@ -223,6 +230,49 @@ async def main() -> None:
     check("cancel mid-listen -> fast deny", result is False)
     check("no spoken postscript after cancel",
           all("skipping" not in s for s in tts.spoken[1:]))
+
+    # Typed answers (Isomorphism): no endpointer utterance, no STT — the
+    # keyboard alone discharges the obligation.
+    result, tts, _ = await run_ask([], every=None, typed=[(10, "yes")])
+    check("typed yes -> approved, no audio needed", result is True)
+    check("typed exchange recorded to the transcript",
+          ("you-confirm", "yes") in tts.recorded)
+
+    result, tts, _ = await run_ask([], every=None, typed=[(10, "no")])
+    check("typed no -> denied", result is False)
+    check("typed denial acknowledged", tts.spoken[-1] == "Okay, skipping it.")
+
+    result, tts, _ = await run_ask([], every=None, typed=[(10, "banana"), (400, "yes")])
+    check("typed unclear re-prompts, typed yes approves", result is True)
+    check("re-prompt spoken for typed answer too", "Yes or no?" in tts.spoken)
+
+    # WAIT_IDLE refuses typed lines: the question hasn't been put yet, and a
+    # line typed then is the user's next request, not a clairvoyant answer.
+    broker = VoiceConfirmBroker(
+        Config(shell=ShellConfig(confirm_timeout_ms=8000)),
+        endpointer=FakeEndpointer(None),
+    )
+    tts, player, mic = FakeTTS(), FakePlayer(), FakeMic()
+    player.is_playing = True  # the turn's own sentence is still going
+    broker.bind(player=player, mic=mic, stt=FakeSTT([]), tts=tts,
+                noise_floor=lambda: 0.01)
+    task = asyncio.create_task(broker.ask("Run: touch note.txt — okay?"))
+    await asyncio.sleep(0.05)
+    check("typed line during WAIT_IDLE refused", broker.answer("early") is False)
+    player.is_playing = False
+    for _ in range(500):
+        if task.done():
+            break
+        if broker.active:
+            broker.answer("yes")
+            broker.feed(FRAME)
+        await asyncio.sleep(0.002)
+    check("typed yes after the prompt approves",
+          await asyncio.wait_for(task, 2.0) is True)
+
+    idle_broker = VoiceConfirmBroker(Config(), endpointer=FakeEndpointer(None))
+    check("typed answer with no question pending is refused",
+          idle_broker.answer("yes") is False)
 
     config = Config(shell=ShellConfig(confirm_timeout_ms=300))
     broker = VoiceConfirmBroker(config, endpointer=FakeEndpointer(None))

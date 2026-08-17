@@ -47,6 +47,7 @@ the docs — and you — get to use.
 | **Discontinuity** | Barge-in — a jump that ends the current segment |
 | **Analytic Continuation** | Autoreload — the process is replaced, the conversation extends through it |
 | **Neighborhood** | The follow-up window — an open ball around the last turn, no wake word inside |
+| **Isomorphism** | The typed lane — a line on stdin maps structure-preservingly onto a spoken turn: same brain, same session, same transcript, no audio either way |
 | **Invariant** | Long-term memory — what survives every session transformation |
 | **Closure** | End-of-conversation reflection — capturing the limit points before the session is discarded |
 | **Atlas** | Projects — durable charts of ongoing work, with an index that says which chart to open |

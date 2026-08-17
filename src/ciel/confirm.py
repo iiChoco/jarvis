@@ -27,6 +27,12 @@ speaker and microphone:
 The answer window mirrors the follow-up window's contract: the deadline covers
 *starting* to speak, and once the endpointer has speech in hand a slow
 "hmm... yes, go ahead" is never cut off at the clock.
+
+A typed line is as good as a spoken one: the pipeline routes keyboard input to
+:meth:`answer` while a question is pending, so a turn that arrived through the
+chatbox can be confirmed without switching to voice. Same classifier, same
+one-re-prompt-then-deny contract — the modality changes, the obligation
+doesn't.
 """
 
 from __future__ import annotations
@@ -100,6 +106,7 @@ class VoiceConfirmBroker:
         self._phase = _Phase.IDLE
         self._suppressed = 0
         self._utterance: asyncio.Future[np.ndarray | None] | None = None
+        self._typed_answer: str | None = None
         self._barge_run = 0
 
         self._player: Player | None = None
@@ -163,6 +170,27 @@ class VoiceConfirmBroker:
         # WAIT_IDLE: dropped. The playing sentence belongs to _respond;
         # interrupting it here would read as barge-in and abandon the turn.
 
+    def answer(self, text: str) -> bool:
+        """Accept a typed answer to the pending question.
+
+        Returns whether the line was consumed — False outside PROMPT/LISTEN,
+        so the pipeline keeps unconsumed lines queued as ordinary turns
+        instead of losing them. WAIT_IDLE is deliberately excluded: the
+        question hasn't been put yet, and a line typed before it appears is
+        far more likely the user's next request than a clairvoyant answer.
+
+        Typing over the prompt is the keyboard's barge-in, and unlike the
+        acoustic kind it needs no echo cancellation to be trusted — a
+        keystroke is never Ciel's own voice. Stopping the prompt here is
+        broker-owned, same as :meth:`_check_early_answer`.
+        """
+        if self._phase not in (_Phase.PROMPT, _Phase.LISTEN):
+            return False
+        self._typed_answer = text
+        if self._phase is _Phase.PROMPT and self._player is not None:
+            self._player.stop()
+        return True
+
     @contextmanager
     def suppress(self) -> "Iterator[None]":
         """Deny every confirmation inside the block, silently and instantly.
@@ -211,6 +239,7 @@ class VoiceConfirmBroker:
 
         async with self._lock:
             self._cancelled.clear()
+            self._typed_answer = None  # a cancel can leave a stale one behind
             self._phase = _Phase.WAIT_IDLE
             try:
                 while self._player.is_playing:
@@ -231,12 +260,18 @@ class VoiceConfirmBroker:
                     self._endpointer.reset()
                     self._phase = _Phase.LISTEN
                     utterance = await self._await_utterance()
-                    if utterance is None:
-                        if not self._cancelled.is_set():
-                            await self._speak("No answer — skipping it.")
+                    typed, self._typed_answer = self._typed_answer, None
+                    if self._cancelled.is_set():
                         return False
-                    heard = (await self._stt.transcribe(utterance)).strip()
-                    print(f"  you (confirm): {heard}", flush=True)
+                    if typed is not None:
+                        heard = typed.strip()
+                        print(f"  you (confirm, typed): {heard}", flush=True)
+                    elif utterance is None:
+                        await self._speak("No answer — skipping it.")
+                        return False
+                    else:
+                        heard = (await self._stt.transcribe(utterance)).strip()
+                        print(f"  you (confirm): {heard}", flush=True)
                     if self._record is not None:
                         self._record("you-confirm", heard)
                     verdict = yes_no(heard)
@@ -312,7 +347,7 @@ class VoiceConfirmBroker:
             while True:
                 if self._utterance.done():
                     return self._utterance.result()
-                if self._cancelled.is_set():
+                if self._typed_answer is not None or self._cancelled.is_set():
                     return None
                 if time.monotonic() >= deadline and not self._endpointer.speaking:
                     return None

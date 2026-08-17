@@ -9,12 +9,14 @@ frame means completely different things depending on where we are: before the
 wake word it's noise to be scored, during an utterance it's speech to be
 buffered, and while Ciel is talking it's a possible interruption.
 
-Three of this file's behaviors carry codenames: **Cauchy** (the mid-thought
+Four of this file's behaviors carry codenames: **Cauchy** (the mid-thought
 hold — a transcript that doesn't read as finished means the tail hasn't
 settled yet, so don't declare the sequence converged), **Discontinuity**
-(barge-in — a jump that ends the
-current segment), and **Neighborhood** (the follow-up window — an open ball
-around the last turn, inside which no wake word is required).
+(barge-in — a jump that ends the current segment), **Neighborhood** (the
+follow-up window — an open ball around the last turn, inside which no wake
+word is required), and **Isomorphism** (the typed lane — a line on stdin is
+a structure-preserving image of a spoken turn: same brain, same session,
+same transcript, no audio on either side).
 """
 
 from __future__ import annotations
@@ -25,7 +27,9 @@ import logging
 import math
 import random
 import re
+import sys
 import time
+from collections import deque
 from contextlib import aclosing
 from enum import Enum, auto
 from pathlib import Path
@@ -238,6 +242,11 @@ class Pipeline:
         self._conversed = False  # any speech since the last WAITING — outlives _spoke
         self._pending_text: str | None = None
         self._continue_listening = False
+        self._typed: deque[str] = deque()
+        """Lines from stdin awaiting their turn (Isomorphism). A deque, not a
+        variable: lines can arrive faster than turns complete, and dropping
+        one would silently eat a request the user watched themselves type."""
+        self._stdin_task: asyncio.Task[None] | None = None
 
         self._schedule = IdleSchedule(
             config.reflection.idle_delay_s if config.reflection.enabled else None,
@@ -281,6 +290,7 @@ class Pipeline:
                 )
                 await player.play(self._tts.stream("Ciel here."))
                 mic.drain()
+                self._stdin_task = asyncio.create_task(self._read_stdin())
                 self._announce_ready()
 
                 # One loop, always consuming. The turn runs as a task rather
@@ -293,7 +303,35 @@ class Pipeline:
                     # can still be pending, and a pending confirmation that
                     # stops receiving frames never resolves.
                     if self._confirm.active:
+                        # A typed line while a question is pending is an
+                        # answer, if the broker will take it; otherwise it
+                        # stays queued and becomes the next turn.
+                        if self._typed and self._confirm.answer(self._typed[0]):
+                            self._typed.popleft()
                         self._confirm.feed(frame)
+                        continue
+
+                    if (
+                        self._typed
+                        and self._state is not State.BUSY
+                        and not self._endpointer.speaking
+                        and self._pending_text is None
+                    ):
+                        # The keyboard takes the turn, but never *steals* one:
+                        # not while a turn runs (BUSY — the line queues as the
+                        # next turn), not mid-utterance (the spoken sentence
+                        # finishes first), not while Cauchy holds a partial
+                        # thought (the hold resolves, then the line runs).
+                        if self._maintenance is not None and not self._maintenance.done():
+                            # Same hastening the wake path does: the typed
+                            # turn serializes on the brain's lock, and an
+                            # unhurried reflection would hold it for seconds.
+                            await self._brain.interrupt()
+                        self._state = State.BUSY
+                        self._barge_run = 0
+                        turn = asyncio.create_task(
+                            self._handle_typed_turn(self._typed.popleft())
+                        )
                         continue
 
                     if self._state is State.WAITING:
@@ -395,6 +433,8 @@ class Pipeline:
             # and leaving it unresolved would hang brain.close() in shutdown.
             self._confirm.cancel("shutting down")
             self._confirm.unbind()
+            if self._stdin_task is not None and not self._stdin_task.done():
+                self._stdin_task.cancel()
             if self._maintenance is not None and not self._maintenance.done():
                 self._maintenance.cancel()
             if turn is not None and not turn.done():
@@ -489,6 +529,87 @@ class Pipeline:
         if self._config.audio.filler_extend_ms <= 0:
             return False
         return trails_off(heard, self._config.audio)
+
+    async def _handle_typed_turn(self, text: str) -> None:
+        """One turn that arrived through the keyboard (Isomorphism).
+
+        Same brain, same session, same transcript as a spoken turn — the
+        differences are all at the edges. Inbound: no STT and no speaker
+        gate; a keystroke needs neither transcription nor identity proof
+        against the TV. Outbound: no TTS — typing instead of talking is a
+        request for quiet, so the reply streams to the console only.
+
+        ``_spoke`` stays False on purpose: the follow-up window exists to
+        waive the wake word, and the keyboard never needed one — every line
+        is already a turn. A confirm-tier tool mid-turn still voices its
+        question (the broker owns that choreography), but a typed yes or no
+        answers it just as well.
+        """
+        self._indicator.set_state("thinking")
+        self._spoke = False
+        try:
+            print(f"\n  you (typed): {text}")
+            self._record("user", text)
+            started = time.monotonic()
+            # Same aclosing obligation as _respond: ask() holds the brain's
+            # turn lock, and an abandoned generator would deadlock the next
+            # turn behind it.
+            async with aclosing(self._brain.ask(text)) as stream:
+                async for kind, sentence in stream:
+                    if kind == "thinking":
+                        print(f"  ciel (thinking): {sentence}")
+                        self._record("ciel-thinking", sentence)
+                    else:
+                        print(f"  ciel: {sentence}")
+                        self._record("ciel", sentence)
+                    # Typed exchanges are conversations too: Closure owes
+                    # them the same reflection, rotation the same fresh
+                    # session afterwards.
+                    self._conversed = True
+            log.info(
+                "typed turn: %.2fs total, $%.4f",
+                time.monotonic() - started,
+                self._brain.last_turn_cost_usd,
+            )
+        except Exception:
+            log.exception("typed turn failed")
+            self._indicator.set_state("error")
+            self._record("event", "typed turn failed")
+            print("  (something went wrong there — see the log)", flush=True)
+
+    async def _read_stdin(self) -> None:
+        """Feed typed lines into the turn queue — the tier-one chatbox.
+
+        The terminal Ciel runs in doubles as the chat surface: every
+        non-empty line becomes a turn, or an answer when a confirmation is
+        pending. Consumption happens on the frame loop, not here, so the
+        one-place-decides-state rule holds for the keyboard exactly as it
+        does for the microphone.
+
+        Degrades to nothing, silently, when stdin isn't readable — launchd,
+        a closed terminal, probes piping their own stdin. Typed input is a
+        convenience like the indicator: it must never be able to take the
+        voice loop down with it.
+        """
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        try:
+            await loop.connect_read_pipe(
+                lambda: asyncio.StreamReaderProtocol(reader), sys.stdin
+            )
+        except (OSError, ValueError):
+            log.debug("stdin not readable — typed input disabled", exc_info=True)
+            return
+        while True:
+            raw = await reader.readline()
+            if not raw:
+                # EOF. The terminal went away or piped input ran dry; voice
+                # carries on without a chatbox.
+                log.debug("stdin closed — typed input disabled")
+                return
+            line = raw.decode(errors="replace").strip()
+            if line:
+                self._typed.append(line)
 
     async def _respond(self, text: str, player: Player, mic: MicStream) -> None:
         print(f"\n  you: {text}")
