@@ -1,5 +1,7 @@
 """Durable memory — facts that outlive the conversation they were learned in.
 
+Codename: **Logbook**.
+
 This is the deeper half of memory. Session resume (see ``brain/session.py``)
 picks up a thread you were already on; this is what lets Ciel know your name
 three weeks and forty conversations later, after the session that learned it

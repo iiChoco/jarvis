@@ -8,6 +8,11 @@ The loop is a small state machine. The states matter because the same incoming
 frame means completely different things depending on where we are: before the
 wake word it's noise to be scored, during an utterance it's speech to be
 buffered, and while Ciel is talking it's a possible interruption.
+
+Three of this file's behaviors carry codenames: **Holding Pattern** (the
+filler hold — a trailing "um…" keeps the mic circling), **Break-Break**
+(barge-in, the radio phrase for interrupting a transmission), and **Open
+Channel** (the follow-up window — no callsign needed for a reply).
 """
 
 from __future__ import annotations

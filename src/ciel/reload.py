@@ -1,5 +1,8 @@
 """Hot reload — pick up code changes without anyone restarting Ciel by hand.
 
+Codename: **Touch-and-Go** — lands, swaps code, takes off with the session
+intact.
+
 True in-process reloading (importlib.reload) is a minefield for a system like
 this: a running asyncio loop, loaded models, live audio streams, and object
 instances still bound to their old classes. The failure mode is exactly the

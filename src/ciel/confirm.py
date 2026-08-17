@@ -1,5 +1,8 @@
 """Spoken yes-or-no confirmation, bridging a brain hook to the mic loop.
 
+Codename: **Tower Clearance** — nothing side-effectful takes off without a
+spoken "cleared".
+
 The tool guards — the shell gate, the connector gate, whatever fronts an
 outward-acting tool next — need to ask the user a question and hear the
 answer, but they run inside PreToolUse hooks — brain-side, mid-turn — while

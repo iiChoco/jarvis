@@ -1,5 +1,7 @@
 """The shell gate: command classification plus a voice-confirmed hook.
 
+Codename: **Flight Rules** — no-fly, VFR (quiet), or IFR (clearance required).
+
 The workspace guard next door confines paths; it cannot confine a shell,
 because a shell reaches any path by construction (``sh -c 'cat > ~/.zshrc'``).
 So Bash gets its own gate with a different shape: instead of asking "where does

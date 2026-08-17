@@ -1,5 +1,7 @@
 """The wake boundary — how Ciel decides it's being addressed.
 
+Codename: **Callsign**.
+
 Detectors are *fed* frames rather than pulling their own. There is exactly one
 microphone and exactly one reader of it (the pipeline), so a detector that
 opened its own stream would either fail or steal audio from the endpointer.

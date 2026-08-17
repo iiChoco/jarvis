@@ -1,5 +1,7 @@
 """The action journal — what Ciel did, kept long enough to take it back.
 
+Codename: **Black Box** — the flight data recorder that undo works from.
+
 Ciel acts on transcribed speech, and mishearings are discovered *after* the
 action, not before: the wrong file edited, an event created on the wrong day.
 The voice gate handles consent; this handles regret. Every mutating tool call

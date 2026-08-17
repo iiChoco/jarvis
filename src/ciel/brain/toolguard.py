@@ -1,5 +1,8 @@
 """The connector gate: spoken confirmation for outward-acting MCP tools.
 
+Codename: **Tower Clearance**, ground-crew division — the connectors service
+the aircraft, but departures still clear through the tower.
+
 Connector tools run under ``permission_mode="dontAsk"``, which is fine for
 reading a calendar and indefensible for sending mail off a misheard sentence.
 The ``confirm`` list on an ``[mcp.<name>]`` entry names the tools that are

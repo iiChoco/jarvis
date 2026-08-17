@@ -1,5 +1,7 @@
 """Hooks that feed the action journal.
 
+Codename: **Black Box**, sensor side — the instruments that write the tape.
+
 Two hooks around every watched tool call: PreToolUse snapshots the target of
 a file edit *before* it changes, PostToolUse writes the journal entry once the
 result exists — which is what captures the ids an undo needs (the eventId a

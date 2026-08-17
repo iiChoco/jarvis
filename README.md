@@ -28,6 +28,28 @@ Say **"hey jarvis"**, then talk.
 - **Shows what it's doing** — a floating pill in the corner of the screen,
   visible from any app.
 
+## The protocols
+
+Ciel means *sky*, so the subsystems fly under air-traffic-control codenames.
+The identifiers in the code stay literal (`WorkspaceGuard` is a
+`WorkspaceGuard`); these are the names the docs — and you — get to use.
+
+| Codename | System |
+|---|---|
+| **Tower Clearance** | The voice-confirmation gate (`confirm.py`, `shellguard.py`, `toolguard.py`) — nothing side-effectful takes off without a spoken "cleared" |
+| **Flight Rules** | The shell's three tiers — no-fly / VFR (quiet) / IFR (clearance required) |
+| **No-Fly List** | `FORBIDDEN_NAMES` — credentials and startup files, grounded even if you say yes |
+| **Geofence** | The workspace guard — every path resolved and checked against the fence |
+| **Ground Crew** | The MCP connectors — Gmail, Calendar, servicing from outside the cockpit |
+| **Black Box** | The action journal and snapshots (`journal.py`, `recorder.py`) — the flight data recorder undo works from |
+| **CVR** | Conversation transcripts — the cockpit voice recorder, literally |
+| **Callsign** | The wake word |
+| **Holding Pattern** | The filler hold — a trailing "um…" keeps the mic circling |
+| **Break-Break** | Barge-in — the radio phrase for cutting into a transmission |
+| **Touch-and-Go** | Autoreload — lands, swaps code, takes off with the session intact |
+| **Open Channel** | The follow-up window — no callsign needed for a reply |
+| **Logbook** | Long-term memory |
+
 ## Setup
 
 ```bash
