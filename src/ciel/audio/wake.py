@@ -1,6 +1,7 @@
 """The wake boundary — how Ciel decides it's being addressed.
 
-Codename: **Callsign**.
+Codename: **Characteristic** — the indicator function of "am I being
+addressed", one frame at a time.
 
 Detectors are *fed* frames rather than pulling their own. There is exactly one
 microphone and exactly one reader of it (the pipeline), so a detector that
@@ -16,6 +17,7 @@ import asyncio
 import logging
 import sys
 import threading
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 log = logging.getLogger(__name__)
@@ -143,7 +145,10 @@ class OpenWakeWord:
         from openwakeword.utils import download_models
 
         # Idempotent, and a no-op once the ONNX files are cached locally.
-        await asyncio.to_thread(download_models, [self._model_name])
+        # Skipped entirely for a custom model given as a path — the registry
+        # only knows the pretrained names, and the file is already on disk.
+        if not Path(self._model_name).expanduser().exists():
+            await asyncio.to_thread(download_models, [self._model_name])
 
         self._model = await asyncio.to_thread(
             Model,
