@@ -9,9 +9,10 @@ frame means completely different things depending on where we are: before the
 wake word it's noise to be scored, during an utterance it's speech to be
 buffered, and while Ciel is talking it's a possible interruption.
 
-Three of this file's behaviors carry codenames: **Cauchy** (the filler hold —
-a trailing "um…" means the tail hasn't settled yet, so don't declare the
-sequence finished), **Discontinuity** (barge-in — a jump that ends the
+Three of this file's behaviors carry codenames: **Cauchy** (the mid-thought
+hold — a transcript that doesn't read as finished means the tail hasn't
+settled yet, so don't declare the sequence converged), **Discontinuity**
+(barge-in — a jump that ends the
 current segment), and **Neighborhood** (the follow-up window — an open ball
 around the last turn, inside which no wake word is required).
 """
@@ -39,7 +40,7 @@ from ciel.audio.wake import WakeDetector, build_wake_detector
 from ciel.brain.agent import Brain
 from ciel.brain.prompt import REFLECTION_PROMPT
 from ciel.brain.tools import build_tool_server
-from ciel.config import SAMPLE_RATE, Config
+from ciel.config import SAMPLE_RATE, AudioConfig, Config
 from ciel.confirm import VoiceConfirmBroker
 from ciel.reload import SourceWatcher, default_roots
 from ciel.stt.base import SpeechToText
@@ -55,6 +56,38 @@ class State(Enum):
     WAITING = auto()    # not addressed; frames go to the wake detector
     LISTENING = auto()  # addressed; frames go to the endpointer
     BUSY = auto()       # thinking or speaking; frames watched for barge-in
+
+
+def trails_off(heard: str, audio: AudioConfig) -> bool:
+    """Whether a transcript ends mid-thought (the Cauchy hold's judgement).
+
+    The endpoint firing only proves the user *paused*, not that they
+    finished; the transcript is the tiebreaker, and it is read
+    pessimistically:
+
+    * a trailing ellipsis is the transcriber itself saying "trailed off".
+    * ``?``/``!`` are always complete — Whisper doesn't punctuate fragments
+      as questions.
+    * a period is trusted unless the last word is one that can't end a
+      thought (``dangling_words``): Whisper appends periods to fragments
+      out of habit, and "check my." is not a closed sentence.
+    * no closing punctuation at all means the transcriber didn't hear a
+      finished sentence either. This branch is what catches the pause after
+      an "um" — Whisper strips fillers from transcripts, so a hold that
+      waits to *see* one misses exactly the pauses it exists for.
+    """
+    text = heard.rstrip()
+    if text.endswith(("...", "…")):
+        return True
+    if text.endswith(("?", "!")):
+        return False
+    words = text.split()
+    if not words:
+        return False
+    last = re.sub(r"[^a-z']+", "", words[-1].lower())
+    if text.endswith("."):
+        return last in audio.dangling_words
+    return True
 
 
 def build_tts(config: Config) -> TextToSpeech:
@@ -453,26 +486,9 @@ class Pipeline:
                 mic.drain()
 
     def _trails_off(self, heard: str) -> bool:
-        """Whether the newest speech ends mid-thought.
-
-        A trailing filler ("um") or dangling conjunction ("and") means the
-        pause that ended the utterance was hesitation, not completion — worth
-        a longer wait, where an ordinary pause is not.
-        """
         if self._config.audio.filler_extend_ms <= 0:
             return False
-        text = heard.rstrip()
-        if text.endswith(("...", "…")):
-            return True
-        if text.endswith((".", "!", "?")):
-            # The transcriber closed the sentence; trust its judgement. This
-            # is what keeps "I think so." from reading as a dangling "so".
-            return False
-        words = text.split()
-        if not words:
-            return False
-        last = re.sub(r"[^a-z']+", "", words[-1].lower())
-        return last in self._config.audio.filler_words
+        return trails_off(heard, self._config.audio)
 
     async def _respond(self, text: str, player: Player, mic: MicStream) -> None:
         print(f"\n  you: {text}")

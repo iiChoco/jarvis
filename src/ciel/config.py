@@ -50,26 +50,39 @@ class AudioConfig:
 
     Short on purpose — this wait is the single largest piece of perceived
     latency, paid on every turn. The cost of cutting in on a genuine
-    mid-sentence pause is softened by the filler extension below: a pause
-    right after "um" or a dangling "and" gets ``filler_extend_ms`` instead of
-    this. Raise it back toward ~700 if Ciel still interrupts you."""
+    mid-sentence pause is softened by the hold below: a transcript that reads
+    as unfinished gets ``filler_extend_ms`` instead of this. Raise it back
+    toward ~700 if Ciel still interrupts you."""
 
     filler_extend_ms: int = 1500
-    """Extra listening when what you've said so far ends mid-thought — a
-    filler ("um", "uh") or a dangling conjunction ("and", "so"). The partial
-    utterance is held rather than answered; speak again within the window and
-    both halves are joined into one turn. If the window lapses, Ciel answers
-    what it has. Set to 0 to disable holding entirely."""
+    """Extra listening when what you've said so far ends mid-thought. The
+    partial utterance is held rather than answered; speak again within the
+    window and both halves are joined into one turn. If the window lapses,
+    Ciel answers what it has. Set to 0 to disable holding entirely.
 
-    filler_words: tuple[str, ...] = (
+    "Mid-thought" is judged from the transcript, pessimistically: a trailing
+    ellipsis, a transcript with no closing punctuation at all, or a final word
+    from ``dangling_words`` below. The pessimism is deliberate — Whisper
+    strips fillers ("um", "uh") from transcripts, so a hold that waits to
+    *see* a filler misses exactly the pauses fillers announce. The worst case
+    of holding a finished-but-unpunctuated sentence is this many milliseconds
+    of extra wait; the worst case of the optimistic reading is answering half
+    a thought."""
+
+    dangling_words: tuple[str, ...] = (
         "um", "umm", "uh", "uhh", "er", "erm", "hmm", "hm",
-        "and", "or", "but", "so", "because",
+        "and", "or", "but", "because",
+        "the", "a", "an", "my", "your", "our", "their", "his",
+        "to", "of",
     )
-    """Trailing words that signal an unfinished thought, matched against the
-    last transcribed word. A trailing ellipsis counts as trailing off too —
-    but an utterance the transcriber closed with ``.``/``!``/``?`` is taken as
-    complete regardless, which is what keeps "I think so." from being held as
-    a dangling "so"."""
+    """Words that cannot end a finished thought, checked against the last
+    transcribed word even when the transcriber closed the sentence with a
+    period — Whisper appends one to fragments out of habit, and "check my."
+    is not a closed thought. Deliberately absent: "so" ("I think so.") and
+    particles like "on"/"in"/"up" ("turn it on."), which end real sentences
+    all the time. A ``?`` or ``!`` is always trusted as complete — Whisper
+    doesn't punctuate fragments as questions, and "what are you waiting for?"
+    must not hang on its preposition."""
 
     followup_ms: int = 5000
     """How long to keep listening after Ciel speaks before the wake word is

@@ -1,14 +1,15 @@
 #!/usr/bin/env python
 """Dev probe for the audio layer. Not part of the package.
 
-Two modes, because the two halves fail differently and are worth isolating:
+Three modes, because the pieces fail differently and are worth isolating:
 
     uv run scripts/probe_audio.py vad   # endpointing, on synthetic speech
+    uv run scripts/probe_audio.py hold  # Cauchy's mid-thought judgement
     uv run scripts/probe_audio.py mic   # live capture, needs mic permission
 
-The ``vad`` mode is deterministic and needs no hardware, so it's the one to
-reach for when something downstream looks wrong and you want to rule the
-endpointer out.
+``vad`` and ``hold`` are deterministic and need no hardware, so they're the
+ones to reach for when something downstream looks wrong and you want to rule
+the front half out.
 """
 
 from __future__ import annotations
@@ -89,6 +90,60 @@ def probe_vad() -> int:
     return 0 if ok else 1
 
 
+def probe_hold() -> int:
+    """The Cauchy judgement on transcripts Whisper actually produces.
+
+    The held cases are cut-offs observed in practice: fillers stripped by
+    Whisper, pauses after content words, fragments Whisper closed with a
+    period anyway. The complete cases are the sentences that must *not* pay
+    the hold's extra wait — questions ending on prepositions, particles,
+    the protected "I think so.".
+    """
+    from ciel.pipeline import trails_off
+
+    cfg = load_config()
+    cases: list[tuple[str, bool]] = [
+        # Held: the transcriber signalled trailing off outright.
+        ("So I was thinking...", True),
+        ("Add milk and, um…", True),
+        # Held: no closing punctuation — the pause was mid-sentence, and any
+        # spoken "um" that caused it was stripped from the transcript.
+        ("check my", True),
+        ("remind me to call", True),
+        ("Can you add eggs, milk,", True),
+        # Held: Whisper closed a fragment with its habitual period, but the
+        # last word can't end a thought.
+        ("Check my.", True),
+        ("I want to.", True),
+        ("Um.", True),
+        ("It's red and.", True),
+        ("Look at the.", True),
+        # Complete: real sentences, including the shapes the dangling check
+        # must not catch.
+        ("I think so.", False),
+        ("Turn it on.", False),
+        ("What are you waiting for?", False),
+        ("What's the weather like today?", False),
+        ("Stop!", False),
+        ("Set a timer for 10.", False),
+        ("That's all, thanks.", False),
+        ("", False),
+    ]
+
+    ok = True
+    for text, expected in cases:
+        got = trails_off(text, cfg.audio)
+        verdict = "hold" if got else "done"
+        if got != expected:
+            ok = False
+            print(f"  FAIL: {text!r} -> {verdict}, expected {'hold' if expected else 'done'}")
+        else:
+            print(f"  ok:   {verdict}  {text!r}")
+
+    print(f"\nPASS: {len(cases)} transcripts judged correctly" if ok else "")
+    return 0 if ok else 1
+
+
 async def probe_mic() -> int:
     cfg = load_config()
     print("Opening microphone. Say something, then pause.")
@@ -130,7 +185,9 @@ if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "vad"
     if mode == "vad":
         raise SystemExit(probe_vad())
+    if mode == "hold":
+        raise SystemExit(probe_hold())
     if mode == "mic":
         raise SystemExit(asyncio.run(probe_mic()))
-    print(f"unknown mode {mode!r}; expected 'vad' or 'mic'")
+    print(f"unknown mode {mode!r}; expected 'vad', 'hold', or 'mic'")
     raise SystemExit(2)
