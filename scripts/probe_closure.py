@@ -20,10 +20,13 @@ import time
 from contextlib import aclosing
 from pathlib import Path
 
+import json
+
+import ciel.brain.agent as agent_module
 from ciel.brain.agent import Brain
 from ciel.config import Config, JournalConfig, ProjectsConfig, VoiceConfig
 from ciel.confirm import VoiceConfirmBroker
-from ciel.pipeline import IdleSchedule
+from ciel.pipeline import IdleSchedule, rehydrate_schedule
 from ciel.projects import ProjectStore
 
 CHECKS: list[str] = []
@@ -138,6 +141,45 @@ async def main() -> None:
     no_reflect.conversation_ended(0.0)
     check("disabled reflection still rotates", no_reflect.due(601.0) == "rotate")
 
+    print("rehydration across restart:")
+    tmp = Path(tempfile.mkdtemp(prefix="ciel-rehydrate-"))
+    session_file = tmp / "session.json"
+
+    def restart(age_s: float) -> IdleSchedule:
+        """A fresh schedule, as a restarted process would build, rehydrated
+        from a session record that is age_s old at wall time 10_000."""
+        session_file.write_text(
+            json.dumps({"session_id": "s", "updated_at": 10_000 - age_s})
+        )
+        schedule = IdleSchedule(60.0, 600.0)
+        rehydrate_schedule(schedule, session_file, 10.0,
+                           now_wall=10_000, now_mono=5_000)
+        return schedule
+
+    s = restart(age_s=30)  # restarted before reflection was due
+    check("young session: reflect not due yet", s.due(5_000) is None)
+    check("young session: reflect due on the original clock",
+          s.due(5_031.0) == "reflect")
+
+    s = restart(age_s=120)  # after reflect-time, before rotation
+    check("mid-window session: reflect due immediately", s.due(5_000) == "reflect")
+    check("mid-window session: rotation on the original schedule",
+          s.due(5_481.0) == "rotate")  # 600 - 120 = 480 remaining
+
+    s = restart(age_s=700)  # past the resume window
+    check("expired session: nothing armed", s.due(5_000) is None
+          and s.due(1e9) is None)
+
+    session_file.write_text("not json")
+    s = IdleSchedule(60.0, 600.0)
+    check("corrupt session file: rehydration declines",
+          rehydrate_schedule(s, session_file, 10.0,
+                             now_wall=10_000, now_mono=5_000) is False)
+    check("missing session file: rehydration declines",
+          rehydrate_schedule(s, tmp / "absent.json", 10.0,
+                             now_wall=10_000, now_mono=5_000) is False)
+    shutil.rmtree(tmp)
+
     print("ProjectStore (Atlas):")
     tmp = Path(tempfile.mkdtemp(prefix="ciel-atlas-"))
     store = ProjectStore(tmp / "projects", max_state_chars=200, log_tail=3)
@@ -168,6 +210,35 @@ async def main() -> None:
     index = store.index_prompt()
     check("index lists the project with status and recency",
           "wake-word (active)" in index and "ago" in index)
+
+    # Round-trip fidelity: state containing the reserved headings, lists,
+    # and frontmatter-lookalike text must come back byte-exact — the file
+    # format's delimiters are positional, not pattern-matched.
+    tricky = (
+        "Overview\n\n## State\n\nNested details\n\n## Log\n\n- planned item\n\n"
+        "---\nfake: frontmatter\n---\n\n- a list\n- another"
+    )
+    store.write("tricky", tricky[:190])
+    check("reserved headings round-trip byte-exact",
+          store.get("tricky").state == tricky[:190])
+    store.write("empty log", "just state, no log yet")
+    check("empty log round-trips", store.get("empty log").state
+          == "just state, no log yet" and store.get("empty log").log == ())
+    store.append_log("empty log", "first entry")
+    check("log append after empty round-trip works",
+          len(store.get("empty log").log) == 1)
+
+    # Index budget: done projects must not shadow working ones.
+    budget_store = ProjectStore(tmp / "budget", max_index_entries=3)
+    budget_store.write("old active", "s", description="the one that matters")
+    time_ordered = ["done a", "done b", "done c", "done d"]
+    for name in time_ordered:
+        budget_store.write(name, "s", status="done")
+    index = budget_store.index_prompt()
+    check("active project survives a flood of done ones",
+          "old-active (active)" in index)
+    check("done projects only fill spare capacity",
+          index.count("(done)") == 2 and "more not listed" in index)
 
     # Atomicity: a crash between temp-write and replace must leave the old
     # file readable. Simulate by breaking os.replace for one call.
@@ -217,6 +288,62 @@ async def main() -> None:
     check("cost across rotation: total", abs(brain.total_cost_usd - 0.07) < 1e-9)
     check("cost across rotation: last turn never negative",
           abs(brain.last_turn_cost_usd - 0.02) < 1e-9)
+
+    print("failed rotation recovery:")
+    tmp2 = Path(tempfile.mkdtemp(prefix="ciel-rotfail-"))
+
+    class FlakySDKClient:
+        """Stands in for ClaudeSDKClient: first connect raises, rest work."""
+
+        failures = [True, False]
+
+        def __init__(self, options=None):
+            self.options = options
+            self.queries = []
+
+        async def connect(self):
+            if FlakySDKClient.failures.pop(0):
+                raise RuntimeError("simulated SDK spawn failure")
+
+        async def disconnect(self):
+            pass
+
+        async def query(self, text):
+            self.queries.append(text)
+
+        async def receive_response(self):
+            yield make_result("s-recovered", 0.01)
+
+        async def interrupt(self):
+            pass
+
+    real_client_cls = agent_module.ClaudeSDKClient
+    agent_module.ClaudeSDKClient = FlakySDKClient
+    try:
+        brain = make_brain(tmp2, [make_result("s-old", 0.03)])
+        async with aclosing(brain.ask("hello")) as stream:
+            async for _ in stream:
+                pass
+        try:
+            await brain.rotate()
+            rotation_failed = False
+        except RuntimeError:
+            rotation_failed = True
+        check("rotation failure surfaces", rotation_failed)
+        check("failed rotation leaves no half-connected client",
+              brain._client is None)
+        check("failed rotation released the lock", not brain._turn_lock.locked())
+        # The next user turn reconnects on demand and succeeds.
+        replies = []
+        async with aclosing(brain.ask("are you there?")) as stream:
+            async for _kind, sentence in stream:
+                replies.append(sentence)
+        check("next turn reconnects after a failed rotation",
+              isinstance(brain._client, FlakySDKClient)
+              and brain._client.queries == ["are you there?"])
+    finally:
+        agent_module.ClaudeSDKClient = real_client_cls
+    shutil.rmtree(tmp2)
 
     print("turn lock lifecycle:")
     # Path 1: interrupt-hastened reflection releases the lock cleanly.

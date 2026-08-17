@@ -39,7 +39,14 @@ log = logging.getLogger(__name__)
 VALID_STATUSES = ("active", "paused", "done")
 
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n?(.*)\Z", re.DOTALL)
-_SECTIONS = re.compile(r"^## (State|Log)\s*$", re.MULTILINE)
+
+# The exact strings _save() emits around the state. Parsing leans on the
+# writer's structure, not on pattern-matching the content: the state is
+# whatever sits between the head prefix and the LAST log delimiter, so a
+# state that itself contains "## State" or "## Log" headings round-trips
+# byte-exact — the real log delimiter is always the one we appended after it.
+_STATE_HEAD = "## State\n\n"
+_LOG_DELIM = "\n\n## Log\n\n"
 
 
 def _iso(ts: float) -> str:
@@ -199,14 +206,22 @@ class ProjectStore:
             "(exact name below) before doing any work on it.",
             "",
         ]
-        for project in projects[: self._max_index]:
+        # Working projects claim the budget first; done ones fill whatever is
+        # left. Marking a project done must *free* index capacity — a recent
+        # completion that could shadow an older active project would punish
+        # exactly the hygiene the index message asks for.
+        working = [p for p in projects if p.status != "done"]
+        finished = [p for p in projects if p.status == "done"]
+        shown = working[: self._max_index]
+        shown += finished[: self._max_index - len(shown)]
+        for project in shown:
             lines.append(
                 f"- {project.name} ({project.status}): {project.description}"
                 f" — updated {_ago(project.updated_at)}"
             )
-        hidden = len(projects) - self._max_index
+        hidden = len(projects) - len(shown)
         if hidden > 0:
-            lines.append(f"- ({hidden} older projects not listed; close out done ones)")
+            lines.append(f"- ({hidden} more not listed)")
         return "\n".join(lines)
 
     # ── internals ────────────────────────────────────────────────────────────
@@ -222,9 +237,9 @@ class ProjectStore:
             f"created_at: {_iso(project.created_at)}\n"
             f"updated_at: {_iso(project.updated_at)}\n"
             "---\n\n"
-            "## State\n\n"
-            f"{project.state}\n\n"
-            "## Log\n\n"
+            f"{_STATE_HEAD}"
+            f"{project.state}"
+            f"{_LOG_DELIM}"
             f"{log_lines}\n"
         )
         atomic_write(project.path, text)
@@ -245,19 +260,27 @@ class ProjectStore:
             if sep:
                 meta[key.strip()] = value.strip()
 
-        body = match.group(2)
+        # Leading newlines only: trailing ones are part of the log delimiter
+        # when the log is empty, and collapsing them would break the rfind.
+        body = match.group(2).lstrip("\n")
         state, log_lines = "", []
-        parts = _SECTIONS.split(body)
-        # parts: [preamble, "State", state text, "Log", log text] in any order
-        for header, content in zip(parts[1::2], parts[2::2]):
-            if header == "State":
-                state = content.strip()
-            elif header == "Log":
+        head = body.find(_STATE_HEAD)
+        if head != -1:
+            after_head = body[head + len(_STATE_HEAD):]
+            # rindex, because the state may legitimately contain the log
+            # delimiter — the real one is the last, appended by _save after
+            # whatever the state holds.
+            tail = after_head.rfind(_LOG_DELIM)
+            if tail != -1:
+                state = after_head[:tail]
                 log_lines = [
                     line[2:].strip()
-                    for line in content.strip().splitlines()
+                    for line in after_head[tail + len(_LOG_DELIM):].splitlines()
                     if line.startswith("- ")
                 ]
+            else:
+                # Hand-edited file without a log section: everything is state.
+                state = after_head.strip()
 
         def parse_ts(value: str) -> float:
             try:

@@ -19,6 +19,7 @@ around the last turn, inside which no wake word is required).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import random
@@ -26,6 +27,7 @@ import re
 import time
 from contextlib import aclosing
 from enum import Enum, auto
+from pathlib import Path
 
 import numpy as np
 
@@ -118,6 +120,44 @@ class IdleSchedule:
         return None
 
 
+def rehydrate_schedule(
+    schedule: IdleSchedule,
+    session_file: Path,
+    window_minutes: float,
+    *,
+    now_wall: float | None = None,
+    now_mono: float | None = None,
+) -> bool:
+    """Re-arm the schedule from the persisted session record, on startup.
+
+    A restart (autoreload included) constructs a fresh, unarmed schedule —
+    but the SDK session it resumes still owes its Closure and its rotation.
+    Without this, a reload in the 60 seconds after a conversation silently
+    skips reflection, and the resumed context lives forever. Arming with the
+    conversation's *actual* end time keeps the deadlines honest: a young
+    session reflects on the original clock, an older one reflects
+    immediately and rotates on schedule.
+
+    A record past the resume window arms nothing — the session won't be
+    resumed, and there is no context left to reflect on. Returns whether the
+    schedule was armed.
+    """
+    try:
+        raw = json.loads(session_file.read_text())
+        updated_at = float(raw["updated_at"])
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return False
+
+    now_wall = time.time() if now_wall is None else now_wall
+    now_mono = time.monotonic() if now_mono is None else now_mono
+    age_s = max(0.0, now_wall - updated_at)
+    if age_s > window_minutes * 60:
+        return False
+    # The wall-clock age mapped onto the monotonic clock the schedule runs on.
+    schedule.conversation_ended(now_mono - age_s)
+    return True
+
+
 class Pipeline:
     """Runs Ciel until stopped."""
 
@@ -170,6 +210,13 @@ class Pipeline:
             config.reflection.idle_delay_s if config.reflection.enabled else None,
             config.brain.resume_window_minutes * 60,
         )
+        # A restart mid-window (autoreload does this constantly) resumes the
+        # session but would otherwise forget it owes a reflection and a
+        # rotation.
+        if rehydrate_schedule(
+            self._schedule, config.session_file, config.brain.resume_window_minutes
+        ):
+            log.info("maintenance deadlines rehydrated from the resumed session")
         self._maintenance: asyncio.Task[None] | None = None
         """Closure/rotation in flight. Deliberately not the ``turn`` variable:
         turns re-raise via turn.result(); maintenance swallows its failures."""

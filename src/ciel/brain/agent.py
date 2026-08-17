@@ -302,10 +302,15 @@ class Brain:
         # having to re-thread them.
         self._mcp_servers = mcp_servers if mcp_servers is not None else self._mcp_servers
         self._extra_tools = extra_tools if extra_tools is not None else self._extra_tools
-        self._client = ClaudeSDKClient(
+        # Installed only after connect() succeeds: a half-connected client
+        # left on self would make every later ask() skip reconnection and
+        # query a dead subprocess — a failed rotation must leave the brain
+        # in the "reconnect on next turn" state, not the "wedged" one.
+        client = ClaudeSDKClient(
             options=self._build_options(self._mcp_servers, self._extra_tools)
         )
-        await self._client.connect()
+        await client.connect()
+        self._client = client
         log.info("brain connected (model=%s)", self._brain_config.model)
 
     async def close(self) -> None:
