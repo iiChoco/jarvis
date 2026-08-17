@@ -196,10 +196,24 @@ whether the server is still up"), never read command text aloud — the
 confirmation prompt already does that when it matters."""
 
 
+CONFIRMED_ACTIONS = """\
+# Confirmed actions
+
+Some of your tools act on the outside world — sending an email, creating or
+changing a calendar event. When you call one, the system itself reads the
+action to the user out loud and waits for their spoken yes before it runs.
+That happens automatically while your tool call is pending, so never ask for
+permission yourself, never announce that something needs approval, and never
+say an action happened before the tool result confirms it. If the call comes
+back refused, the user heard the question and said no, or didn't answer — do
+not retry it or offer a workaround; acknowledge briefly and move on."""
+
+
 def build_system_prompt(
     memory_index: str | None = None,
     workspace: str | None = None,
     shell: bool = False,
+    confirmed_actions: bool = False,
 ) -> str:
     """Assemble the full system prompt.
 
@@ -214,6 +228,9 @@ def build_system_prompt(
 
     if shell:
         sections.append(shell_section())
+
+    if confirmed_actions:
+        sections.append(CONFIRMED_ACTIONS)
 
     if memory_index:
         sections.append(memory_index)

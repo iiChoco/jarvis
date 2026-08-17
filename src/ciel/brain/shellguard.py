@@ -169,7 +169,8 @@ def classify(command: str, config: ShellConfig) -> tuple[Tier, str]:
     return "quiet", ""
 
 
-def _deny(reason: str) -> dict[str, Any]:
+def deny_decision(reason: str) -> dict[str, Any]:
+    """The PreToolUse deny shape, shared by every voice-gated guard."""
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -204,7 +205,7 @@ class ShellGuard:
         if tool_input.get("run_in_background"):
             # A backgrounded command outlives the confirmation that approved
             # it and reports through tools we keep disallowed.
-            return _deny(
+            return deny_decision(
                 "Background shell commands are not available. "
                 "Run it in the foreground instead."
             )
@@ -212,7 +213,7 @@ class ShellGuard:
         tier, reason = classify(command, self._config)
         if tier == "deny":
             log.warning("denied shell command (%s): %s", reason, command)
-            return _deny(
+            return deny_decision(
                 f"That command is off limits for Ciel — {reason}. Do not retry "
                 "or rephrase it; briefly tell the user why, and suggest they "
                 "run it themselves in a terminal if they want it."
@@ -220,8 +221,10 @@ class ShellGuard:
         if tier == "quiet":
             return {}
 
+        limit = self._config.max_command_display_chars
+        shown = command if len(command) <= limit else f"{command[:limit]}, and so on"
         try:
-            approved = await self._confirm(command)
+            approved = await self._confirm(f"Run: {shown} — okay?")
         except Exception:  # noqa: BLE001 - the hook must always return a decision
             log.exception("confirmation failed — denying %s", command)
             approved = False
@@ -229,7 +232,7 @@ class ShellGuard:
             log.info("user approved shell command: %s", command)
             return {}
         log.info("user declined shell command: %s", command)
-        return _deny(
+        return deny_decision(
             "The user was asked out loud and declined, or didn't answer. Do "
             "not retry the command; acknowledge briefly and move on."
         )
@@ -245,4 +248,4 @@ class ShellGuard:
         return {"PreToolUse": [HookMatcher(matcher="Bash", hooks=[self], timeout=120)]}
 
 
-__all__ = ["ShellGuard", "classify", "Tier"]
+__all__ = ["ShellGuard", "classify", "deny_decision", "Tier"]

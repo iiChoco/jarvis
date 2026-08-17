@@ -114,14 +114,21 @@ def build_tool_server(config: Config) -> tuple[dict[str, Any], list[str], Memory
         if entry.tools is None:
             # The whole server: permission_mode="dontAsk" denies anything not
             # allowed, so an unlisted connector would just be dead weight.
+            # Confirm-listed tools are already covered by the wildcard; the
+            # guard still holds them for the spoken yes.
             allowed.append(f"mcp__{name}")
         else:
             allowed.extend(f"mcp__{name}__{tool}" for tool in entry.tools)
+            # Confirmed tools are allowed too — the gate lives in the hook,
+            # not in this list. Absent from here they would be denied before
+            # the hook ever got to ask.
+            allowed.extend(f"mcp__{name}__{tool}" for tool in entry.confirm)
         log.info(
-            "connector %s: %s (%s)",
+            "connector %s: %s (%s%s)",
             name,
             entry.url or entry.command,
-            "all tools" if entry.tools is None else f"{len(entry.tools)} tools allowed",
+            "all tools" if entry.tools is None else f"{len(entry.tools)} quiet tools",
+            f", {len(entry.confirm)} confirmed" if entry.confirm else "",
         )
 
     if allowed:

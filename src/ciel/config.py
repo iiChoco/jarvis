@@ -427,11 +427,10 @@ class MCPServerConfig:
         url = "https://mcp.notion.com/mcp"
 
     Remember what Ciel is before connecting anything that can *act*: it
-    executes tools off transcribed speech, and connector tools run with no
-    confirmation step (the spoken yes/no gate covers shell commands only).
-    Reading
-    a calendar is comfortable; anything that sends, posts, or deletes
-    deserves a `tools` allowlist that simply leaves those tools out."""
+    executes tools off transcribed speech, and tools on the ``tools`` list run
+    with no confirmation step. Reading a calendar is comfortable that way;
+    anything that sends, posts, or deletes belongs on the ``confirm`` list —
+    allowed, but held for a spoken yes — or on no list at all."""
 
     command: str | None = None
     """Executable for a local (stdio) server. Mutually exclusive with url."""
@@ -453,9 +452,17 @@ class MCPServerConfig:
     may still want ``sse``."""
 
     tools: tuple[str, ...] | None = None
-    """Which of the server's tools Ciel may call. ``None`` allows all of
-    them — fine for read-only servers, too generous for ones that can send
-    or modify. Names are the server's own (unprefixed)."""
+    """Which of the server's tools Ciel may call *silently*. ``None`` allows
+    all of them — fine for read-only servers, too generous for ones that can
+    send or modify. Names are the server's own (unprefixed)."""
+
+    confirm: tuple[str, ...] = ()
+    """Tools Ciel may call only after your spoken yes — the same voice gate
+    that fronts shell commands, enforced in a hook the model cannot skip.
+    Allowed *in addition to* ``tools``, so the two lists split a server into
+    a quiet tier and a confirmed tier: reads on ``tools``, writes here. This
+    is the tier for actions that leave the machine — sending mail, changing
+    a calendar — where "recoverable" stops being true."""
 
 
 @dataclass(frozen=True, slots=True)

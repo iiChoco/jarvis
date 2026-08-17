@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from ciel.brain.shellguard import ShellGuard, classify
+from ciel.brain.toolguard import ConfirmToolGuard, describe_call
 from ciel.config import Config, ShellConfig, load_config
 from ciel.confirm import VoiceConfirmBroker, yes_no
 
@@ -114,7 +115,7 @@ async def run_ask(
         player=player, mic=mic, stt=FakeSTT(transcripts), tts=tts,
         noise_floor=lambda: 0.01,
     )
-    task = asyncio.create_task(broker.ask("touch note.txt"))
+    task = asyncio.create_task(broker.ask("Run: touch note.txt — okay?"))
     for i in range(3000):
         if task.done():
             break
@@ -245,7 +246,12 @@ async def main() -> None:
           and not calls)
     check("confirm tier, approved",
           await guard(payload("touch a.txt"), None, None) == {}
-          and calls == ["touch a.txt"])
+          and calls == ["Run: touch a.txt — okay?"])
+    calls.clear()
+    long_command = "echo " + "x" * 300
+    await guard(payload(long_command), None, None)
+    check("long command truncated in the question",
+          calls and "and so on" in calls[0] and len(calls[0]) < 200)
     answer = False
     check("confirm tier, declined",
           denied(await guard(payload("touch b.txt"), None, None)))
@@ -259,16 +265,63 @@ async def main() -> None:
           denied(await ShellGuard(ShellConfig(), broken)(
               payload("touch c.txt"), None, None)))
 
+    print("connector gate:")
+    question = describe_call(
+        "mcp__gmail__send_email",
+        {"to": ["sam@example.com"], "subject": "Lunch plans", "body": "..."},
+    )
+    check("send_email question names recipient and subject",
+          question == "Send an email to sam@example.com with the subject "
+                      "Lunch plans — okay?", question)
+    question = describe_call(
+        "mcp__gcal__create-event",
+        {"summary": "Dentist", "start": "2026-08-20T10:00:00"},
+    )
+    check("create-event question names the event",
+          question.startswith("Create a calendar event called Dentist starting"),
+          question)
+    question = describe_call("mcp__gcal__delete-event", {"eventId": "abc123"})
+    check("delete-event degrades without a title",
+          question == "Delete a calendar event — okay?", question)
+    question = describe_call("mcp__gmail__some_new_tool", {})
+    check("unknown tool gets a plain fallback",
+          question == "Some new tool through gmail — okay?", question)
+
+    def mcp_payload(name: str, args: dict) -> dict:
+        return {"tool_name": name, "tool_input": args}
+
+    tool_guard = ConfirmToolGuard(frozenset({"mcp__gmail__send_email"}), confirmer)
+    calls.clear()
+    answer = True
+    check("gated tool, approved",
+          await tool_guard(
+              mcp_payload("mcp__gmail__send_email", {"to": "a@b.c"}), None, None
+          ) == {} and calls and calls[0].startswith("Send an email"))
+    check("ungated tool passes through untouched",
+          await tool_guard(mcp_payload("mcp__gmail__read_email", {}), None, None) == {})
+    answer = False
+    check("gated tool, declined",
+          denied(await tool_guard(
+              mcp_payload("mcp__gmail__send_email", {}), None, None)))
+    check("crashing confirmer denies, not raises",
+          denied(await ConfirmToolGuard(
+              frozenset({"mcp__x__y"}), broken)(mcp_payload("mcp__x__y", {}), None, None)))
+
     print("config:")
     with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
         f.write('[shell]\nenabled = true\nauto_allow = ["git status", "ls"]\n'
-                'confirm_timeout_ms = 5000\n')
+                'confirm_timeout_ms = 5000\n'
+                '[mcp.gmail]\ncommand = "npx"\ntools = ["read_email"]\n'
+                'confirm = ["send_email"]\n')
         toml_path = Path(f.name)
     loaded = load_config(toml_path)
     check("[shell] loads from TOML",
           loaded.shell.enabled
           and loaded.shell.auto_allow == ("git status", "ls")
           and loaded.shell.confirm_timeout_ms == 5000)
+    check("[mcp] confirm list loads from TOML",
+          loaded.mcp["gmail"].tools == ("read_email",)
+          and loaded.mcp["gmail"].confirm == ("send_email",))
     toml_path.unlink()
 
     print(f"\nall {len(CHECKS)} checks passed")

@@ -35,6 +35,7 @@ from ciel.brain.permissions import FILE_TOOLS, WorkspaceGuard
 from ciel.brain.prompt import build_system_prompt
 from ciel.brain.session import SessionStore
 from ciel.brain.shellguard import ShellGuard
+from ciel.brain.toolguard import ConfirmToolGuard
 from ciel.config import BrainConfig, Config
 
 log = logging.getLogger(__name__)
@@ -102,6 +103,21 @@ class Brain:
             self._shell_guard = ShellGuard(config.shell, confirmer)
             log.info("shell enabled behind the voice gate")
 
+        # Connector tools on a `confirm` list get the same gate. Both halves
+        # again: names to gate AND a confirmer to gate them through. Without
+        # a confirmer nothing is silently widened — the names simply never
+        # reach allowed_tools' quiet tier, and the calls deny like any other
+        # unresolved confirmation would.
+        self._tool_guard: ConfirmToolGuard | None = None
+        self._gated_tools = frozenset(
+            f"mcp__{name}__{tool}"
+            for name, entry in config.mcp.items()
+            for tool in entry.confirm
+        )
+        if self._gated_tools and confirmer is not None:
+            self._tool_guard = ConfirmToolGuard(self._gated_tools, confirmer)
+            log.info("%d connector tools behind the voice gate", len(self._gated_tools))
+
     @property
     def session_id(self) -> str | None:
         return self._session_id
@@ -133,12 +149,20 @@ class Brain:
 
         file_tools = list(FILE_TOOLS) if self._guard else []
 
+        # A confirm-listed connector tool arrives via extra_tools already
+        # allowed. That is only acceptable while the guard exists to hold it;
+        # with no confirmer there is no gate, so the tool must not be offered
+        # at all rather than run silently.
+        if self._tool_guard is None and extra_tools:
+            extra_tools = [t for t in extra_tools if t not in self._gated_tools]
+
         return ClaudeAgentOptions(
             model=self._brain_config.model,
             system_prompt=build_system_prompt(
                 self._memory_index,
                 workspace=str(self._guard.workspace) if self._guard else None,
                 shell=self._shell_guard is not None,
+                confirmed_actions=self._tool_guard is not None,
             ),
             # Explicit allowlist. The Agent SDK ships the full Claude Code
             # toolset — Bash, Write, Edit — and a voice assistant that can
@@ -198,6 +222,8 @@ class Brain:
             matchers.extend(self._guard.as_hooks()["PreToolUse"])
         if self._shell_guard is not None:
             matchers.extend(self._shell_guard.as_hooks()["PreToolUse"])
+        if self._tool_guard is not None:
+            matchers.extend(self._tool_guard.as_hooks()["PreToolUse"])
         return {"PreToolUse": matchers} if matchers else None
 
     async def __aenter__(self) -> Self:

@@ -1,8 +1,10 @@
 """Spoken yes-or-no confirmation, bridging a brain hook to the mic loop.
 
-The shell gate needs to ask the user a question and hear the answer, but it
-runs inside a PreToolUse hook — brain-side, mid-turn — while the pipeline's
-frame loop is the only reader of the microphone. This broker is the bridge:
+The tool guards — the shell gate, the connector gate, whatever fronts an
+outward-acting tool next — need to ask the user a question and hear the
+answer, but they run inside PreToolUse hooks — brain-side, mid-turn — while
+the pipeline's frame loop is the only reader of the microphone. This broker
+is the bridge:
 the hook awaits :meth:`ask`, and the frame loop routes frames to :meth:`feed`
 whenever :attr:`active` is set, so the one-mic-reader rule holds.
 
@@ -160,12 +162,17 @@ class VoiceConfirmBroker:
 
     # ── hook-side entry point ────────────────────────────────────────────────
 
-    async def ask(self, command: str) -> bool:
-        """Speak the command, listen for yes or no. Anything else is no."""
+    async def ask(self, question: str) -> bool:
+        """Speak the question, listen for yes or no. Anything else is no.
+
+        The question arrives fully formed — "Run: git push — okay?", "Send an
+        email to Sam — okay?" — because only the guard that built it knows
+        what the action is. This broker owns the choreography, not the words.
+        """
         if self._player is None or self._mic is None or self._stt is None or self._tts is None:
             return False
         if self._lock.locked():
-            # A second command while one is pending. Deny rather than queue:
+            # A second question while one is pending. Deny rather than queue:
             # stacked spoken questions are unanswerable ("yes" to which?).
             return False
 
@@ -180,9 +187,7 @@ class VoiceConfirmBroker:
                 if self._cancelled.is_set():
                     return False
 
-                limit = self._config.shell.max_command_display_chars
-                shown = command if len(command) <= limit else f"{command[:limit]}, and so on"
-                await self._speak(f"Run: {shown} — okay?")
+                await self._speak(question)
 
                 # One re-prompt on an unclear answer, then deny. A gate that
                 # keeps asking becomes background noise to say yes at.
