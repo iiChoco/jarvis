@@ -1,0 +1,301 @@
+# Ciel
+
+A local-first voice assistant. Speech in, speech out, running on your machine.
+
+Speech recognition and synthesis are local and free. Only the reasoning goes to
+Claude, through your existing subscription — there is no API key.
+
+```bash
+uv run ciel
+```
+
+Say **"hey jarvis"**, then talk.
+
+> Ciel is *named* Ciel but answers to "hey jarvis" for now. openWakeWord ships a
+> pretrained model for that phrase and none for "Ciel", so v1 borrows it rather
+> than blocking on training. See [Personalizing the wake word](#personalizing-the-wake-word).
+
+## What it does
+
+- **Hears you** — `openWakeWord` for the wake phrase, WebRTC VAD for knowing when
+  you've stopped talking, `faster-whisper` for transcription. All on-device.
+- **Thinks** — Claude Opus 5 via the Claude Agent SDK, with web search.
+- **Answers out loud** — Piper, a local neural voice.
+- **Remembers you** — durable memory that survives restarts, written unprompted.
+- **Judges its sources** — web answers distinguish primary sources from
+  aggregators, flag conflicts of interest, and state confidence rather than
+  delivering everything in the same certain tone.
+- **Shows what it's doing** — a floating pill in the corner of the screen,
+  visible from any app.
+
+## Setup
+
+```bash
+uv sync --extra piper
+uv run ciel
+```
+
+First run downloads a Whisper model (~500 MB), a Piper voice (~60 MB), and the
+wake-word models (~5 MB). After that it's offline except for Claude.
+
+**Do not set `ANTHROPIC_API_KEY`.** The Agent SDK inherits Claude Code's
+subscription login. Setting that variable silently overrides it and bills you
+pay-as-you-go API usage instead. Ciel warns you at startup if it's set.
+
+macOS will ask for microphone permission the first time.
+
+## Usage
+
+```bash
+uv run ciel                  # wake word
+uv run ciel --wake hotkey    # press Enter to talk — reliable in a noisy room
+uv run ciel --wake always    # respond to any speech (quiet rooms only)
+uv run ciel --new            # ignore the previous conversation, start fresh
+uv run ciel --tts say        # macOS built-in voice instead of Piper
+uv run ciel -v               # debug logging
+```
+
+## Configuration
+
+Everything lives in `~/.ciel/config.toml`, or as `CIEL_<SECTION>_<FIELD>`
+environment variables for one-off runs.
+
+```toml
+[brain]
+model = "claude-opus-5"      # "claude-sonnet-5" is ~3x cheaper and faster
+resume_window_hours = 12.0   # resume the last conversation if newer than this
+
+[stt]
+model = "small.en"           # base.en is 3x faster and noticeably worse
+initial_prompt = "A spoken conversation with an assistant named Ciel."
+
+[tts]
+engine = "piper"
+piper_voice = "en_US-lessac-medium"
+
+[wake]
+mode = "wakeword"
+threshold = 0.5              # raise if the TV sets it off, lower if it ignores you
+
+[audio]
+silence_ms = 700             # how long a pause ends your turn
+barge_in = false             # see below
+```
+
+```bash
+CIEL_WAKE_MODE=hotkey CIEL_BRAIN_MODEL=claude-sonnet-5 uv run ciel
+```
+
+## The status pill
+
+A small always-on-top pill sits in the corner of the screen and tells you what
+Ciel is doing without your having to find the terminal.
+
+| State | Looks like |
+|---|---|
+| Idle | Dim grey, "Ciel" — running, waiting for the wake word |
+| Listening | Green, pulsing — capturing your speech |
+| Thinking | Amber, pulsing — transcribing, or Claude is working |
+| Speaking | Blue, pulsing — talking |
+| Error | Red — the turn failed |
+
+It ignores mouse clicks, never takes focus, and follows you across Spaces. Both
+the dot and the pill's outline carry the state colour — a dark pill with only a
+small dot vanishes against a dark terminal, which is exactly where it sits.
+
+```toml
+[ui]
+indicator = "hud"           # or "terminal" (for SSH), or "none"
+position = "bottom-right"   # any corner
+margin = 24
+opacity = 0.92
+scale = 1.0                 # make it bigger
+hide_when_idle = false      # true = vanish entirely when idle
+```
+
+```bash
+uv run ciel --indicator terminal   # console status line instead
+uv run ciel --indicator none
+```
+
+It runs as a separate process, because AppKit permanently claims whichever
+thread its run loop starts on and Ciel's asyncio loop wants the main thread.
+The side benefit is fault isolation: if the pill dies, Ciel keeps talking.
+
+## File access
+
+Off by default. Turn it on and Ciel can read, write, and edit files — inside
+one directory and nowhere else.
+
+```bash
+uv run ciel --files                        # ~/.ciel/workspace
+uv run ciel --workspace ~/Documents/notes  # somewhere specific
+```
+
+```toml
+[files]
+enabled = true
+workspace = "~/Documents/notes"
+read_only_outside = false   # true = read anywhere, still write only in workspace
+```
+
+**Why it's confined rather than just switched on.** Ciel acts on transcribed
+speech with no confirmation step, and it reads web pages into its context. That
+combination — instructions that can be misheard, untrusted text in context, and
+silent execution — makes unbounded file write a genuinely bad idea. So every
+path the model supplies is resolved and checked against the workspace before
+the tool runs. Resolution happens first, which is what defeats `..` traversal
+and symlinks pointing out of the tree.
+
+Credentials and shell startup files (`.ssh`, `.env`, `.zshrc`, …) are refused
+even if they somehow appear inside the workspace.
+
+**Bash is never granted**, and that isn't an oversight. A shell walks straight
+around path confinement — `sh -c 'cat > ~/.zshrc'` — so allowing it would make
+the guard decorative. It's in `disallowed_tools` explicitly rather than merely
+left out, so a stray config edit can't quietly re-enable it.
+
+> The check is a `PreToolUse` hook, not a `can_use_tool` callback. An entry in
+> `allowed_tools` auto-approves its tool *before* that callback is consulted,
+> so a guard wired there never runs for the tools it's meant to constrain. If
+> you extend this, keep the enforcement in the hook.
+
+### With `workspace = "~/"`
+
+Setting the workspace to your home directory removes the *directory* boundary,
+which makes the blocklist the whole of the defense rather than a backstop. It's
+correspondingly thorough. Refused anywhere under home:
+
+| Refused | Why |
+|---|---|
+| `.zshrc`, `.zshenv`, `.bash_profile`, … | A writable shell config is code execution on your next login |
+| `.ssh`, `.aws`, `.gnupg`, `.env`, `.npmrc`, `.docker`, `.kube` | Credentials and keys |
+| `.claude`, `.claude.json`, `.config` | Agent state and auth tokens — `.claude` also holds session transcripts |
+| `~/Library` | Keychains, browser cookies and history, Messages, Mail |
+| `LaunchAgents`, `LaunchDaemons` | Login persistence |
+
+Everything else under home is fair game, including every repo you have checked
+out — Ciel can edit her own source at `~/jarvis`.
+
+### macOS may block folders independently
+
+`~/Desktop`, `~/Documents`, and `~/Downloads` are TCC-protected. Whether Ciel
+can reach them depends on permissions granted to the *terminal app* you launch
+her from, not on anything in this config. macOS prompts on first access; if it
+was denied once, grant it again under System Settings → Privacy & Security →
+Files and Folders.
+
+This also makes verification confusing: a shell without Desktop permission
+reports "Operation not permitted" for a file Ciel wrote perfectly well. Check
+with `stat` rather than `ls`, or just ask Ciel to read it back.
+
+## Memory
+
+Ciel saves things it learns, without being asked, as one Markdown file per fact
+in `~/.ciel/memory/`. Open the directory to see exactly what it believes about
+you; delete a file to make it forget.
+
+Two mechanisms, deliberately separate:
+
+- **Conversation continuity** — resumes your last conversation if it's recent
+  (12 h by default). This is what `--new` skips.
+- **Durable knowledge** — outlives any session. A conversation eventually gets
+  compacted and its details dissolve; these files don't.
+
+Only the one-line summaries go into the prompt each turn. Full contents load on
+demand, which is what keeps memory affordable as it grows.
+
+## Barge-in (off by default)
+
+Talking over Ciel to interrupt it is implemented but **disabled**, because on
+laptop speakers it doesn't work reliably. There's no acoustic echo cancellation,
+so the microphone hears Ciel's own voice. Measured on this hardware: a silent
+room sits around 0.085 RMS and Ciel speaking reaches 0.18 — not enough
+separation to reliably tell "the user is interrupting" from "Ciel is talking".
+
+**On headphones there's no echo path and it works properly.** Turn it on:
+
+```toml
+[audio]
+barge_in = true
+```
+
+The detector adapts to your room's noise floor rather than using a fixed
+threshold, so it survives both a silent room and a noisy one.
+
+## Extending it
+
+**A new capability Ciel can invoke** — add a module under
+`src/ciel/brain/tools/` with `@tool`-decorated functions and append them to
+`TOOLS` in that package's `__init__.py`. Nothing else changes; they're exposed
+through an in-process MCP server and auto-allowed.
+
+**An external service** (Google Calendar, Gmail, Slack) — those are MCP servers,
+so they're a connection entry in config and need no code at all.
+
+**A different speech engine** — implement the `SpeechToText` or `TextToSpeech`
+protocol and change one line in `config.py`. The protocols exist precisely so
+`faster-whisper` → `mlx-whisper`, or Piper → ElevenLabs, isn't a rewrite.
+
+## Personalizing the wake word
+
+To make it answer to "Ciel", train a custom openWakeWord model — free and
+offline; their notebook generates synthetic clips with Piper and outputs
+`.onnx`. Point `wake.model` at the file.
+
+Train **"hey ciel"**, not bare "Ciel". One-syllable wake words have much higher
+false-trigger rates; the two-syllable prefix gives the detector enough to work
+with. You'd still address it as Ciel.
+
+## Development probes
+
+Each isolates one layer, so when something misbehaves you can tell which half to
+blame:
+
+```bash
+uv run scripts/probe_audio.py vad     # endpointing, synthetic speech, no mic
+uv run scripts/probe_audio.py mic     # live capture -> /tmp/ciel_capture.wav
+uv run scripts/probe_voice.py speak   # TTS + playback only
+uv run scripts/probe_voice.py barge   # interrupt path
+uv run scripts/probe_voice.py echo    # mic -> STT -> TTS, no model in the loop
+```
+
+## Cost
+
+Roughly **$0.011 per conversational turn** on Opus 5 in steady state, dominated
+by a ~20 k-token cached prompt prefix that's re-read every turn. The first turn
+of a session costs more (~$0.043) because it writes that cache; a gap longer
+than five minutes pays it again.
+
+Web-search turns are much more expensive — around **$0.21** — because search
+results land in the context.
+
+Switching `brain.model` to `claude-sonnet-5` cuts this substantially at some
+cost in research judgment.
+
+> A monthly Agent SDK credit (Pro $20 / Max 5x $100 / Max 20x $200) has been
+> announced but isn't live on all accounts yet. Until it is, this usage draws on
+> your plan's ordinary limits — the same pool as Claude Code.
+
+## How it fits together
+
+```
+mic ──▶ wake word ──▶ VAD capture ──▶ whisper ──▶ Claude ──▶ piper ──▶ speaker
+                                                     │
+                                          memory + web search
+```
+
+One loop reads the microphone and routes each frame by state: to the wake
+detector when idle, the endpointer while you're talking, the barge-in check
+while Ciel is. Replies stream back sentence by sentence, so Ciel starts speaking
+as soon as the first complete thought exists rather than after the whole answer.
+
+| Module | Role |
+|---|---|
+| `pipeline.py` | The loop and the state machine |
+| `config.py` | Every swappable choice, in one place |
+| `audio/` | Capture, endpointing, playback, wake |
+| `stt/`, `tts/` | Engine protocols and implementations |
+| `brain/` | Claude client, system prompt, sessions, tools |
+| `memory/` | The durable file-backed store |
+| `ui/` | The status pill (`hud.py` is its own process) |
