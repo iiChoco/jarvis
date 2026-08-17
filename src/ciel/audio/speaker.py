@@ -1,7 +1,8 @@
 """Speaker verification — Ciel answers its enrolled user and nobody else.
 
-Codename: **Eigenvoice** — a voice identified by its characteristic
-components.
+Codename: **Barn Door** — it decides who gets let in, and everyone
+knows a barn door only ever half-latches: it turns away the TV and the
+guests, not a determined impostor with a recording.
 
 Every captured utterance is embedded (CAM++ speaker model via sherpa-onnx,
 ~30 ms on CPU) and cosine-compared against the enrolled profile *before*

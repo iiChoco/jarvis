@@ -41,7 +41,7 @@ the docs — and you — get to use.
 | **Compact Support** | The workspace guard and `FORBIDDEN_NAMES` — file access vanishes outside a bounded region |
 | **Inverse** | The action journal and snapshots (`journal.py`, `recorder.py`) — kept so operations can be run backwards |
 | **Trace** | Conversation transcripts — the record of the path actually taken |
-| **Eigenvoice** | Speaker verification — a voice identified by its characteristic components |
+| **Barn Door** | Speaker verification — turns away the TV and the guests, and everyone knows a barn door only half-latches |
 | **Characteristic** | The wake word — membership test for "being addressed" |
 | **Cauchy** | The filler hold — a trailing "um…" means the sequence hasn't converged |
 | **Discontinuity** | Barge-in — a jump that ends the current segment |
@@ -205,7 +205,7 @@ correspondingly thorough. Refused anywhere under home:
 Everything else under home is fair game, including every repo you have checked
 out — Ciel can edit her own source at `~/jarvis`.
 
-## Voice identity (Eigenvoice)
+## Voice identity (Barn Door)
 
 Off by default; needs a one-time enrollment. With it on, every utterance is
 embedded by a local speaker model (CAM++ via sherpa-onnx, ~30 ms on CPU) and

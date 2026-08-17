@@ -383,7 +383,7 @@ async def main() -> None:
           not Path(write_snapshot).exists())
     shutil.rmtree(tmp)
 
-    print("speaker gate (Eigenvoice):")
+    print("speaker gate (Barn Door):")
     iff_tmp = Path(tempfile.mkdtemp(prefix="ciel-iff-"))
     profile_path = iff_tmp / "profile.npz"
 

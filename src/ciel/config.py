@@ -168,7 +168,7 @@ class WakeConfig:
 class VoiceConfig:
     """Speaker verification — only the enrolled voice gets a response.
 
-    Codename Eigenvoice. Every utterance is embedded (~30 ms, local ONNX
+    Codename Barn Door. Every utterance is embedded (~30 ms, local ONNX
     model) and
     compared against the enrolled profile before transcription; strangers,
     the TV, and background conversations are dropped silently. This is a
