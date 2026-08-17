@@ -4,6 +4,7 @@
     uv run python scripts/enroll_voice.py --add       # append 3 more takes
     uv run python scripts/enroll_voice.py --adopt     # review rejected clips, adopt yours
     uv run python scripts/enroll_voice.py --calibrate # re-measure the threshold
+    uv run python scripts/enroll_voice.py --prune     # inspect takes, drop bad ones
     uv run python scripts/enroll_voice.py --test      # score yourself live
 
 Every profile change ends in *calibration*: a set of macOS `say` voices is
@@ -43,6 +44,7 @@ from ciel.audio.input import MicStream
 from ciel.audio.speaker import (
     SherpaEncoder,
     add_to_profile,
+    load_labels,
     load_profile,
     load_takes,
     load_threshold,
@@ -126,7 +128,8 @@ def report(embeddings: list[np.ndarray], config) -> None:
 
 async def enroll(config, encoder) -> None:
     embeddings = await record_takes(config, encoder, TAKES)
-    save_profile(config.voice.profile, embeddings)
+    save_profile(config.voice.profile, embeddings,
+                 labels=[style for style, _, _ in TAKES])
     report(embeddings, config)
     print(f"\nprofile saved to {config.voice.profile} ({len(embeddings)} takes)")
     await calibrate(config, encoder)
@@ -147,7 +150,10 @@ async def add(config, encoder) -> None:
          "Remind me to water the plants this evening.", 0.6),
     ]
     embeddings = await record_takes(config, encoder, prompts)
-    total = add_to_profile(config.voice.profile, embeddings)
+    stamp = __import__("datetime").date.today().isoformat()
+    total = add_to_profile(config.voice.profile, embeddings,
+                           labels=[f"added {stamp}: {style}"
+                                   for style, _, _ in prompts])
     print(f"\nprofile now holds {total} takes")
     await calibrate(config, encoder)
 
@@ -164,6 +170,7 @@ async def adopt(config, encoder) -> None:
 
     print(f"{len(clips)} rejected clip(s). For each: listen, then decide.")
     adopted: list[np.ndarray] = []
+    adopted_labels: list[str] = []
     for clip in clips:
         print(f"\n▶ {clip.name} (similarity at rejection: {clip.stem.split('-')[-1]})")
         subprocess.run(["afplay", str(clip)], check=False)
@@ -177,6 +184,7 @@ async def adopt(config, encoder) -> None:
             with wave.open(str(clip)) as f:
                 pcm = np.frombuffer(f.readframes(f.getnframes()), dtype=np.int16)
             adopted.append(encoder.embed(pcm.astype(np.float32) / 32768.0))
+            adopted_labels.append(f"adopted {clip.name}")
             clip.unlink()
             print("  adopted")
         elif answer == "n":
@@ -186,7 +194,8 @@ async def adopt(config, encoder) -> None:
             print("  left in place")
 
     if adopted:
-        total = add_to_profile(config.voice.profile, adopted)
+        total = add_to_profile(config.voice.profile, adopted,
+                               labels=adopted_labels)
         print(f"\nprofile now holds {total} takes — the gate just learned "
               f"{len(adopted)} condition(s) it used to fail in")
         await calibrate(config, encoder)
@@ -257,14 +266,13 @@ def _available_say_voices() -> list[str]:
     return picked or sorted(available)[:8]
 
 
-def _impostor_scores(encoder, references: np.ndarray) -> dict[str, float]:
-    """Best-match score per impostor voice, exactly as the gate would score."""
+def _impostor_embeddings(encoder) -> dict[str, list[np.ndarray]]:
+    """One embedding per (say voice, sentence) — the raw impostor corpus."""
     import tempfile
 
-    scores: dict[str, float] = {}
+    corpus: dict[str, list[np.ndarray]] = {}
     with tempfile.TemporaryDirectory(prefix="ciel-calibrate-") as tmp:
         for voice in _available_say_voices()[:10]:
-            best = 0.0
             for i, sentence in enumerate(_IMPOSTOR_SENTENCES):
                 clip = Path(tmp) / f"{voice}-{i}.wav"
                 done = subprocess.run(
@@ -276,11 +284,35 @@ def _impostor_scores(encoder, references: np.ndarray) -> dict[str, float]:
                     continue
                 with wave.open(str(clip)) as f:
                     pcm = np.frombuffer(f.readframes(f.getnframes()), dtype=np.int16)
-                emb = encoder.embed(pcm.astype(np.float32) / 32768.0)
-                best = max(best, float(np.max(references @ emb)))
-            if best > 0.0:
-                scores[voice] = best
-    return scores
+                corpus.setdefault(voice, []).append(
+                    encoder.embed(pcm.astype(np.float32) / 32768.0))
+    return corpus
+
+
+def _impostor_scores(
+    corpus: dict[str, list[np.ndarray]], references: np.ndarray
+) -> dict[str, float]:
+    """Best-match score per impostor voice, exactly as the gate would score."""
+    return {
+        voice: max(float(np.max(references @ emb)) for emb in embs)
+        for voice, embs in corpus.items()
+        if embs
+    }
+
+
+def _take_attraction(
+    corpus: dict[str, list[np.ndarray]], takes: np.ndarray
+) -> np.ndarray:
+    """Per take: the best score any impostor clip achieves against it.
+
+    This is the pruning signal best-match scoring creates: a single take
+    that impostors love is a hole in the gate regardless of how good the
+    other takes are, because the max only needs one lucky row."""
+    all_embs = [emb for embs in corpus.values() for emb in embs]
+    if not all_embs:
+        return np.zeros(len(takes), dtype=np.float32)
+    stacked = np.stack(all_embs)
+    return (takes @ stacked.T).max(axis=1)
 
 
 def _loo_similarities(takes: np.ndarray) -> np.ndarray:
@@ -290,20 +322,26 @@ def _loo_similarities(takes: np.ndarray) -> np.ndarray:
     return sims.max(axis=1)
 
 
-async def calibrate(config, encoder, *, prune: bool = True) -> None:
-    takes = load_takes(config.voice.profile)
+async def calibrate(config, encoder, *, offer_prune: bool = True) -> None:
+    profile = config.voice.profile
+    takes = load_takes(profile)
     if takes is None or len(takes) < 2:
         print("calibration needs an enrolled profile with at least 2 takes")
         return
+    labels = load_labels(profile) or [f"take {i + 1}" for i in range(len(takes))]
 
-    references = load_profile(config.voice.profile)
     print(f"\ncalibrating against {len(takes)} takes...")
-    impostors = await asyncio.to_thread(_impostor_scores, encoder, references)
-    if not impostors:
+    corpus = await asyncio.to_thread(_impostor_embeddings, encoder)
+    if not corpus:
         print("no say voices available — keeping the current threshold")
         return
-    loo = _loo_similarities(takes)
 
+    def measure():
+        references = load_profile(profile)
+        impostors = _impostor_scores(corpus, references)
+        return impostors, _loo_similarities(takes)
+
+    impostors, loo = measure()
     worst_impostor = max(impostors.values())
     worst_name = max(impostors, key=impostors.get)
     print(f"impostor best-match scores ({len(impostors)} voices): "
@@ -311,7 +349,7 @@ async def calibrate(config, encoder, *, prune: bool = True) -> None:
           f"(worst: {worst_name})")
     print(f"your takes, leave-one-out: {loo.min():.2f} to {loo.max():.2f}")
 
-    if prune:
+    if offer_prune:
         # A take that barely agrees with the rest of the profile is a
         # liability, not coverage: every reference is another chance for a
         # lucky impostor hit through the best-match max, and a bad capture
@@ -321,23 +359,21 @@ async def calibrate(config, encoder, *, prune: bool = True) -> None:
             print("\ntakes that disagree with the rest of your profile "
                   "(possible bad captures or mistaken --adopt):")
             for i in flagged:
-                print(f"  take #{i + 1}: best agreement with others {loo[i]:.2f}")
+                print(f"  #{i + 1} [{labels[i]}]: agreement {loo[i]:.2f}")
             answer = (await asyncio.to_thread(
-                input, "drop these takes? [y/N] ")).strip().lower()
-            if answer == "y":
-                keep = [t for i, t in enumerate(takes) if i not in set(flagged)]
-                if len(keep) >= 2:
-                    takes = np.stack(keep)
-                    save_profile(config.voice.profile, list(takes))
-                    references = load_profile(config.voice.profile)
-                    impostors = await asyncio.to_thread(
-                        _impostor_scores, encoder, references)
-                    loo = _loo_similarities(takes)
-                    worst_impostor = max(impostors.values())
-                    print(f"re-measured: impostors up to {worst_impostor:.2f}, "
-                          f"takes {loo.min():.2f} to {loo.max():.2f}")
-                else:
-                    print("would leave fewer than 2 takes — keeping all")
+                input, "drop these takes? [y/N] (pick individually with --prune) "
+            )).strip().lower()
+            if answer == "y" and len(takes) - len(flagged) >= 2:
+                keep = [i for i in range(len(takes)) if i not in set(flagged)]
+                takes = takes[keep]
+                labels = [labels[i] for i in keep]
+                save_profile(profile, list(takes), labels=labels)
+                impostors, loo = measure()
+                worst_impostor = max(impostors.values())
+                print(f"re-measured: impostors up to {worst_impostor:.2f}, "
+                      f"takes {loo.min():.2f} to {loo.max():.2f}")
+            elif answer == "y":
+                print("would leave fewer than 2 takes — keeping all")
 
     genuine_floor = float(loo.min())
     if genuine_floor > worst_impostor:
@@ -346,16 +382,70 @@ async def calibrate(config, encoder, *, prune: bool = True) -> None:
         print(f"\nclear gap — calibrated threshold: {threshold}")
     else:
         threshold = round(min(0.70, worst_impostor + 0.03), 2)
+        weakest = int(np.argmin(loo))
         print(
-            f"\nwarning: your weakest take ({genuine_floor:.2f}) scores below "
-            f"the best impostor ({worst_impostor:.2f}). Setting the threshold "
-            f"just above the impostors ({threshold}); expect that weak take's "
-            "conditions to bounce — re-record it with --add, or prune it."
+            f"\nwarning: your weakest take (#{weakest + 1} "
+            f"[{labels[weakest]}], {genuine_floor:.2f}) scores below the best "
+            f"impostor ({worst_impostor:.2f}). Setting the threshold just "
+            f"above the impostors ({threshold}); expect that take's "
+            "conditions to bounce — re-record it with --add, or --prune it."
         )
 
-    save_profile(config.voice.profile, list(takes), threshold=threshold)
-    print(f"stored with the profile ({config.voice.profile.name}); "
+    save_profile(profile, list(takes), threshold=threshold, labels=labels)
+    print(f"stored with the profile ({profile.name}); "
           "[voice] threshold in config stays unset and inherits it")
+
+
+async def prune_mode(config, encoder) -> None:
+    """Inspect every take by name and drop the ones dragging the gate down."""
+    profile = config.voice.profile
+    takes = load_takes(profile)
+    if takes is None or len(takes) < 3:
+        print("pruning needs a profile with at least 3 takes")
+        return
+    labels = load_labels(profile) or [f"take {i + 1}" for i in range(len(takes))]
+
+    print("measuring (impostor corpus + take agreement)...")
+    corpus = await asyncio.to_thread(_impostor_embeddings, encoder)
+    loo = _loo_similarities(takes)
+    attraction = _take_attraction(corpus, takes)
+
+    print(f"\n{'#':>3}  {'agreement':>9}  {'impostors':>9}  label")
+    for i in range(len(takes)):
+        suspect = " ← suspect" if (loo[i] < 0.45 or attraction[i] >= loo[i]) else ""
+        print(f"{i + 1:>3}  {loo[i]:>9.2f}  {attraction[i]:>9.2f}  "
+              f"{labels[i]}{suspect}")
+    print(
+        "\nagreement = how well the take matches the rest of you (higher is "
+        "better).\nimpostors = the best score any impostor voice gets against "
+        "it (lower is better).\nA take impostors match better than you do is "
+        "a hole in the gate."
+    )
+
+    answer = (await asyncio.to_thread(
+        input, "\ntake numbers to drop (comma-separated, empty keeps all): "
+    )).strip()
+    if not answer:
+        print("nothing dropped")
+        return
+    try:
+        drop = {int(n) - 1 for n in answer.replace(" ", "").split(",")}
+    except ValueError:
+        print("could not parse that — nothing dropped")
+        return
+    invalid = [i for i in drop if not 0 <= i < len(takes)]
+    if invalid:
+        print(f"no such take: {[i + 1 for i in invalid]} — nothing dropped")
+        return
+    if len(takes) - len(drop) < 2:
+        print("that would leave fewer than 2 takes — nothing dropped")
+        return
+
+    keep = [i for i in range(len(takes)) if i not in drop]
+    save_profile(profile, [takes[i] for i in keep],
+                 labels=[labels[i] for i in keep])
+    print(f"dropped {len(drop)}, kept {len(keep)} — recalibrating...")
+    await calibrate(config, encoder, offer_prune=False)
 
 
 async def main() -> None:
@@ -369,6 +459,8 @@ async def main() -> None:
                       help="score live utterances against the saved profile")
     mode.add_argument("--calibrate", action="store_true",
                       help="re-measure the threshold against impostor voices")
+    mode.add_argument("--prune", action="store_true",
+                      help="inspect takes by name and drop bad ones")
     args = parser.parse_args()
 
     config = load_config()
@@ -384,6 +476,8 @@ async def main() -> None:
         await adopt(config, encoder)
     elif args.calibrate:
         await calibrate(config, encoder)
+    elif args.prune:
+        await prune_mode(config, encoder)
     else:
         await enroll(config, encoder)
 

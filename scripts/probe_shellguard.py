@@ -23,6 +23,7 @@ from ciel.audio.speaker import (
     SpeakerGate,
     add_to_profile,
     build_speaker_gate,
+    load_labels,
     load_profile,
     load_threshold,
     save_profile,
@@ -506,6 +507,14 @@ async def main() -> None:
     add_to_profile(profile_path, [also_me])
     check("growing the profile drops the stale calibration",
           load_threshold(profile_path) is None)
+
+    save_profile(profile_path, [me, other_mode], labels=["desk voice", "soft"])
+    add_to_profile(profile_path, [also_me], labels=["adopted clip.wav"])
+    check("take labels persist and extend",
+          load_labels(profile_path) == ["desk voice", "soft", "adopted clip.wav"])
+    np.savez(profile_path, mean=me, embeddings=np.stack([me, other_mode]))
+    check("pre-label profiles backfill generic labels",
+          load_labels(profile_path) == ["take 1", "take 2"])
 
     unenrolled = SpeakerGate(
         VoiceConfig(enabled=True, profile=iff_tmp / "missing.npz"), FakeEncoder()

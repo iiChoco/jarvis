@@ -108,21 +108,36 @@ def save_profile(
     path: Path,
     embeddings: list[np.ndarray],
     threshold: float | None = None,
+    labels: list[str] | None = None,
 ) -> None:
-    """Persist enrollment embeddings, their normalized mean, and optionally a
-    calibrated threshold.
+    """Persist enrollment embeddings, their normalized mean, optionally a
+    calibrated threshold, and a human label per take.
 
     The threshold lives with the profile because it is a *property of the
     profile*: best-match scoring over N takes has different impostor
     statistics than over 3, so every change to the takes deserves a
-    recalibration, and a number in a config file silently goes stale."""
+    recalibration, and a number in a config file silently goes stale.
+
+    Labels exist for pruning: an embedding is anonymous, and "take 7 is
+    dragging the gate down" is only actionable when take 7 is known to be
+    "adopted 20260817-201455-0.41.wav" rather than a mystery row."""
     path = path.expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     stacked = np.stack([e / (np.linalg.norm(e) or 1.0) for e in embeddings])
     mean = stacked.mean(axis=0)
     mean /= np.linalg.norm(mean) or 1.0
+    if labels is None:
+        labels = [f"take {i + 1}" for i in range(len(embeddings))]
     extra = {} if threshold is None else {"threshold": np.float64(threshold)}
-    np.savez(path, mean=mean, embeddings=stacked, **extra)
+    np.savez(
+        path,
+        mean=mean,
+        embeddings=stacked,
+        # Plain unicode array, not dtype=object: object arrays need
+        # allow_pickle=True at load, and nothing here is worth pickle.
+        labels=np.array([str(l) for l in labels]),
+        **extra,
+    )
 
 
 def load_takes(path: Path) -> np.ndarray | None:
@@ -135,6 +150,21 @@ def load_takes(path: Path) -> np.ndarray | None:
             return np.asarray(data["embeddings"], dtype=np.float32)
     except Exception:  # noqa: BLE001
         log.warning("could not read the voice profile at %s", path, exc_info=True)
+        return None
+
+
+def load_labels(path: Path) -> list[str] | None:
+    """The human label of each take, backfilled for pre-label profiles."""
+    path = path.expanduser()
+    if not path.exists():
+        return None
+    try:
+        with np.load(path) as data:
+            count = len(data["embeddings"])
+            if "labels" in data:
+                return [str(l) for l in data["labels"]]
+            return [f"take {i + 1}" for i in range(count)]
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -152,7 +182,11 @@ def load_threshold(path: Path) -> float | None:
     return None
 
 
-def add_to_profile(path: Path, embeddings: list[np.ndarray]) -> int:
+def add_to_profile(
+    path: Path,
+    embeddings: list[np.ndarray],
+    labels: list[str] | None = None,
+) -> int:
     """Append takes to an existing profile; returns the new take count.
 
     Growing beats re-recording: the takes that fix inconsistency are the ones
@@ -164,9 +198,13 @@ def add_to_profile(path: Path, embeddings: list[np.ndarray]) -> int:
     measured against the old take set, and stale-but-present is worse than
     absent — recalibrate after growing."""
     existing = load_takes(path)
+    existing_labels = load_labels(path) or []
+    if labels is None:
+        stamp = datetime.now().strftime("%Y-%m-%d")
+        labels = [f"added {stamp}" for _ in embeddings]
     combined = ([*existing, *embeddings] if existing is not None
                 else list(embeddings))
-    save_profile(path, combined)
+    save_profile(path, combined, labels=[*existing_labels, *labels])
     return len(combined)
 
 
@@ -360,5 +398,6 @@ __all__ = [
     "add_to_profile",
     "load_profile",
     "load_takes",
+    "load_labels",
     "load_threshold",
 ]
