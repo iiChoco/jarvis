@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from contextlib import aclosing
 from types import TracebackType
 from typing import AsyncIterator, Awaitable, Callable, Self
@@ -99,6 +100,14 @@ class Brain:
         self._session_cost = 0.0
         self._lifetime_cost = 0.0
         self._last_turn_cost = 0.0
+        # Connect cost, split the same way as turn cost: the most recent
+        # connect, and how much of it the *current* turn actually paid for.
+        # A turn that reconnects lazily buys a cold client's whole startup —
+        # SDK subprocess plus every MCP server — inside its own latency, and
+        # a single "to first speech" number can't tell that apart from a slow
+        # model. Zero means the client was already up.
+        self._last_connect_s = 0.0
+        self._last_reconnect_s = 0.0
         self._needs_drain = False
         # One lock serializes everything that touches the client's message
         # stream — user turns, reflection turns, rotation. Two concurrent
@@ -168,6 +177,15 @@ class Brain:
     def last_turn_cost_usd(self) -> float:
         """Cost of the most recent turn alone."""
         return self._last_turn_cost
+
+    @property
+    def last_reconnect_s(self) -> float:
+        """Seconds the most recent turn spent rebuilding a dead client.
+
+        0.0 when the client was already connected, which is the normal case —
+        a non-zero value means that turn's latency was startup, not thinking.
+        """
+        return self._last_reconnect_s
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -306,12 +324,18 @@ class Brain:
         # left on self would make every later ask() skip reconnection and
         # query a dead subprocess — a failed rotation must leave the brain
         # in the "reconnect on next turn" state, not the "wedged" one.
+        started = time.monotonic()
         client = ClaudeSDKClient(
             options=self._build_options(self._mcp_servers, self._extra_tools)
         )
         await client.connect()
         self._client = client
-        log.info("brain connected (model=%s)", self._brain_config.model)
+        self._last_connect_s = time.monotonic() - started
+        log.info(
+            "brain connected in %.2fs (model=%s)",
+            self._last_connect_s,
+            self._brain_config.model,
+        )
 
     async def close(self) -> None:
         if self._client is not None:
@@ -380,8 +404,10 @@ class Brain:
 
         await self._turn_lock.acquire()
         try:
+            self._last_reconnect_s = 0.0
             if self._client is None:
                 await self._connect_locked()
+                self._last_reconnect_s = self._last_connect_s
             assert self._client is not None
 
             await self._drain_stale()

@@ -667,9 +667,18 @@ class Pipeline:
                     break
 
         if first_spoken is not None:
+            # Reconnect is called out separately because it dominates when it
+            # happens at all: a client killed by a laptop sleeping overnight
+            # is rebuilt lazily on the next turn, and that cost lands inside
+            # "to first speech" where it reads as a slow model. Split, a long
+            # turn names its own cause.
+            reconnect = self._brain.last_reconnect_s
             log.info(
-                "turn: %.2fs to first speech, %.2fs total, $%.4f",
+                "turn: %.2fs to first speech (%.2fs reconnect, %.2fs model), "
+                "%.2fs total, $%.4f",
                 first_spoken,
+                reconnect,
+                max(0.0, first_spoken - reconnect),
                 time.monotonic() - started,
                 self._brain.last_turn_cost_usd,
             )
