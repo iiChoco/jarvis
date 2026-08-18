@@ -549,14 +549,27 @@ class BrainConfig:
     On research turns the model can reason for many seconds, and that silence
     reads as a hang; verbalizing the reasoning fills it and shows where the
     answer is coming from. Turn off for terse turns that jump straight to the
-    answer."""
+    answer — with ``show_thinking`` on, the reasoning still streams to the
+    console, just not through the speakers."""
+
+    show_thinking: bool = True
+    """Stream the model's reasoning to the console and transcript.
+
+    Independent of the voice: this is the reading channel, ``speak_thinking``
+    is the listening one. Whatever is spoken is always shown too — the
+    console is the record of what was said — so the meaningful combinations
+    are both (hear it and read it), show-only (silent deliberation you can
+    watch), and neither (thinking text isn't even requested from the model).
+    """
 
     thinking_chime: bool = True
-    """Play a soft tone when spoken reasoning ends and the answer begins.
+    """Play a soft tone when the reasoning ends and the answer begins.
 
-    The same voice speaks both, so without a boundary marker the listener
-    can't tell where deliberation stops and the conclusion starts. Only
-    matters when ``speak_thinking`` is on."""
+    With spoken reasoning the same voice says both, so the ear needs a
+    boundary marker. With show-only reasoning the chime earns its keep
+    differently: the deliberation was silent, and the tone is what says the
+    coming sentence is the answer, not a long think still warming up. Idle
+    when the turn had no reasoning phase at all."""
 
     max_turns: int | None = None
 

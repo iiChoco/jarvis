@@ -2,6 +2,22 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-08-18 — thinking on the console, not through the speakers
+
+**Why.** `speak_thinking` bundled two decisions into one switch: whether the
+reasoning is audible and whether it is visible at all. Off meant the thinking
+text wasn't even requested from the model — nothing on the console, nothing
+in the transcript — and the only alternative was listening to every
+deliberation read aloud.
+
+**What.** New `[brain] show_thinking` (default on) streams reasoning to the
+console and transcript independently of the voice. The local config now runs
+show-only: reasoning is read, not heard, and the thinking chime is back on
+with a new job — with silent deliberation, the tone is what tells the ears
+"thinking over, answer next." The `reasoning` HUD state is reserved for
+reasoning spoken aloud; show-only stays on `thinking`. "To first speech" in
+the turn log now counts only sentences that actually reached the speakers.
+
 ## 2026-08-18 — split reconnect out of turn latency
 
 **Why.** A "How are you?" at 09:17 took 80.9 seconds to first speech, after

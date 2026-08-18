@@ -253,11 +253,12 @@ class Brain:
             setting_sources=[],
             include_partial_messages=True,
             # Opus 4.7+ omits thinking text by default (signature only), so
-            # there is nothing to verbalize unless the summarized text is
-            # explicitly requested. None keeps the model's default when the
-            # text would only be dropped anyway.
+            # there is nothing to verbalize — or print — unless the
+            # summarized text is explicitly requested. Either audience
+            # (speakers or console) is reason to request it; None keeps the
+            # model's default when the text would only be dropped anyway.
             thinking={"type": "adaptive", "display": "summarized"}
-            if self._brain_config.speak_thinking
+            if (self._brain_config.speak_thinking or self._brain_config.show_thinking)
             else None,
             mcp_servers=mcp_servers or {},
             max_turns=self._brain_config.max_turns,
@@ -418,7 +419,10 @@ class Brain:
                     kind, delta = _delta(message)
                     if not delta:
                         continue
-                    if kind == "thinking" and not self._brain_config.speak_thinking:
+                    if kind == "thinking" and not (
+                        self._brain_config.speak_thinking
+                        or self._brain_config.show_thinking
+                    ):
                         continue
                     # A block boundary (reasoning → answer) is a hard break:
                     # the unterminated tail of one must not fuse into the
@@ -581,8 +585,8 @@ def _delta(event: StreamEvent) -> tuple[str, str]:
     carries neither. The Agent SDK passes Anthropic's wire events through
     untouched, so this reaches into the raw shape: ``content_block_delta``
     carrying a ``text_delta`` or ``thinking_delta``. Whether thinking is
-    spoken or dropped is the caller's decision (``speak_thinking``), so both
-    kinds are surfaced here.
+    spoken, shown, or dropped is the caller's decision (``speak_thinking``,
+    ``show_thinking``), so both kinds are surfaced here.
     """
     raw = event.event
     if raw.get("type") != "content_block_delta":

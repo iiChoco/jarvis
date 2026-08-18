@@ -628,23 +628,36 @@ class Pipeline:
                 if self._interrupted:
                     break
 
-                if first_spoken is None:
-                    first_spoken = time.monotonic() - started
-
+                # Thinking is always shown once the brain yields it (the
+                # console is the record); whether it is also *spoken* is the
+                # speak_thinking choice. Show-only reasoning keeps the
+                # indicator on "thinking" — "reasoning" means the voice is
+                # doing it aloud, and lying about that costs the pill its
+                # meaning.
+                spoken = kind != "thinking" or self._config.brain.speak_thinking
                 if kind == "thinking":
                     print(f"  ciel (thinking): {sentence}")
                     self._record("ciel-thinking", sentence)
-                    self._indicator.set_state("reasoning")
+                    self._indicator.set_state(
+                        "reasoning" if spoken else "thinking"
+                    )
                 else:
                     if prev_kind == "thinking" and self._config.brain.thinking_chime:
-                        # The audible boundary: reasoning is over, what follows
-                        # is the answer.
+                        # The audible boundary: reasoning is over, what
+                        # follows is the answer. When the reasoning was
+                        # show-only this tone is doing its best work — the
+                        # deliberation was silent, and this is what says the
+                        # silence is about to end on purpose.
                         await self._play_chime(player)
                     print(f"  ciel: {sentence}")
                     self._record("ciel", sentence)
                     self._indicator.set_state("speaking")
                 prev_kind = kind
 
+                if not spoken:
+                    continue
+                if first_spoken is None:
+                    first_spoken = time.monotonic() - started
                 completed = await player.play(self._tts.stream(sentence))
                 self._spoke = True
                 self._conversed = True
