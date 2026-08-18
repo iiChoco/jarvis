@@ -383,16 +383,34 @@ class ShellConfig:
     the gate is the defense."""
 
     auto_allow: tuple[str, ...] = (
+        # Version control, read-only.
         "git status", "git log", "git diff", "git show", "git branch",
-        "ls", "pwd", "date", "whoami", "uname",
+        "git blame",
+        # The machine describing itself.
+        "ls", "pwd", "date", "whoami", "uname", "id", "hostname", "uptime",
+        "df", "du", "ps", "pmset -g",
+        # Pure filters: they transform stdin to stdout and can't write a file.
+        # These are what make quiet *pipelines* real — "ps | head" was landing
+        # in confirm because head had no entry, and a gate that confirms
+        # harmless status checks teaches reflexive yeses. Deliberately absent:
+        # awk and sed (both can write files), tee (exists to write), xargs and
+        # find (both can execute).
+        "head", "tail", "wc", "cut", "sort", "uniq", "tr", "column", "nl",
+        "grep", "echo", "printf",
+        # File reads. A widening, chosen with eyes open: quiet shell reads
+        # reach anything your user account can, beyond the file gate's
+        # workspace. What still holds is the credential blocklist — a command
+        # naming .ssh, .aws, .zshrc and kin is denied outright, quiet tier or
+        # not — and redirection still confirms, so reading is all these get.
+        "cat", "file", "stat", "which",
     )
     """Command prefixes that run without a spoken confirmation. Matched per
     pipeline segment against leading whole tokens — "git status" covers
-    "git status -sb" — and only for commands with no redirection,
-    substitution, or backgrounding, which escalate to a confirmation
-    regardless. Deliberately absent: ``cat``, ``head``, ``tail`` — a quiet
-    read-anything is ``files.read_only_outside`` by another name, minus the
-    path checks."""
+    "git status -sb", and every segment of a pipe must match for the pipeline
+    to stay quiet. Only for commands with no redirection, substitution, or
+    backgrounding, which escalate to a confirmation regardless (merging or
+    discarding a stream — 2>&1, >/dev/null — doesn't count; those can't
+    touch a file)."""
 
     deny_extra: tuple[str, ...] = ()
     """Extra leading tokens to hard-refuse, on top of the built-in set (sudo,

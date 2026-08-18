@@ -73,6 +73,13 @@ _SUBSTITUTION = re.compile(r"\$\(|`")
 _REDIRECTION = re.compile(r"[<>]")
 _BACKGROUND = re.compile(r"(?<![&>])&(?![&])")  # bare &, not && or >&
 
+# Redirections that cannot write anywhere: merging one stream into another
+# (2>&1) and discarding a stream into /dev/null. Erased before the structure
+# check — the model reflexively appends 2>&1 to read-only commands, and
+# confirming "git log 2>&1 | head" aloud teaches the user to say yes without
+# listening, which is the exact failure the quiet tier exists to prevent.
+_HARMLESS_REDIRECT = re.compile(r"\d*>&\d+|\d*>>?\s*/dev/null|&>\s*/dev/null")
+
 _PIPELINE_SPLIT = re.compile(r"&&|\|\||[;\n]")
 
 
@@ -156,10 +163,11 @@ def classify(command: str, config: ShellConfig) -> tuple[Tier, str]:
             if tokens[0] in _DOWNLOADERS:
                 interpreter_stage = True
 
+    harmless_stripped = _HARMLESS_REDIRECT.sub(" ", text)
     has_structure = bool(
-        _SUBSTITUTION.search(text)
-        or _REDIRECTION.search(text)
-        or _BACKGROUND.search(text)
+        _SUBSTITUTION.search(harmless_stripped)
+        or _REDIRECTION.search(harmless_stripped)
+        or _BACKGROUND.search(harmless_stripped)
     )
     if has_structure:
         return "confirm", "it redirects, substitutes, or backgrounds"
