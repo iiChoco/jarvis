@@ -15,7 +15,9 @@ dependencies = [
     "numpy>=2.1",
     # Endpointing: knowing when the user stopped talking
     "webrtcvad-wheels>=2.0.14",
-    # Speech-to-text, local
+    # Speech-to-text, local. mlx-whisper is the default engine (Metal GPU);
+    # faster-whisper stays installed as the CPU fallback build_stt reaches for.
+    "mlx-whisper>=0.4.2",
     "faster-whisper>=1.1.0",
     # Wake word, local
     "openwakeword>=0.6.0",
@@ -25,6 +27,10 @@ dependencies = [
     # system site-packages, which would vanish the moment the venv is made
     # strictly isolated.
     "pyobjc-framework-Cocoa>=10.1",
+    # Screen look: preflights macOS Screen Recording permission before a
+    # capture, because `screencapture` without the grant silently omits every
+    # window instead of failing.
+    "pyobjc-framework-Quartz>=10.1",
 ]
 
 [project.optional-dependencies]

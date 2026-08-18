@@ -22,7 +22,7 @@ from ciel.audio.input import MicStream
 from ciel.audio.output import Player
 from ciel.audio.vad import Endpointer
 from ciel.config import SAMPLE_RATE, load_config
-from ciel.stt.local_whisper import WhisperSTT
+from ciel.stt import build_stt
 from ciel.tts.macos_say import SayTTS
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -84,7 +84,7 @@ async def probe_barge() -> int:
 
 async def probe_echo() -> int:
     cfg = load_config()
-    stt = WhisperSTT(cfg.stt)
+    stt = build_stt(cfg.stt)
     tts = SayTTS(cfg.tts)
     await asyncio.gather(stt.warm_up(), tts.warm_up())
 

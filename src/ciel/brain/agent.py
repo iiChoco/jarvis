@@ -25,6 +25,7 @@ from types import TracebackType
 from typing import AsyncIterator, Awaitable, Callable, Self
 
 from claude_agent_sdk import (
+    AgentDefinition,
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
@@ -216,6 +217,8 @@ class Brain:
                 projects_index=self._projects_index_provider()
                 if self._projects_index_provider
                 else None,
+                screen=self._config.screen.enabled,
+                deep_thought=self._brain_config.deep_effort is not None,
             ),
             # Explicit allowlist. The Agent SDK ships the full Claude Code
             # toolset — Bash, Write, Edit — and a voice assistant that can
@@ -226,6 +229,10 @@ class Brain:
                 *self._brain_config.allowed_tools,
                 *file_tools,
                 *(["Bash"] if self._shell_guard else []),
+                # The spawn tool for the deep-thought agent ("Task" is the
+                # older name some CLI versions still use; listing both is
+                # harmless where one is unknown).
+                *(["Agent", "Task"] if self._brain_config.deep_effort else []),
                 *(extra_tools or []),
             ],
             # Bash is granted only behind the ShellGuard voice gate; without
@@ -263,6 +270,38 @@ class Brain:
             mcp_servers=mcp_servers or {},
             max_turns=self._brain_config.max_turns,
             effort=self._brain_config.effort,
+            # The escalation valve: ordinary turns run at the low default
+            # above, and when the model judges a question genuinely hard it
+            # hands the question to this agent — same model, real effort.
+            # Effort is fixed per connection in the SDK, so escalation is a
+            # subagent with its own level rather than a mid-session switch.
+            agents={
+                "deep-thought": AgentDefinition(
+                    description=(
+                        "Your own deliberate, high-effort reasoning. Hand it "
+                        "questions that genuinely need depth — multi-step "
+                        "reasoning, tricky math or logic, weighing a "
+                        "consequential decision, synthesizing research — "
+                        "and relay its answer. Not for everyday questions "
+                        "you can answer directly."
+                    ),
+                    prompt=(
+                        "You are the deliberate reasoning process of Ciel, a "
+                        "voice assistant. You receive one hard question, "
+                        "with whatever context matters. Reason it through "
+                        "rigorously; search the web when facts would help. "
+                        "Report back compactly: the conclusion first, then "
+                        "the reasoning that carries it, in plain prose — "
+                        "your report will be relayed aloud, so no markdown, "
+                        "no lists, no URLs."
+                    ),
+                    tools=["WebSearch", "WebFetch"],
+                    model="inherit",
+                    effort=self._brain_config.deep_effort,
+                ),
+            }
+            if self._brain_config.deep_effort
+            else None,
             # Relative paths resolve inside the workspace rather than wherever
             # Ciel happened to be launched from.
             cwd=str(self._guard.workspace) if self._guard else None,
@@ -386,6 +425,9 @@ class Brain:
         ``kind`` is ``"thinking"`` for spoken reasoning and ``"reply"`` for the
         answer itself, so the pipeline can present them differently — same
         voice, but the listener deserves to know which one they're hearing.
+        A third kind, ``"escalation"``, marks the model handing the question
+        to the deep-thought agent (the payload is the spawn tool's name, not
+        speakable text) — the pipeline announces the coming silence.
 
         Yields whole sentences rather than raw deltas because that's the unit
         the speech synthesizer needs — half a sentence has the wrong prosody
@@ -416,6 +458,25 @@ class Brain:
 
             async for message in self._client.receive_response():
                 if isinstance(message, StreamEvent):
+                    raw = message.event
+                    if raw.get("type") == "content_block_start":
+                        block = raw.get("content_block") or {}
+                        if block.get("type") == "tool_use" and block.get(
+                            "name"
+                        ) in ("Agent", "Task"):
+                            # The deep-thought escalation is about to start —
+                            # a long silence from the caller's perspective.
+                            # Flush any unterminated announcement ("Give me a
+                            # moment") so it is spoken *before* the silence,
+                            # then surface the escalation as its own event so
+                            # the pipeline can verbalize it if the model
+                            # didn't.
+                            if buffer.strip():
+                                spoken_any = True
+                                yield _label(last_kind), buffer.strip()
+                                buffer = ""
+                            yield "escalation", str(block.get("name"))
+                            continue
                     kind, delta = _delta(message)
                     if not delta:
                         continue

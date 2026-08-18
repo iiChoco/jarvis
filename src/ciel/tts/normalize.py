@@ -7,10 +7,13 @@ espeak-ng, which has no dictionary entry for those, so it falls back to
 spelling them out: "hmm" comes out as the letters *aitch em em*, which is
 baffling to listen to and immediately breaks the illusion of speech.
 
-The fix is to strip them rather than respell them. A phonetic spelling that
-happens to hum on one voice is not guaranteed to on another, and a wrong guess
-here is the same failure again with extra steps. Dropping the interjection
-costs a little warmth and always sounds like language.
+For the hum family the fix is to *respell to a canonical form*, not strip:
+measured on the shipped voice (lessac-medium), piper renders "hmm" as an
+actual 0.48s hum — against 0.91s for genuinely spelled-out letters — and
+"mm-hmm" and "mmm" likewise. Stripping them made Ciel silently swallow every
+"Hmm," which reads as her not having heard at all. Variant spellings the
+model produces ("Hm", "Hmmmm", "mhm") are normalized onto the forms verified
+to hum. The truly unpronounceable ("shh", "tsk", "pfft") are still stripped.
 
 This runs on the way to the speaker only. The transcript, the logs, and the
 model's own context keep the original text.
@@ -20,13 +23,22 @@ from __future__ import annotations
 
 import re
 
-# Vowel-free interjections, matched whole-word and case-insensitively:
-#   hm, hmm, hmmm...   mm, mmm...   mhm, mm-hm, uh-huh's cousin
-#   shh, sh...         tsk, tsk-tsk        pfft
-# Deliberately conservative. Anything with a vowel ("ah", "oh", "uh", "um")
-# espeak already pronounces correctly and is left alone.
+# The hum family, normalized onto spellings verified to voice correctly on
+# the shipped piper voice. Order matters: the mhm pattern spans a hyphen the
+# plain h+m+ pattern would otherwise split.
+_RESPELL: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bm+-?h+m+\b", re.IGNORECASE), "mm-hmm"),
+    (re.compile(r"\bh+m+\b", re.IGNORECASE), "hmm"),
+    # Hyphen guards keep this off the halves of an already-canonical
+    # "mm-hmm" produced by the rule above.
+    (re.compile(r"(?<!-)\bm{2,}\b(?!-)", re.IGNORECASE), "mmm"),
+]
+
+# Still vowel-free and still unverified as hums — stripped as before.
+# Anything with a vowel ("ah", "oh", "uh", "um") espeak already pronounces
+# correctly and is left alone.
 _UNSPEAKABLE = re.compile(
-    r"\b(?:h+m+|m+-?h+m+|m{2,}|sh{2,}|ts+k+(?:-ts+k+)*|pf+t+)\b",
+    r"\b(?:sh{2,}|ts+k+(?:-ts+k+)*|pf+t+)\b",
     re.IGNORECASE,
 )
 
@@ -44,9 +56,17 @@ def speakable(text: str) -> str:
     empty string as "nothing to say", so a sentence that was only "Hmm." is
     silently skipped rather than spelled out.
     """
-    cleaned = _UNSPEAKABLE.sub("", text)
+    respelled = text
+    for pattern, canonical in _RESPELL:
+        respelled = pattern.sub(canonical, respelled)
+
+    cleaned = _UNSPEAKABLE.sub("", respelled)
     if cleaned == text:
         return text
+    if cleaned == respelled:
+        # Only respelling happened — no words were removed, so there is no
+        # orphaned punctuation to tidy and nothing to re-capitalize.
+        return respelled
 
     cleaned = _DOUBLED_PUNCT.sub("", cleaned)
     cleaned = _EXTRA_SPACE.sub(" ", cleaned)

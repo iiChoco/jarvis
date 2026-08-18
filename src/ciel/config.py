@@ -273,19 +273,29 @@ class VoiceConfig:
 
 @dataclass(frozen=True, slots=True)
 class STTConfig:
-    engine: Literal["faster-whisper"] = "faster-whisper"
+    engine: Literal["faster-whisper", "mlx-whisper"] = "mlx-whisper"
+    """``mlx-whisper`` runs on the GPU via Metal; ``faster-whisper`` is the
+    CPU fallback (CTranslate2 has no Metal backend). If mlx-whisper isn't
+    installed, the factory falls back to faster-whisper on its own."""
+
+    mlx_model: str = "mlx-community/whisper-small.en-mlx"
+    """A Hugging Face repo of MLX-converted weights, downloaded on first use.
+    ``whisper-small.en-mlx`` matches the faster-whisper ``small.en`` default.
+    ``mlx-community/whisper-large-v3-turbo`` is the accuracy upgrade — try it
+    if the GPU keeps decode latency acceptable (~1.6 GB download)."""
 
     model: str = "small.en"
-    """``base.en`` is faster and noticeably worse; ``medium.en`` is better and
-    roughly triples latency. ``small.en`` is the sweet spot on Apple Silicon."""
+    """faster-whisper only. ``base.en`` is faster and noticeably worse;
+    ``medium.en`` is better and roughly triples latency. ``small.en`` is the
+    sweet spot on Apple Silicon."""
 
     compute_type: str = "int8"
-    """int8 is ~2x faster than float32 on CPU with negligible accuracy loss."""
+    """faster-whisper only. int8 is ~2x faster than float32 on CPU with
+    negligible accuracy loss."""
 
     device: str = "cpu"
-    """faster-whisper uses CTranslate2, which has no Metal backend — "cpu" is
-    the only real option here. For GPU on Apple Silicon the answer is a
-    different engine (mlx-whisper), which is why this sits behind a protocol."""
+    """faster-whisper only, and "cpu" is the only real option there — GPU on
+    Apple Silicon is what the mlx-whisper engine is for."""
 
     language: str | None = "en"
     beam_size: int = 1
@@ -533,15 +543,33 @@ class BrainConfig:
     this list, so enabling those features can't be done without also enabling
     their guards."""
 
-    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
-    """Reasoning depth. ``None`` uses the model default (high).
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = "low"
+    """Reasoning depth for ordinary turns. ``None`` uses the model default
+    (high).
 
-    Measured on this setup, effort is *not* the cost lever you'd expect for
-    conversation: chat turns emit only 6-20 output tokens because adaptive
-    thinking correctly decides not to think hard about "what's my name", so
-    low/medium/high cost the same. It starts to matter on research turns, where
-    you actively want the depth. Left at the default for that reason — turn it
-    down only if research answers feel over-deliberated."""
+    Low by default because conversation rarely needs depth — chat turns emit
+    only 6-20 output tokens since adaptive thinking correctly declines to
+    deliberate over "what's my name" — and a voice assistant lives on
+    snappiness. Depth is not lost, just moved: when a question genuinely
+    needs it, the model escalates itself via the deep-thought agent below."""
+
+    deep_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = "high"
+    """The escalation valve: effort for the deep-thought agent.
+
+    Ciel runs quick by default, but hard questions deserve real deliberation
+    — so a subagent with this effort level (same model, web tools) is
+    registered, and the prompt tells her to hand genuinely hard problems to
+    it. She decides per-question; nothing is escalated automatically. Raise
+    to ``xhigh`` if deep answers still feel shallow — at the cost of longer
+    silences. ``None`` removes the agent entirely."""
+
+    ack_phrases: tuple[str, ...] = ("Hmm.", "Let me see.", "Let me think about that.")
+    """Spoken the moment a turn heads to the brain — the audible "I heard
+    you". Transcription is fast, but the brain's first sentence is one to
+    several seconds away, and that silence reads as not having been heard.
+    One of these plays (chosen at random) overlapped with the brain starting
+    to think, so it fills the gap rather than adding to it. Only brain turns:
+    local commands answer instantly and need no filler. Empty disables."""
 
     speak_thinking: bool = True
     """Speak the model's reasoning aloud as it thinks, before the answer.
@@ -754,6 +782,50 @@ class UIConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class CommandsConfig:
+    enabled: bool = True
+    """Local commands: utterances the pipeline handles itself, brain never
+    involved — "ten minute timer", "cancel the timer", "reload". Zero model
+    latency and zero cost, at the price of fixed phrasing; anything the
+    grammar in commands.py doesn't recognize with certainty still goes to
+    the brain as before."""
+
+
+@dataclass(frozen=True, slots=True)
+class TimersConfig:
+    enabled: bool = True
+
+    file: Path = field(default_factory=lambda: Path.home() / ".ciel" / "timers.json")
+    """Armed timers, mirrored here on every change so a restart (autoreload
+    does this constantly) doesn't silently swallow a running timer."""
+
+    missed_grace_s: float = 3600.0
+    """How late a timer that came due while Ciel was off still gets announced
+    at startup. Within the window: spoken, late but honest. Past it: dropped
+    with a log line — a "your rice is done" from yesterday helps no one."""
+
+
+@dataclass(frozen=True, slots=True)
+class ScreenConfig:
+    enabled: bool = True
+    """Whether Ciel may look at the screen. The tool is only offered to the
+    model when this is on, so disabling it removes the capability entirely
+    rather than leaving a tool that always refuses.
+
+    Needs macOS Screen Recording permission (System Settings → Privacy &
+    Security) granted to whatever app runs Ciel — without it, captures come
+    back as wallpaper with every window silently missing, which is why the
+    tool preflights the permission instead of trusting the output."""
+
+    max_edge: int = 1568
+    """Screenshots are scaled so their long edge is at most this many pixels
+    before being sent to the model. 1568 is the most Claude's vision actually
+    ingests — anything larger is downscaled server-side anyway, so sending
+    more just costs upload time. On a 2x Retina display this lands close to
+    1x logical resolution, which keeps on-screen text readable."""
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     wake: WakeConfig = field(default_factory=WakeConfig)
@@ -768,6 +840,9 @@ class Config:
     shell: ShellConfig = field(default_factory=ShellConfig)
     journal: JournalConfig = field(default_factory=JournalConfig)
     messages: MessagesConfig = field(default_factory=MessagesConfig)
+    commands: CommandsConfig = field(default_factory=CommandsConfig)
+    screen: ScreenConfig = field(default_factory=ScreenConfig)
+    timers: TimersConfig = field(default_factory=TimersConfig)
     transcripts: TranscriptConfig = field(default_factory=TranscriptConfig)
     dev: DevConfig = field(default_factory=DevConfig)
     ui: UIConfig = field(default_factory=UIConfig)
@@ -798,6 +873,9 @@ _SECTIONS = {
     "shell": ShellConfig,
     "journal": JournalConfig,
     "messages": MessagesConfig,
+    "commands": CommandsConfig,
+    "screen": ScreenConfig,
+    "timers": TimersConfig,
     "transcripts": TranscriptConfig,
     "dev": DevConfig,
     "ui": UIConfig,

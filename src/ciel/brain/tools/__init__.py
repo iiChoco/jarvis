@@ -28,18 +28,24 @@ from ciel.brain.tools.memory import MEMORY_TOOLS, bind_store
 from ciel.brain.tools.messages import MESSAGE_TOOLS, SEND_TOOLS
 from ciel.brain.tools.messages import bind_client as bind_messages
 from ciel.brain.tools.projects import PROJECT_TOOLS, bind_projects
+from ciel.brain.tools.screen import SCREEN_TOOLS, bind_screen
+from ciel.brain.tools.timers import TIMER_TOOLS, bind_timers
 from ciel.config import Config, MCPServerConfig
 from ciel.journal import ActionJournal
 from ciel.memory.store import MemoryStore
 from ciel.messages import MessagesClient
 from ciel.projects import ProjectStore
+from ciel.timers import TimerService
 
 log = logging.getLogger(__name__)
 
 SERVER_NAME = "ciel"
 
 # Every custom tool Ciel can call. Append to this list to add a capability.
-TOOLS = [*MEMORY_TOOLS, *MESSAGE_TOOLS, *ACTION_TOOLS, *PROJECT_TOOLS]
+TOOLS = [
+    *MEMORY_TOOLS, *MESSAGE_TOOLS, *ACTION_TOOLS, *PROJECT_TOOLS,
+    *SCREEN_TOOLS, *TIMER_TOOLS,
+]
 
 
 def _qualified(tool_name: str) -> str:
@@ -67,19 +73,26 @@ def _external_server(entry: MCPServerConfig) -> dict[str, Any] | None:
 def build_tool_server(
     config: Config,
 ) -> tuple[
-    dict[str, Any], list[str], MemoryStore | None, ProjectStore | None, ActionJournal | None
+    dict[str, Any],
+    list[str],
+    MemoryStore | None,
+    ProjectStore | None,
+    ActionJournal | None,
+    TimerService | None,
 ]:
     """Assemble Ciel's MCP servers: the in-process one plus external connectors.
 
     Returns the ``mcp_servers`` mapping, the tool names to add to
     ``allowed_tools``, the memory and project stores (so the caller can wire
-    their index providers into the system prompt), and the action journal
-    (so the brain can hook its recorder up to the same instance this
-    registry's tool reads).
+    their index providers into the system prompt), the action journal (so the
+    brain can hook its recorder up to the same instance this registry's tool
+    reads), and the timer service (so the pipeline can poll it for due
+    announcements — the tools only *arm* timers; the pipeline speaks them).
     """
     store: MemoryStore | None = None
     journal: ActionJournal | None = None
     projects: ProjectStore | None = None
+    timers: TimerService | None = None
     tools = list(TOOLS)
 
     if config.memory.enabled:
@@ -111,6 +124,19 @@ def build_tool_server(
         # Same reasoning as memory: a recent_actions that always answers
         # "unavailable" wastes a turn and teaches the model not to try.
         tools = [t for t in tools if t not in ACTION_TOOLS]
+
+    if config.screen.enabled:
+        bind_screen(config.screen)
+    else:
+        # Same reasoning as memory: an always-refusing tool wastes turns.
+        tools = [t for t in tools if t not in SCREEN_TOOLS]
+
+    if config.timers.enabled:
+        timers = TimerService(config.timers.file)
+        bind_timers(timers)
+    else:
+        # Same reasoning as memory: an always-unavailable tool wastes turns.
+        tools = [t for t in tools if t not in TIMER_TOOLS]
 
     if config.messages.enabled:
         bind_messages(MessagesClient(config.messages))
@@ -166,7 +192,7 @@ def build_tool_server(
 
     if allowed:
         log.debug("allowed tools: %s", ", ".join(allowed))
-    return servers, allowed, store, projects, journal
+    return servers, allowed, store, projects, journal, timers
 
 
 __all__ = ["TOOLS", "SERVER_NAME", "build_tool_server"]

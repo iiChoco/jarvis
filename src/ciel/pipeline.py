@@ -30,6 +30,7 @@ import re
 import sys
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from contextlib import aclosing
 from enum import Enum, auto
 from pathlib import Path
@@ -47,8 +48,9 @@ from ciel.brain.tools import build_tool_server
 from ciel.config import SAMPLE_RATE, AudioConfig, Config
 from ciel.confirm import VoiceConfirmBroker
 from ciel.reload import SourceWatcher, default_roots
-from ciel.stt.base import SpeechToText
-from ciel.stt.local_whisper import WhisperSTT
+from ciel.commands import Command, match as match_command
+from ciel.stt import SpeechToText, build_stt
+from ciel.timers import Timer, announcement, spoken_clock, spoken_duration
 from ciel.transcript import Transcript
 from ciel.tts.base import TextToSpeech
 from ciel.ui.indicator import Indicator, build_indicator
@@ -200,7 +202,7 @@ class Pipeline:
 
     def __init__(self, config: Config) -> None:
         self._config = config
-        self._stt: SpeechToText = WhisperSTT(config.stt)
+        self._stt: SpeechToText = build_stt(config.stt)
         self._tts: TextToSpeech = build_tts(config)
         self._wake: WakeDetector = build_wake_detector(config.wake)
         self._endpointer = Endpointer(config.audio)
@@ -209,9 +211,14 @@ class Pipeline:
         # Custom tools (memory today, whatever lands in the registry later) are
         # assembled before the brain, because the memory index they expose has
         # to be baked into the system prompt at connect time.
-        self._mcp_servers, self._custom_tools, self._memory, self._projects, self._journal = (
-            build_tool_server(config)
-        )
+        (
+            self._mcp_servers,
+            self._custom_tools,
+            self._memory,
+            self._projects,
+            self._journal,
+            self._timers,
+        ) = build_tool_server(config)
         if self._memory is not None and self._memory.all():
             log.info("loaded %d memories", len(self._memory.all()))
 
@@ -271,6 +278,9 @@ class Pipeline:
         self.reload_requested = False
         """Set when the source changed and the loop exited to be re-exec'd.
         The entry point reads this after run() returns."""
+        self._reload_pending = False
+        """A spoken or typed "reload" landed; the frame loop performs it from
+        idle, exactly as it does for a source change."""
 
     async def run(self) -> None:
         await self._startup()
@@ -293,6 +303,18 @@ class Pipeline:
                 self._stdin_task = asyncio.create_task(self._read_stdin())
                 self._announce_ready()
 
+                if self._timers is not None:
+                    # Timers that came due while Ciel was off: announced late
+                    # but honestly, within the grace window. pop_missed drops
+                    # anything staler with a log line.
+                    missed = self._timers.pop_missed(
+                        self._config.timers.missed_grace_s
+                    )
+                    if missed:
+                        await self._announce_timers(
+                            missed, player, mic, missed=True
+                        )
+
                 # One loop, always consuming. The turn runs as a task rather
                 # than being awaited here, because the moment this loop stops
                 # pulling frames, barge-in becomes impossible — there is
@@ -310,6 +332,24 @@ class Pipeline:
                             self._typed.popleft()
                         self._confirm.feed(frame)
                         continue
+
+                    if (
+                        self._timers is not None
+                        and self._state is not State.BUSY
+                        and not self._endpointer.speaking
+                        and self._pending_text is None
+                    ):
+                        # A due timer speaks the moment nothing else owns the
+                        # audio: not over Ciel's own turn (BUSY — it fires the
+                        # instant the turn ends), not over the user
+                        # mid-utterance, not into a Cauchy hold. Awaited
+                        # inline, like the wake acknowledgement: announcements
+                        # are seconds long, and the mic is drained after so
+                        # Ciel's own voice isn't transcribed as a turn.
+                        fired = self._timers.pop_due()
+                        if fired:
+                            await self._announce_timers(fired, player, mic)
+                            continue
 
                     if (
                         self._typed
@@ -336,9 +376,16 @@ class Pipeline:
 
                     if self._state is State.WAITING:
                         # Reload only from idle: never yank the process out
-                        # from under a conversation in progress.
-                        if self._watcher is not None and self._watcher.changed:
-                            print(f"\nsource changed ({self._watcher.changed.name}) — reloading")
+                        # from under a conversation in progress. Triggered by
+                        # a source change or by the user asking for one.
+                        source_changed = (
+                            self._watcher is not None and self._watcher.changed
+                        )
+                        if source_changed or self._reload_pending:
+                            if source_changed:
+                                print(f"\nsource changed ({self._watcher.changed.name}) — reloading")
+                            else:
+                                print("\nreload requested — reloading")
                             # Let maintenance land first: re-exec'ing while
                             # rotate() is mid-connect leaves a half-built SDK
                             # subprocess behind. Bounded — a hung task is
@@ -485,6 +532,17 @@ class Pipeline:
                 if not heard and not pending:
                     log.debug("nothing intelligible in %.2fs of audio", len(utterance) / SAMPLE_RATE)
                     return
+
+                # A dismissal is checked against what was *just said*, before
+                # the merge below — "set a timer for... um" followed by
+                # "never mind" is the user cancelling the held thought, and
+                # merging would bury the dismissal inside a nonsense request.
+                if heard and self._config.commands.enabled:
+                    cmd = match_command(heard)
+                    if cmd is not None and cmd.kind == "dismiss":
+                        await self._run_local_command(cmd, heard, player)
+                        return
+
                 if heard:
                     text = f"{pending} {heard}".strip() if pending else heard
                     if self._trails_off(heard):
@@ -505,6 +563,17 @@ class Pipeline:
                 text = pending_text
             assert text is not None
 
+            # Mechanical requests skip the brain entirely: no model latency,
+            # no cost, no session traffic. The grammar only fires on whole
+            # utterances it is certain about; everything else takes the
+            # normal path, so a missed match costs nothing new.
+            cmd = match_command(text) if self._config.commands.enabled else None
+            if cmd is not None and (
+                cmd.kind in ("reload", "dismiss") or self._timers is not None
+            ):
+                await self._run_local_command(cmd, text, player)
+                return
+
             await self._respond(text, player, mic)
         except Exception:
             self._pending_text = None
@@ -518,6 +587,13 @@ class Pipeline:
                 # not escalate a failed turn into a dead assistant.
                 log.debug("could not speak the failure notice", exc_info=True)
         finally:
+            # A timer armed during this turn starts counting here, as the
+            # reply's audio ends — so the "starting now" the user just heard
+            # is when the count actually starts, not the tool call seconds
+            # earlier. In the finally so a turn that errors after arming
+            # still starts what it promised.
+            if self._timers is not None:
+                self._timers.commit_pending()
             # Ciel's own voice was captured while the speakers were live;
             # drained so it isn't transcribed as the user's next turn. Not on
             # the continuation path though: nothing was played there, and the
@@ -550,12 +626,32 @@ class Pipeline:
         try:
             print(f"\n  you (typed): {text}")
             self._record("user", text)
+
+            # Same brain bypass as the spoken path; the reply goes to the
+            # console because typing is a request for quiet.
+            cmd = match_command(text) if self._config.commands.enabled else None
+            if cmd is not None and (
+                cmd.kind in ("reload", "dismiss") or self._timers is not None
+            ):
+                if cmd.kind != "dismiss":
+                    self._conversed = True
+                log.info("local command (typed): %s", cmd.kind)
+                reply = self._apply_local_command(cmd)
+                if reply is not None:
+                    print(f"  ciel: {reply}")
+                    self._record("ciel", reply)
+                return
+
             started = time.monotonic()
             # Same aclosing obligation as _respond: ask() holds the brain's
             # turn lock, and an abandoned generator would deadlock the next
             # turn behind it.
             async with aclosing(self._brain.ask(text)) as stream:
                 async for kind, sentence in stream:
+                    if kind == "escalation":
+                        print("  [deep thought engaged]")
+                        self._record("event", "deep thought engaged")
+                        continue
                     if kind == "thinking":
                         print(f"  ciel (thinking): {sentence}")
                         self._record("ciel-thinking", sentence)
@@ -576,6 +672,11 @@ class Pipeline:
             self._indicator.set_state("error")
             self._record("event", "typed turn failed")
             print("  (something went wrong there — see the log)", flush=True)
+        finally:
+            # Same anchoring as the spoken path: a typed turn has no audio to
+            # wait for, so its timers start as the turn's text lands.
+            if self._timers is not None:
+                self._timers.commit_pending()
 
     async def _read_stdin(self) -> None:
         """Feed typed lines into the turn queue — the tier-one chatbox.
@@ -611,13 +712,128 @@ class Pipeline:
             if line:
                 self._typed.append(line)
 
+    async def _run_local_command(
+        self, cmd: Command, text: str, player: Player
+    ) -> None:
+        """Speak a locally-handled turn — same console and transcript shape
+        as ``_respond``, just with nothing to wait for."""
+        print(f"\n  you: {text}")
+        self._record("user", text)
+        if cmd.kind != "dismiss":
+            # A dismissal alone is not a conversation: an accidental wake
+            # ended with "never mind" should not arm reflection and rotation
+            # over an exchange with nothing in it.
+            self._conversed = True
+        log.info("local command: %s", cmd.kind)
+        reply = self._apply_local_command(cmd)
+        if reply is None:
+            return  # reload and dismiss stay quiet on purpose
+        print(f"  ciel: {reply}")
+        self._record("ciel", reply)
+        self._indicator.set_state("speaking")
+        # _spoke mirrors _respond: a completed reply opens the follow-up
+        # window ("...and a five minute one too"), an interrupted one doesn't.
+        self._spoke = await player.play(self._tts.stream(reply))
+
+    def _apply_local_command(self, cmd: Command) -> str | None:
+        """Execute a local command and return what to say (None: stay quiet).
+
+        Side effects live here, shared by the spoken and typed paths;
+        delivery — TTS or console — belongs to the callers. Timer commands
+        assume the service exists because the dispatch sites guard on it.
+        """
+        if cmd.kind == "reload":
+            self._reload_pending = True
+            return None
+
+        if cmd.kind == "dismiss":
+            # Drop whatever this exchange was building — a held partial
+            # thought included — and go quietly back to waiting. No spoken
+            # reply: the answer to "never mind" is the absence of one, and
+            # the indicator going idle is the acknowledgement.
+            self._pending_text = None
+            self._continue_listening = False
+            print("  [dismissed]")
+            return None
+
+        assert self._timers is not None
+        if cmd.kind == "set_timer":
+            self._timers.set_relative(cmd.seconds)
+            # Pending until the turn's finally commits it, so "starting now"
+            # is anchored to the end of this very sentence.
+            return f"{spoken_duration(cmd.seconds)} timer — starting now."
+
+        if cmd.kind == "cancel_timer":
+            active = self._timers.active()
+            if not active:
+                return "No timers are running."
+            cancelled = self._timers.cancel("")
+            if cancelled is None:
+                return (
+                    f"You have {len(active)} timers running — "
+                    "tell me which one to cancel."
+                )
+            if cancelled.kind == "alarm":
+                return f"Cancelled the {spoken_clock(cancelled.due_at)} alarm."
+            return f"Cancelled the {spoken_duration(cancelled.duration_s)} timer."
+
+        active = self._timers.active()  # list_timers
+        if not active:
+            return "No timers are running."
+        now = time.time()
+        parts = []
+        for t in active:
+            if t.kind == "alarm":
+                parts.append(f"an alarm at {spoken_clock(t.due_at)}")
+            else:
+                left = spoken_duration(max(1.0, t.due_at - now), plural=True)
+                parts.append(f"your {spoken_duration(t.duration_s)} timer with {left} left")
+        listing = "; ".join(parts)
+        return f"{listing[0].upper()}{listing[1:]}."
+
     async def _respond(self, text: str, player: Player, mic: MicStream) -> None:
         print(f"\n  you: {text}")
         self._record("user", text)
         started = time.monotonic()
-        first_spoken: float | None = None
         self._interrupted = False
 
+        # The audible "I heard you": a short filler spoken while the brain
+        # starts thinking. Launched as a task so it overlaps the model's
+        # latency instead of adding to it; every later play awaits it first
+        # so two voices never overlap. Deliberately does not set _spoke — a
+        # filler alone must not open a follow-up window.
+        ack_task: asyncio.Task[bool] | None = None
+        if self._config.brain.ack_phrases:
+            ack_task = asyncio.create_task(
+                player.play(self._tts.stream(random.choice(self._config.brain.ack_phrases)))
+            )
+
+        async def ack_done() -> None:
+            nonlocal ack_task
+            if ack_task is not None:
+                try:
+                    await ack_task
+                except Exception:  # noqa: BLE001 — a lost filler costs nothing
+                    log.debug("ack playback failed", exc_info=True)
+                ack_task = None
+
+        try:
+            await self._respond_stream(text, player, started, ack_done)
+        finally:
+            # A brain that yields nothing (or raises) must not leave the
+            # filler task dangling into the next turn.
+            await ack_done()
+
+    async def _respond_stream(
+        self,
+        text: str,
+        player: Player,
+        started: float,
+        ack_done: Callable[[], Awaitable[None]],
+    ) -> None:
+        """The streaming body of a brain turn — split out so ``_respond``
+        can guarantee the heard-ack task is awaited on every exit path."""
+        first_spoken: float | None = None
         prev_kind: str | None = None
         # aclosing is load-bearing, not tidiness: ask() holds the brain's
         # turn lock, and a `break` below abandons the generator — without an
@@ -627,6 +843,27 @@ class Pipeline:
             async for kind, sentence in stream:
                 if self._interrupted:
                     break
+
+                if kind == "escalation":
+                    # The model just handed the question to deep-thought —
+                    # from here the room goes quiet for as long as the deep
+                    # pass takes. If nothing has been spoken yet this turn,
+                    # name what is happening; if the model already announced
+                    # it in its own words, don't say it twice.
+                    print("  [deep thought engaged]")
+                    self._record("event", "deep thought engaged")
+                    if first_spoken is None:
+                        line = "Give me a moment. I want to think this through properly."
+                        print(f"  ciel: {line}")
+                        self._record("ciel", line)
+                        await ack_done()
+                        self._indicator.set_state("speaking")
+                        first_spoken = time.monotonic() - started
+                        await player.play(self._tts.stream(line))
+                        self._spoke = True
+                        self._conversed = True
+                    self._indicator.set_state("thinking")
+                    continue
 
                 # Thinking is always shown once the brain yields it (the
                 # console is the record); whether it is also *spoken* is the
@@ -648,6 +885,7 @@ class Pipeline:
                         # show-only this tone is doing its best work — the
                         # deliberation was silent, and this is what says the
                         # silence is about to end on purpose.
+                        await ack_done()
                         await self._play_chime(player)
                     print(f"  ciel: {sentence}")
                     self._record("ciel", sentence)
@@ -656,6 +894,7 @@ class Pipeline:
 
                 if not spoken:
                     continue
+                await ack_done()
                 if first_spoken is None:
                     first_spoken = time.monotonic() - started
                 completed = await player.play(self._tts.stream(sentence))
@@ -695,6 +934,67 @@ class Pipeline:
                 time.monotonic() - started,
                 self._brain.last_turn_cost_usd,
             )
+
+    async def _announce_timers(
+        self,
+        fired: list[Timer],
+        player: Player,
+        mic: MicStream,
+        missed: bool = False,
+    ) -> None:
+        """Ring, then speak each fired timer's announcement.
+
+        The unprompted-speech path: no turn, no brain, just the ring and the
+        sentence the timer was armed with. The ring comes first because an
+        assistant that starts talking out of nowhere startles — a familiar
+        tone buys the half-second of "that's the timer" before the words.
+        """
+        self._indicator.set_state("speaking")
+        try:
+            await self._play_ring(player)
+            for timer in fired:
+                text = announcement(timer)
+                if missed:
+                    text = f"While I was off, a {timer.kind} went off. {text}"
+                print(f"\n  ciel ({timer.kind}): {text}", flush=True)
+                self._record("ciel", f"[{timer.kind}] {text}")
+                await player.play(self._tts.stream(text))
+        except Exception:  # noqa: BLE001 — a failed ring must not kill the loop
+            log.exception("timer announcement failed")
+        finally:
+            # Ciel's own voice was captured while the speakers were live.
+            mic.drain()
+            self._indicator.set_state(
+                "listening" if self._state is State.LISTENING else "idle"
+            )
+
+    async def _play_ring(self, player: Player) -> None:
+        """The timer ring: a rising two-note figure, played twice.
+
+        Deliberately not the thinking chime — that tone means "answer coming",
+        this one means "Ciel is about to speak although you said nothing".
+        Distinct sounds keep those distinguishable by ear alone.
+        """
+        rate = self._tts.sample_rate
+
+        def note(freq: float, dur: float) -> np.ndarray:
+            t = np.arange(int(rate * dur), dtype=np.float32) / rate
+            fade = np.minimum(1.0, np.minimum(t, t[::-1]) / 0.015)
+            return 0.2 * np.sin(2 * np.pi * freq * t) * fade
+
+        gap = np.zeros(int(rate * 0.08), dtype=np.float32)
+        figure = np.concatenate([note(660.0, 0.13), note(880.0, 0.18)])
+        data = float_to_pcm(
+            np.concatenate([figure, gap, figure]).astype(np.float32)
+        )
+
+        async def chunks():
+            yield data
+
+        try:
+            await player.play(chunks())
+        except Exception:  # noqa: BLE001 - a missing ring is not a failure
+            log.debug("could not play the timer ring", exc_info=True)
 
     async def _play_chime(self, player: Player) -> None:
         """A soft tone marking the end of spoken reasoning.
