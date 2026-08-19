@@ -48,10 +48,12 @@ from ciel.brain.tools import build_tool_server
 from ciel.brain.tools.memory import bind_context as bind_memory_context
 from ciel.config import SAMPLE_RATE, AudioConfig, Config
 from ciel.confirm import VoiceConfirmBroker
+from ciel.messages import MessagesClient, MessagesUnavailable
 from ciel.proactive.calendar import CalendarWatcher
 from ciel.proactive.events import EventQueue, ProactiveEvent
 from ciel.proactive.policy import Decision, InterruptionPolicy
 from ciel.proactive.presence import PresenceProbe
+from ciel.proactive.watchers import ScheduleWatcher
 from ciel.reload import SourceWatcher, default_roots
 from ciel.commands import Command, match as match_command
 from ciel.stt import SpeechToText, build_stt
@@ -359,6 +361,8 @@ class Pipeline:
         just as visible. In-flight speech and user-requested timers are
         untouched — the brake stops new starts, never running work."""
         self._hold_engaged = False  # log the engagement once, not per poll
+        self._calendar: CalendarWatcher | None = None
+        self._owner_messages: MessagesClient | None = None
         if config.proactive.enabled:
             self._events = EventQueue(
                 config.proactive.state_file,
@@ -367,13 +371,26 @@ class Pipeline:
             self._policy = InterruptionPolicy(config.proactive)
             self._presence = PresenceProbe(config.proactive)
             if config.proactive.calendar_enabled:
+                self._calendar = CalendarWatcher(config.proactive, self._events)
+                self._vigil_watchers.append(self._calendar)
+            if config.proactive.brief_time:
                 self._vigil_watchers.append(
-                    CalendarWatcher(config.proactive, self._events)
+                    ScheduleWatcher(config.proactive, self._events)
                 )
+            # The away outlet: all three switches, or it doesn't exist. A
+            # separate client from the tools' binding on purpose — this send
+            # path is pipeline-owned and never reachable from a turn.
+            if (
+                config.proactive.owner_handle
+                and config.messages.enabled
+                and config.messages.allow_send
+            ):
+                self._owner_messages = MessagesClient(config.messages)
             log.info(
-                "vigil enabled (%d watcher%s)",
+                "vigil enabled (%d watcher%s%s)",
                 len(self._vigil_watchers),
                 "" if len(self._vigil_watchers) == 1 else "s",
+                ", away texting armed" if self._owner_messages else "",
             )
 
         self._watcher: SourceWatcher | None = (
@@ -555,6 +572,18 @@ class Pipeline:
                                 turn = asyncio.create_task(
                                     self._run_proactive_turn(event, player, mic)
                                 )
+                            elif decision.action == "message":
+                                # No audio involved, so this runs in the
+                                # maintenance slot — swallows its failures,
+                                # hastened by any user turn — never as the
+                                # audio-owning `turn`. Slot busy: back into
+                                # the queue, retried next poll.
+                                if self._maintenance is None or self._maintenance.done():
+                                    self._maintenance = asyncio.create_task(
+                                        self._run_proactive_message(event)
+                                    )
+                                else:
+                                    self._events.push(event)
                             elif decision.action == "hold":
                                 self._events.hold(event)
                             else:
@@ -1209,12 +1238,13 @@ class Pipeline:
         if event is None:
             return None, None
         local = time.localtime(now)
+        today = time.strftime("%Y-%m-%d", local)
         decision = self._policy.decide(
             event,
             presence=self._presence.state(time.monotonic()),
-            spoken_today=self._events.spoken_count(
-                time.strftime("%Y-%m-%d", local)
-            ),
+            spoken_today=self._events.spoken_count(today),
+            messaged_today=self._events.messaged_count(today),
+            can_message=self._owner_messages is not None,
             now=now,
             local_minutes=local.tm_hour * 60 + local.tm_min,
         )
@@ -1248,11 +1278,12 @@ class Pipeline:
                 # Same shape as reflection, same hazard: the timeout must
                 # interrupt the brain, or suppression and unattended mode
                 # lift while the turn is still generating.
+                prompt = proactive_prompt(
+                    event.summary, extra=await self._proactive_extra(event)
+                )
                 with self._confirm.suppress(), self._brain.unattended("proactive"):
                     await asyncio.wait_for(
-                        self._collect_unattended(
-                            proactive_prompt(event.summary), sentences
-                        ),
+                        self._collect_unattended(prompt, sentences),
                         timeout=self._config.proactive.turn_timeout_s,
                     )
             except asyncio.TimeoutError:
@@ -1320,6 +1351,106 @@ class Pipeline:
                 log.debug("could not hold the failed event", exc_info=True)
         # No mic.drain() here: the BUSY-exit path in the frame loop drains
         # and re-enters WAITING for every turn task, this one included.
+
+    async def _proactive_extra(self, event: ProactiveEvent) -> str | None:
+        """Event-specific prompt material. The brief gets today's agenda and
+        the overnight held notes — consumed here, because the brief IS their
+        delivery; a brief that then fails loses them to a turn that at least
+        tried, which beats double-delivering them to the next conversation.
+        """
+        if event.source != "brief" or self._events is None:
+            return None
+        parts: list[str] = []
+        if self._calendar is not None:
+            agenda = await self._calendar.agenda_today()
+            if agenda:
+                parts.append(
+                    "Today's calendar:\n"
+                    + "\n".join(f"- {line}" for line in agenda)
+                )
+        notes = self._events.take_held(time.time())
+        if notes:
+            parts.append(
+                "Held while you were away:\n"
+                + "\n".join(f"- {note.summary}" for note in notes)
+            )
+        if not parts:
+            parts.append(
+                "The calendar shows nothing for the rest of today and "
+                "nothing was held overnight."
+            )
+        return "\n\n".join(parts)
+
+    async def _run_proactive_message(self, event: ProactiveEvent) -> None:
+        """One unattended turn whose outlet is a text to the owner's phone.
+
+        Runs in the maintenance slot: no audio, failures swallowed, hastened
+        by user turns. The Witness rule still governs the turn itself —
+        ``mcp__ciel__send_message`` stays denied inside it — because the send
+        below is pipeline-owned: the model composes words; deterministic
+        code decided a message happens, and config decided to whom. The
+        texting budget is charged only after the send succeeds.
+        """
+        assert self._events is not None and self._owner_messages is not None
+        print(f"\n  [proactive → text: {event.summary}]", flush=True)
+        self._record("event", f"proactive (text): {event.summary}")
+        sentences: list[str] = []
+        try:
+            try:
+                prompt = proactive_prompt(
+                    event.summary,
+                    outlet="message",
+                    extra=await self._proactive_extra(event),
+                )
+                with self._confirm.suppress(), self._brain.unattended("proactive"):
+                    await asyncio.wait_for(
+                        self._collect_unattended(prompt, sentences),
+                        timeout=self._config.proactive.turn_timeout_s,
+                    )
+            except asyncio.TimeoutError:
+                log.debug("proactive message turn timed out — interrupting")
+                try:
+                    await self._brain.interrupt()
+                except Exception:  # noqa: BLE001 - best-effort, as in reflection
+                    log.debug("interrupt after timeout failed", exc_info=True)
+                self._events.hold(event)
+                return
+
+            reply = " ".join(sentences).strip()
+            valve = proactive_valve(reply) if reply else None
+            if valve == "SKIP":
+                self._record("event", "proactive (text): declined")
+                self._events.drop(event, time.time())
+                return
+            if valve == "HOLD" or not reply:
+                self._record("event", "proactive (text): held")
+                self._events.hold(event)
+                return
+
+            await self._owner_messages.send(
+                self._config.proactive.owner_handle, reply
+            )
+            print(f"  ciel (texted): {reply}", flush=True)
+            self._record("ciel", f"[proactive text] {reply}")
+            self._events.mark_messaged(
+                event, time.time(), time.strftime("%Y-%m-%d")
+            )
+        except MessagesUnavailable as exc:
+            # The send path refused (switch off, handle malformed, osascript
+            # failure). The event is still owed: held for the next
+            # conversation, and the reason is in the log, not a guess.
+            log.warning("away text failed (%s) — holding the event", exc)
+            self._record("event", "proactive (text): send failed")
+            try:
+                self._events.hold(event)
+            except Exception:  # noqa: BLE001 - persistence is best-effort here
+                log.debug("could not hold the failed event", exc_info=True)
+        except Exception:  # noqa: BLE001 - maintenance-slot task must not crash the loop
+            log.exception("proactive message turn failed")
+            try:
+                self._events.hold(event)
+            except Exception:  # noqa: BLE001 - persistence is best-effort here
+                log.debug("could not hold the failed event", exc_info=True)
 
     async def _collect_unattended(
         self, prompt: str, sentences: list[str]

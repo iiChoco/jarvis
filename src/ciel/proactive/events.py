@@ -169,6 +169,20 @@ class EventQueue:
         self._roll_budget(date)
         return self._spoken
 
+    def mark_messaged(self, event: ProactiveEvent, now: float, date: str) -> None:
+        """Record a texted delivery and charge the day's texting budget.
+        Called only after the send actually succeeded — same reasoning as
+        the spoken charge."""
+        self._delivered[event.dedupe_key] = now
+        self._roll_budget(date)
+        self._messaged += 1
+        self._save()
+
+    def messaged_count(self, date: str) -> int:
+        """Texted deliveries so far on the given local date."""
+        self._roll_budget(date)
+        return self._messaged
+
     def take_held(self, now: float) -> list[ProactiveEvent]:
         """Consume the held notes worth delivering right now.
 

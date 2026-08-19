@@ -338,7 +338,9 @@ If nothing durable came up, save nothing. Either way, reply with one short \
 plain sentence saying what you did.)"""
 
 
-def proactive_prompt(summary: str) -> str:
+def proactive_prompt(
+    summary: str, *, outlet: str = "speak", extra: str | None = None
+) -> str:
     """The turn text for one Vigil event — REFLECTION_PROMPT's sibling.
 
     A function rather than a format template because the summary is written
@@ -347,20 +349,37 @@ def proactive_prompt(summary: str) -> str:
     turn as automatic, puts verification before speech, states the Witness
     limits in-band (the guard enforces them regardless), and defines the
     one-way valve's two de-escalations — SKIP and HOLD — which are the only
-    routing the model is offered.
+    routing the model is offered. The outlet was chosen by policy before
+    this prompt was built; the wording only tells the model which medium it
+    is writing for. ``extra`` carries event-specific material (the brief's
+    agenda and held notes).
     """
+    if outlet == "message":
+        delivery = (
+            "Reply with one short text message. It will be sent to the "
+            "user's own phone as an iMessage, unprompted — plain text, no "
+            "markdown, lead with what matters."
+        )
+    else:
+        delivery = (
+            "Reply with one or two short spoken sentences. They will be "
+            "read aloud, unprompted, so lead with what matters and skip "
+            "any greeting."
+        )
+    extra_block = f"{extra}\n\n" if extra else ""
     return (
         "(Automatic event turn — this is not the user speaking. Something "
         "Ciel watches has come up, and the system judged it worth "
         "considering an interruption for.\n\n"
         f"Event: {summary}\n\n"
+        f"{extra_block}"
         "Before you speak, verify where you can: if a read-only tool can "
         "confirm the fact behind this event, check it and report what you "
         "observed, not what was scheduled or assumed. This turn can only "
-        "look, remember, and speak — no messages, no timers, no files, no "
-        "commands, no searches; anything like that needs the user present.\n\n"
-        "Reply with one or two short spoken sentences. They will be read "
-        "aloud, unprompted, so lead with what matters and skip any greeting. "
+        "look, remember, and compose — no messages of your own, no timers, "
+        "no files, no commands, no searches; anything like that needs the "
+        "user present.\n\n"
+        f"{delivery} "
         "If on reflection this is not worth interrupting for, reply with "
         "exactly SKIP. If it is worth knowing but not worth interrupting "
         "for, reply with exactly HOLD and it will be mentioned when the "

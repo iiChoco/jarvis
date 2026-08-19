@@ -2,6 +2,34 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-08-18 — Vigil phase two: the away outlet and the morning brief
+
+**Why.** Phase one could speak or hold; it had no way to reach you when
+you're out, and no standing morning ritual. And Ciel now lives on a laptop,
+which sleeps — every monotonic deadline in the process quietly stretches by
+the length of each nap.
+
+**What.** Three additions and a reconciliation. (1) The away outlet: an
+urgent event (importance 3+) arriving while nobody is around is composed by
+an unattended turn and *texted to you* — to the one handle pinned in
+`[proactive] owner_handle`, through a pipeline-owned send the model cannot
+reach (send_message stays Witness-denied inside the turn). Three switches
+must agree (`messages.enabled`, `allow_send`, `owner_handle`), texting has
+its own daily budget (3), and quiet hours hold texts exactly as they hold
+speech — a 2am buzz violates sleep the same way a voice does. Send failure
+holds the event for the next conversation rather than losing it. (2) The
+morning brief: `[proactive] brief_time = "07:45"` arms a ScheduleWatcher
+that fires one brief event per day (deduped by date, expired after four
+hours — a brief is breakfast, not dinner); the brief turn receives today's
+remaining agenda from EventKit plus everything held overnight, and consumes
+those held notes as its material. (3) Wake-from-sleep catch-up: a
+wall-clock jump between frames kicks every watcher awake (a nudge due at
+lid-open lands *now*, not after the remainder of a paused poll interval),
+routes the next timer poll through the grace-filtered missed sweep, and
+clears reflect/rotate deadlines a long nap already mooted. Plus
+`deploy/ai.ciel.plist`: Ciel as a KeepAlive LaunchAgent, the restart story
+the mic-stall detector was designed around.
+
 ## 2026-08-18 — lessons taken from hermes-agent
 
 **Why.** A deep read of NousResearch's hermes-agent (see

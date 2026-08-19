@@ -957,6 +957,31 @@ class ProactiveConfig:
     all of them — right until the first shared calendar full of other
     people's reminders, which is what this filter is for."""
 
+    owner_handle: str = ""
+    """Where "text me if I'm away" goes — one phone number or iMessage email,
+    pinned here in config. Empty disables the outlet entirely. This is the
+    third switch in the chain (after ``messages.enabled`` and
+    ``messages.allow_send``), and the pin is the point: an unattended turn
+    never chooses a recipient — the model composes words, deterministic code
+    decides that a message happens and to whom."""
+
+    min_importance_to_message: int = 3
+    """Only this important or above may reach your phone when you're away.
+    Texting is a bigger interruption than a sentence spoken into a room you
+    might not even be in — the default reserves it for urgent (3)."""
+
+    max_messaged_per_day: int = 3
+    """The texting budget, separate from the spoken one. A phone that buzzes
+    all day teaches you to ignore the buzzes; three is a lot of genuinely
+    urgent things for one day."""
+
+    brief_time: str = ""
+    """HH:MM local time to arm the morning brief — one proactive turn that
+    rounds up today's calendar and anything held overnight. Empty leaves it
+    off. The brief goes stale like breakfast: if the machine was asleep
+    through the morning, a brief more than a few hours late is skipped, not
+    delivered at dinner."""
+
 
 @dataclass(frozen=True, slots=True)
 class ScreenConfig:

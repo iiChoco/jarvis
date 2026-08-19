@@ -150,6 +150,55 @@ class CalendarWatcher:
             ))
         return nudges
 
+    async def agenda_today(self) -> list[str]:
+        """Today's remaining events as spoken-ready lines, for the brief.
+
+        Blocking EventKit work on a thread, same as scans. Empty on any
+        failure — the brief degrades to "nothing on the calendar" rather
+        than dying, which is the watcher contract everywhere.
+        """
+        try:
+            return await asyncio.to_thread(self._agenda_sync)
+        except Exception:  # noqa: BLE001 - a failed agenda must not kill the brief
+            log.exception("agenda fetch failed")
+            return []
+
+    def _agenda_sync(self) -> list[str]:
+        try:
+            import EventKit
+        except ImportError:
+            return []
+        if self._store is None:
+            self._store = EventKit.EKEventStore.alloc().init()
+        if not self._authorized(EventKit):
+            return []
+
+        from Foundation import NSDate
+
+        now = time.time()
+        local = time.localtime(now)
+        midnight = time.mktime(
+            (local.tm_year, local.tm_mon, local.tm_mday + 1, 0, 0, 0,
+             local.tm_wday, local.tm_yday, -1)
+        )
+        predicate = self._store.predicateForEventsWithStartDate_endDate_calendars_(
+            NSDate.dateWithTimeIntervalSince1970_(now),
+            NSDate.dateWithTimeIntervalSince1970_(midnight),
+            self._watched_calendars(EventKit),
+        )
+        lines: list[str] = []
+        for item in sorted(
+            self._store.eventsMatchingPredicate_(predicate) or [],
+            key=lambda e: float(e.startDate().timeIntervalSince1970()),
+        ):
+            title = str(item.title() or "").strip() or "An untitled event"
+            if item.isAllDay():
+                lines.append(f"All day — {title}")
+            else:
+                start = float(item.startDate().timeIntervalSince1970())
+                lines.append(f"{spoken_clock(start)} — {title}")
+        return lines
+
     def _authorized(self, EventKit) -> bool:  # noqa: N803 - the module *is* the namespace
         """Check calendar access, requesting it on first use.
 

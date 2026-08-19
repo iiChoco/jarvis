@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 class Decision:
     """What the policy chose, and the reason a log line can print."""
 
-    action: Literal["speak", "hold", "drop"]
+    action: Literal["speak", "message", "hold", "drop"]
     reason: str
 
 
@@ -82,14 +82,21 @@ class InterruptionPolicy:
         spoken_today: int,
         now: float,
         local_minutes: int,
+        messaged_today: int = 0,
+        can_message: bool = False,
     ) -> Decision:
         """Route one event. Order matters and is the policy:
 
         expiry first (a dead event needs no judgement), then quiet hours
         (they outrank importance — the whole point of a quiet window is that
-        nothing crosses it), then the importance floor, then presence, then
-        the budget. Everything that isn't "speak" is "hold": held notes are
-        the safety net that makes every other rule cheap to apply.
+        nothing crosses it, and a phone buzz at 2am violates it exactly as
+        speech does, so texts hold too), then the importance floor, then
+        presence, then the budgets. Away routes to "message" only when the
+        event clears the higher texting bar, the caller says messaging is
+        actually wired (``can_message``: owner handle pinned AND the
+        messages switches on), and the texting budget has room. Everything
+        that isn't "speak" or "message" is "hold": held notes are the safety
+        net that makes every other rule cheap to apply.
         """
         if event.expires_at is not None and event.expires_at <= now:
             return Decision("drop", "expired")
@@ -98,6 +105,12 @@ class InterruptionPolicy:
         if event.importance < self._config.min_importance_to_speak:
             return Decision("hold", "below the importance floor")
         if not presence.present:
+            if (
+                can_message
+                and event.importance >= self._config.min_importance_to_message
+                and messaged_today < self._config.max_messaged_per_day
+            ):
+                return Decision("message", "urgent, and the user is away")
             return Decision("hold", "nobody appears to be around")
         if spoken_today >= self._config.max_spoken_per_day:
             return Decision("hold", "the day's spoken budget is spent")

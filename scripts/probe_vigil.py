@@ -15,6 +15,7 @@ import asyncio
 import shutil
 import sys
 import tempfile
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -130,6 +131,9 @@ async def run_checks(tmp: Path) -> None:
     q.mark_spoken(event("b:2"), now=501.0, date="2026-08-18")
     check("spoken deliveries charge the budget", q.spoken_count("2026-08-18") == 2)
     check("midnight rolls the budget over", q.spoken_count("2026-08-19") == 0)
+    q.mark_messaged(event("b:m1"), now=502.0, date="2026-08-19")
+    check("texted deliveries charge their own budget", q.messaged_count("2026-08-19") == 1)
+    check("the texting budget rolls over too", q.messaged_count("2026-08-20") == 0)
 
     # Persistence: a second queue over the same file is the re-exec case.
     q.push(event("cal:4:9000", expires=9000.0))
@@ -195,6 +199,37 @@ async def run_checks(tmp: Path) -> None:
     check(
         "urgency does not break the quiet window",
         decide(ev=event("p:5", importance=3), minutes=23 * 60).action == "hold",
+    )
+
+    # The away outlet: message only when urgent, wired, and within budget.
+    def decide_away(ev, *, messaged=0, can=True):
+        return pol.decide(
+            ev, presence=AWAY, spoken_today=0, messaged_today=messaged,
+            can_message=can, now=500.0, local_minutes=NOON,
+        )
+
+    check(
+        "urgent + away + wired routes to message",
+        decide_away(event("m:1", importance=3)).action == "message",
+    )
+    check(
+        "away without wiring holds",
+        decide_away(event("m:2", importance=3), can=False).action == "hold",
+    )
+    check(
+        "timely-but-not-urgent never texts",
+        decide_away(event("m:3", importance=2)).action == "hold",
+    )
+    check(
+        "a spent texting budget holds",
+        decide_away(event("m:4", importance=3), messaged=3).action == "hold",
+    )
+    check(
+        "quiet hours hold texts too",
+        pol.decide(
+            event("m:5", importance=3), presence=AWAY, spoken_today=0,
+            messaged_today=0, can_message=True, now=500.0, local_minutes=23 * 60,
+        ).action == "hold",
     )
 
     # ── presence ─────────────────────────────────────────────────────────────
@@ -343,6 +378,48 @@ async def run_checks(tmp: Path) -> None:
     await asyncio.sleep(0.05)
     check("no extra scan without another kick", len(scans) == 2)
     await watcher.close()
+
+    # ── the morning brief's clock ────────────────────────────────────────────
+    print("schedule watcher:")
+    from ciel.proactive.watchers import ScheduleWatcher
+
+    bq = EventQueue(tmp / "brief.json", held_max_age_s=3600.0)
+    brief = ScheduleWatcher(replace(ProactiveConfig(), brief_time="07:45"), bq)
+    # Build concrete instants on a fixed local date.
+    def at(hour, minute):
+        return time.mktime((2026, 8, 18, hour, minute, 0, 0, 0, -1))
+
+    brief.check(at(7, 0))
+    check("before its time, no brief", not bq.pending)
+    brief.check(at(7, 45))
+    check("at its time, the brief arms", bq.pending)
+    brief.check(at(7, 46))
+    popped_brief = bq.pop_next(at(7, 46))
+    check(
+        "the minutes after re-offer nothing (day dedupe)",
+        popped_brief is not None and not bq.pending,
+    )
+    bq.drop(popped_brief, at(7, 47))
+    brief.check(at(9, 0))
+    check("a delivered brief stays delivered all day", not bq.pending)
+    late = ScheduleWatcher(replace(ProactiveConfig(), brief_time="07:45"),
+                           EventQueue(tmp / "brief2.json", held_max_age_s=3600.0))
+    late.check(at(19, 30))
+    check("a stale brief is skipped, not served at dinner", not late._queue.pending)
+    check(
+        "the brief event expires with its freshness window",
+        popped_brief.expires_at is not None
+        and popped_brief.expires_at == at(7, 45) + 4 * 3600,
+    )
+
+    check(
+        "the message outlet prompt names the phone",
+        "iMessage" in proactive_prompt("X.", outlet="message"),
+    )
+    check(
+        "extra material lands in the prompt",
+        "Today's calendar" in proactive_prompt("X.", extra="Today's calendar:\n- 9:00 AM — Standup"),
+    )
 
     # ── memory write provenance ──────────────────────────────────────────────
     print("memory provenance:")

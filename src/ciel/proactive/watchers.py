@@ -15,10 +15,16 @@ watcher for the morning brief lands here in Phase 2.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Protocol, runtime_checkable
+import time
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ciel.proactive.events import EventQueue, ProactiveEvent
+from ciel.proactive.policy import parse_hhmm
+
+if TYPE_CHECKING:
+    from ciel.config import ProactiveConfig
 
 log = logging.getLogger(__name__)
 
@@ -96,4 +102,98 @@ class WatcherHealth:
         self._streak = 0
 
 
-__all__ = ["Watcher", "WatcherHealth"]
+_BRIEF_FRESH_S = 4 * 3600.0
+"""How long past its clock time the morning brief is still worth having.
+A brief is breakfast: four hours late is brunch, later than that is
+tomorrow's problem — a laptop opened at dinner should not deliver a
+"good morning". The window also bounds the event's expiry, so a brief the
+policy held (nobody around) dies quietly at lunch instead of riding a held
+note into the evening."""
+
+
+class ScheduleWatcher:
+    """Fires events at configured local clock times — the morning brief first.
+
+    All wall-clock: "07:45" means 07:45 on the wall, through sleep, restarts,
+    and DST, which is the same reasoning alarms use in ``timers.py``. The
+    poll is a one-minute heartbeat rather than a computed long sleep because
+    monotonic sleeps stretch across naps — sixty second granularity is well
+    inside the meaning of "in the morning", and the check itself is a few
+    clock calls. Dedupe is by local date, so the minutes after the brief's
+    time re-offer nothing, and a restart can't double-brief a morning the
+    queue already remembers.
+    """
+
+    def __init__(self, config: "ProactiveConfig", queue: EventQueue) -> None:
+        self._config = config
+        self._queue = queue
+        self._task: asyncio.Task[None] | None = None
+        self._kick = asyncio.Event()
+
+    async def start(self) -> None:
+        if parse_hhmm(self._config.brief_time) is None:
+            if self._config.brief_time:
+                log.warning(
+                    "brief_time %r is not HH:MM — the morning brief is off",
+                    self._config.brief_time,
+                )
+            return
+        self._task = asyncio.create_task(self._poll())
+
+    def kick(self) -> None:
+        """Re-check now — the pipeline detected a wake from sleep."""
+        self._kick.set()
+
+    async def close(self) -> None:
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        self._task = None
+
+    async def _poll(self) -> None:
+        while True:
+            try:
+                self.check(time.time())
+            except Exception:  # noqa: BLE001 - the heartbeat must not die
+                log.exception("schedule check failed")
+            try:
+                await asyncio.wait_for(self._kick.wait(), timeout=60.0)
+            except asyncio.TimeoutError:
+                pass
+            self._kick.clear()
+
+    def check(self, now: float) -> None:
+        """Push the brief event if its time has come today and is still
+        fresh. ``now`` injected so the probe can drive mornings at will."""
+        minutes = parse_hhmm(self._config.brief_time)
+        if minutes is None:
+            return
+        local = time.localtime(now)
+        due = time.mktime(
+            (local.tm_year, local.tm_mon, local.tm_mday,
+             minutes // 60, minutes % 60, 0,
+             local.tm_wday, local.tm_yday, -1)
+        )
+        if now < due or now - due > _BRIEF_FRESH_S:
+            return
+        day = time.strftime("%Y-%m-%d", local)
+        if self._queue.push(ProactiveEvent(
+            id=self._queue.next_id(),
+            source="brief",
+            importance=2,
+            created_at=now,
+            expires_at=due + _BRIEF_FRESH_S,
+            summary=(
+                "Morning brief: a short good-morning rundown — today's "
+                "calendar and anything held overnight, using the material "
+                "provided; skip whatever is empty."
+            ),
+            dedupe_key=f"brief:{day}",
+        )):
+            log.info("morning brief armed for delivery")
+
+
+__all__ = ["ScheduleWatcher", "Watcher", "WatcherHealth"]
