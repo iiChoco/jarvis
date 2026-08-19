@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from claude_agent_sdk import HookContext, HookMatcher
 
@@ -60,9 +60,23 @@ def _response_text(response: Any) -> str | None:
 class ActionRecorder:
     """Observes watched tool calls and journals what actually happened."""
 
-    def __init__(self, journal: ActionJournal, watched: frozenset[str]) -> None:
+    def __init__(
+        self,
+        journal: ActionJournal,
+        watched: frozenset[str],
+        verify_emitter: "Callable[[str, dict[str, Any]], None] | None" = None,
+    ) -> None:
         self._journal = journal
         self._watched = frozenset(watched) | set(_FILE_MUTATORS) | {"Bash"}
+        # Read-back verification (Vigil): the confirm-gated tools are the
+        # outward-acting ones whose success is worth independently observing,
+        # so a completed call to one also emits a verify event. Only those —
+        # file edits and shell have the journal and undo; a send that
+        # "returned without error" is the weaker claim the wishlist called
+        # out. The emitter observes like everything else here: it can note
+        # that an action deserves checking, never affect the action.
+        self._verify_for = frozenset(watched)
+        self._verify_emitter = verify_emitter
         # Snapshots taken in the pre-hook, claimed by the post-hook, keyed by
         # tool_use_id. Bounded: a call denied by a guard never reaches the
         # post-hook, and its pending entry must not accumulate forever.
@@ -108,6 +122,14 @@ class ActionRecorder:
             )
         except Exception:  # noqa: BLE001 - observation must never fail the call
             log.warning("could not journal %s", tool_name, exc_info=True)
+        if self._verify_emitter is not None and tool_name in self._verify_for:
+            # PostToolUse means the call actually ran, and under the Witness
+            # rule these tools deny unattended — so this only ever fires for
+            # actions a present user approved.
+            try:
+                self._verify_emitter(tool_name, payload.get("tool_input") or {})
+            except Exception:  # noqa: BLE001 - observation must never fail the call
+                log.warning("verify emitter failed", exc_info=True)
         return {}
 
     def as_hooks(self) -> dict[str, list[HookMatcher]]:

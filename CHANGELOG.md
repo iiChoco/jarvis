@@ -2,6 +2,35 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-08-18 — Vigil phase three: done means observed
+
+**Why.** The wishlist's second structural item: Ciel reports success
+because a tool returned without error, "which is a weaker claim than it
+sounds." And nothing on the machine could say "that thing you started has
+finished."
+
+**What.** The verification loop closes. After any confirm-gated action a
+present user approved, the recorder files a read-back check (the recorder
+still only observes — the emitter can note that an action deserves
+checking, never affect it). The check runs as a new kind of proactive turn:
+a silent "note" — no audio, no budget, quiet-hours-exempt because it
+disturbs nobody — where an unattended turn re-observes with read-only
+tools and writes down what is actually true. The finding replaces the
+instruction and rides a held note into the next conversation: "the message
+to Sam did send", "the calendar event never appeared — it may need
+redoing." SKIP means checked-and-nothing-worth-relaying; a failed check
+degrades to holding the instruction so the next attended conversation can
+verify with full tools.
+
+And the WorkWatcher: `watch_for_completion` lets an attended turn register
+a file that should appear or a process that should exit, with a deadline —
+persisted like timers, polled every fifteen seconds, kicked on
+wake-from-sleep. Completion files the labeled event through the normal
+interruption policy; a missed deadline files its own honest event ("never
+finished"). The tool is Witness-denied unattended — arming a watch is
+scheduling future unprompted speech, which is the budget bypass the rule
+exists to prevent — and withheld entirely when Vigil is off.
+
 ## 2026-08-18 — Vigil phase two: the away outlet and the morning brief
 
 **Why.** Phase one could speak or hold; it had no way to reach you when

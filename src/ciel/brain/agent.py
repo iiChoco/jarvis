@@ -109,6 +109,7 @@ class Brain:
         confirmer: "Callable[[str], Awaitable[bool]] | None" = None,
         journal: ActionJournal | None = None,
         projects_index_provider: "Callable[[], str | None] | None" = None,
+        verify_emitter: "Callable[[str, dict], None] | None" = None,
     ) -> None:
         self._config = config
         self._brain_config: BrainConfig = config.brain
@@ -202,7 +203,9 @@ class Brain:
         # enforcement path.
         self._recorder: ActionRecorder | None = None
         if journal is not None:
-            self._recorder = ActionRecorder(journal, self._gated_tools)
+            self._recorder = ActionRecorder(
+                journal, self._gated_tools, verify_emitter=verify_emitter
+            )
 
     @property
     def session_id(self) -> str | None:

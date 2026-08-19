@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 class Decision:
     """What the policy chose, and the reason a log line can print."""
 
-    action: Literal["speak", "message", "hold", "drop"]
+    action: Literal["speak", "message", "note", "hold", "drop"]
     reason: str
 
 
@@ -100,6 +100,13 @@ class InterruptionPolicy:
         """
         if event.expires_at is not None and event.expires_at <= now:
             return Decision("drop", "expired")
+        if event.source == "verify":
+            # Read-back verification is silent background work: it disturbs
+            # nobody (so quiet hours don't apply), interrupts nothing, and
+            # its finding rides a held note into the next conversation. It
+            # runs promptly because its value decays with distance from the
+            # action it checks.
+            return Decision("note", "verification runs silently")
         if self.in_quiet_hours(local_minutes):
             return Decision("hold", "quiet hours")
         if event.importance < self._config.min_importance_to_speak:

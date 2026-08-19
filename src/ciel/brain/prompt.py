@@ -360,6 +360,14 @@ def proactive_prompt(
             "user's own phone as an iMessage, unprompted — plain text, no "
             "markdown, lead with what matters."
         )
+    elif outlet == "note":
+        delivery = (
+            "Reply with one or two short sentences stating what you "
+            "actually observed — they will be mentioned to the user at the "
+            "start of their next conversation, so write them as something "
+            "worth relaying ('the message to Sam did send', 'the calendar "
+            "event never appeared — it may need redoing')."
+        )
     else:
         delivery = (
             "Reply with one or two short spoken sentences. They will be "

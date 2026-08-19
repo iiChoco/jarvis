@@ -982,6 +982,13 @@ class ProactiveConfig:
     through the morning, a brief more than a few hours late is skipped, not
     delivered at dinner."""
 
+    watches_file: Path = field(
+        default_factory=lambda: Path.home() / ".ciel" / "watches.json"
+    )
+    """Registered background watches (watch_for_completion), mirrored on
+    every change — an export watched at noon must survive the autoreloader
+    and a lid-close, same reasoning as timers.json."""
+
 
 @dataclass(frozen=True, slots=True)
 class ScreenConfig:

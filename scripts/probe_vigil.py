@@ -421,6 +421,101 @@ async def run_checks(tmp: Path) -> None:
         "Today's calendar" in proactive_prompt("X.", extra="Today's calendar:\n- 9:00 AM — Standup"),
     )
 
+    # ── the verification loop ────────────────────────────────────────────────
+    print("read-back verification:")
+    verify_ev = ProactiveEvent(
+        id="v1", source="verify", importance=1, created_at=100.0,
+        expires_at=2000.0, summary="Read-back check.", dedupe_key="verify:x:1",
+    )
+    check(
+        "verify events route to a silent note turn",
+        decide(ev=verify_ev, now=500.0).action == "note",
+    )
+    check(
+        "verification ignores quiet hours (it disturbs nobody)",
+        decide(ev=verify_ev, now=500.0, minutes=23 * 60).action == "note",
+    )
+    check(
+        "an expired check still drops",
+        decide(ev=verify_ev, now=3000.0).action == "drop",
+    )
+    check(
+        "the note outlet prompt aims at the next conversation",
+        "next conversation" in proactive_prompt("X.", outlet="note"),
+    )
+
+    from ciel.brain.recorder import ActionRecorder
+    from ciel.config import JournalConfig
+    from ciel.journal import ActionJournal
+
+    journal = ActionJournal(JournalConfig(dir=tmp / "undo"))
+    journal.ensure()
+    emitted: list[str] = []
+    recorder = ActionRecorder(
+        journal, frozenset({"mcp__ciel__send_message"}),
+        verify_emitter=lambda tool, args: emitted.append(tool),
+    )
+    await recorder.after(
+        {"tool_name": "mcp__ciel__send_message",
+         "tool_input": {"to": "x", "text": "hi"}, "tool_response": "sent"},
+        "t1", None,
+    )
+    check("a confirmed send emits a verify event", emitted == ["mcp__ciel__send_message"])
+    await recorder.after(
+        {"tool_name": "Bash", "tool_input": {"command": "ls"},
+         "tool_response": "ok"}, "t2", None,
+    )
+    check("journal-only tools do not emit checks", emitted == ["mcp__ciel__send_message"])
+
+    # ── the work watcher ─────────────────────────────────────────────────────
+    print("work watcher:")
+    import subprocess
+
+    from ciel.proactive.work import WorkWatcher
+
+    wq = EventQueue(tmp / "work-events.json", held_max_age_s=3600.0)
+    ww = WorkWatcher(tmp / "watches.json", wq)
+    target = tmp / "export.zip"
+    ww.add_file(str(target), "The export has finished.", 60.0)
+    ww.check(1000.0)
+    check("an absent file keeps its watch", not wq.pending and len(ww.active()) == 1)
+    ww2 = WorkWatcher(tmp / "watches.json", wq)
+    check("watches survive reconstruction", len(ww2.active()) == 1)
+    target.write_text("x")
+    ww2.check(1001.0)
+    done = wq.pop_next(1001.0)
+    check(
+        "the file appearing files the labeled event",
+        done is not None and done.summary == "The export has finished.",
+    )
+    check("a resolved watch is gone", not ww2.active())
+
+    ww2.add_file(str(tmp / "never.zip"), "The never-job is done.", 1.0)
+    ww2.check(time.time() + 120.0)
+    timed_out = wq.pop_next(time.time() + 121.0)
+    check(
+        "a missed deadline files its own honest event",
+        timed_out is not None and "never finished" in timed_out.summary,
+    )
+
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    ww2.add_pid(proc.pid, "The background job has exited.", 60.0)
+    ww2.check(time.time())
+    pid_done = wq.pop_next(time.time())
+    check(
+        "a vanished pid completes its watch",
+        pid_done is not None and pid_done.summary == "The background job has exited.",
+    )
+    import os as _os
+    ww2.add_pid(_os.getpid(), "Should not fire.", 60.0)
+    ww2.check(time.time())
+    check("a live pid keeps its watch", not wq.pending and len(ww2.active()) == 1)
+    check(
+        "arming a watch is denied unattended",
+        "mcp__ciel__watch_for_completion" not in allowed,
+    )
+
     # ── memory write provenance ──────────────────────────────────────────────
     print("memory provenance:")
     mstore = MemoryStore(tmp / "memory")

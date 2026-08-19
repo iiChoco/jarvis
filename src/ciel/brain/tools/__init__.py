@@ -30,6 +30,7 @@ from ciel.brain.tools.messages import bind_client as bind_messages
 from ciel.brain.tools.projects import PROJECT_TOOLS, bind_projects
 from ciel.brain.tools.screen import SCREEN_TOOLS, bind_screen
 from ciel.brain.tools.timers import TIMER_TOOLS, bind_timers
+from ciel.brain.tools.watch import WATCH_TOOLS
 from ciel.config import Config, MCPServerConfig
 from ciel.journal import ActionJournal
 from ciel.memory.store import MemoryStore
@@ -44,7 +45,7 @@ SERVER_NAME = "ciel"
 # Every custom tool Ciel can call. Append to this list to add a capability.
 TOOLS = [
     *MEMORY_TOOLS, *MESSAGE_TOOLS, *ACTION_TOOLS, *PROJECT_TOOLS,
-    *SCREEN_TOOLS, *TIMER_TOOLS,
+    *SCREEN_TOOLS, *TIMER_TOOLS, *WATCH_TOOLS,
 ]
 
 
@@ -137,6 +138,13 @@ def build_tool_server(
     else:
         # Same reasoning as memory: an always-unavailable tool wastes turns.
         tools = [t for t in tools if t not in TIMER_TOOLS]
+
+    if not config.proactive.enabled:
+        # The watch tool lands events in Vigil's queue; without Vigil there
+        # is no delivery path. Same reasoning as memory: an always-refusing
+        # tool wastes turns. The pipeline binds the watcher after it builds
+        # the queue (the bind-late pattern memory's context provider uses).
+        tools = [t for t in tools if t not in WATCH_TOOLS]
 
     if config.messages.enabled:
         bind_messages(MessagesClient(config.messages))

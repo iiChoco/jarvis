@@ -32,6 +32,7 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
+from dataclasses import replace as dc_replace
 from enum import Enum, auto
 from pathlib import Path
 
@@ -54,6 +55,8 @@ from ciel.proactive.events import EventQueue, ProactiveEvent
 from ciel.proactive.policy import Decision, InterruptionPolicy
 from ciel.proactive.presence import PresenceProbe
 from ciel.proactive.watchers import ScheduleWatcher
+from ciel.proactive.work import WorkWatcher
+from ciel.brain.tools.watch import bind_watcher
 from ciel.reload import SourceWatcher, default_roots
 from ciel.commands import Command, match as match_command
 from ciel.stt import SpeechToText, build_stt
@@ -287,6 +290,10 @@ class Pipeline:
             confirmer=self._confirm.ask,
             journal=self._journal,
             projects_index_provider=self._projects.index_prompt if self._projects else None,
+            # Read-back: a confirmed outward action files a verify event; the
+            # emitter no-ops until the Vigil queue exists (checked at call
+            # time, so construction order doesn't matter).
+            verify_emitter=self._emit_verify,
         )
         # Memory writes carry provenance: "proactive" when a Vigil turn with
         # nobody around is writing, "conversation" otherwise — reflection
@@ -377,6 +384,9 @@ class Pipeline:
                 self._vigil_watchers.append(
                     ScheduleWatcher(config.proactive, self._events)
                 )
+            work = WorkWatcher(config.proactive.watches_file, self._events)
+            bind_watcher(work)
+            self._vigil_watchers.append(work)
             # The away outlet: all three switches, or it doesn't exist. A
             # separate client from the tools' binding on purpose — this send
             # path is pipeline-owned and never reachable from a turn.
@@ -572,16 +582,19 @@ class Pipeline:
                                 turn = asyncio.create_task(
                                     self._run_proactive_turn(event, player, mic)
                                 )
-                            elif decision.action == "message":
-                                # No audio involved, so this runs in the
-                                # maintenance slot — swallows its failures,
+                            elif decision.action in ("message", "note"):
+                                # No audio involved, so these run in the
+                                # maintenance slot — swallows failures,
                                 # hastened by any user turn — never as the
                                 # audio-owning `turn`. Slot busy: back into
                                 # the queue, retried next poll.
                                 if self._maintenance is None or self._maintenance.done():
-                                    self._maintenance = asyncio.create_task(
+                                    runner = (
                                         self._run_proactive_message(event)
+                                        if decision.action == "message"
+                                        else self._run_proactive_note(event)
                                     )
+                                    self._maintenance = asyncio.create_task(runner)
                                 else:
                                     self._events.push(event)
                             elif decision.action == "hold":
@@ -1451,6 +1464,97 @@ class Pipeline:
                 self._events.hold(event)
             except Exception:  # noqa: BLE001 - persistence is best-effort here
                 log.debug("could not hold the failed event", exc_info=True)
+
+    def _emit_verify(self, tool: str, args: dict) -> None:
+        """File a read-back check after a confirmed outward action.
+
+        Called by the recorder's PostToolUse for confirm-gated tools — which
+        under the Witness rule only ever run attended. The check itself runs
+        as a silent unattended turn (the policy routes source="verify" to
+        "note"), and its finding rides a held note: "done" becomes something
+        observed rather than something a tool's return code implied. Expiry
+        is short because the check's value decays with distance from the
+        action.
+        """
+        if self._events is None:
+            return
+        from ciel.brain.toolguard import describe_call
+
+        described = describe_call(tool, args).removesuffix(" — okay?")
+        now = time.time()
+        self._events.push(ProactiveEvent(
+            id=self._events.next_id(),
+            source="verify",
+            importance=1,
+            created_at=now,
+            expires_at=now + 1800,
+            summary=(
+                f"Read-back check. The user just approved this action: "
+                f"{described}. Using read-only tools (recent_actions holds "
+                "the journal record), verify whether it actually took "
+                "effect, and report what you observed — not what the tool "
+                "claimed."
+            ),
+            dedupe_key=f"verify:{tool}:{int(now * 1000)}",
+        ))
+        log.info("read-back check filed for %s", tool)
+
+    async def _run_proactive_note(self, event: ProactiveEvent) -> None:
+        """One silent unattended turn whose finding becomes a held note.
+
+        The verification half of the loop: observe with read-only tools,
+        write down what is actually true, tell the user at the start of
+        their next conversation. SKIP means "checked, nothing worth
+        relaying" and drops the event; a failure degrades to holding the
+        original instruction, so the next attended conversation can do the
+        check itself with full tools.
+        """
+        assert self._events is not None
+        print(f"\n  [proactive check: {event.summary[:80]}…]", flush=True)
+        self._record("event", "proactive: read-back check")
+        sentences: list[str] = []
+        try:
+            try:
+                prompt = proactive_prompt(event.summary, outlet="note")
+                with self._confirm.suppress(), self._brain.unattended("proactive"):
+                    await asyncio.wait_for(
+                        self._collect_unattended(prompt, sentences),
+                        timeout=self._config.proactive.turn_timeout_s,
+                    )
+            except asyncio.TimeoutError:
+                log.debug("verification turn timed out — interrupting")
+                try:
+                    await self._brain.interrupt()
+                except Exception:  # noqa: BLE001 - best-effort, as in reflection
+                    log.debug("interrupt after timeout failed", exc_info=True)
+                self._events.hold(event)
+                return
+
+            reply = " ".join(sentences).strip()
+            valve = proactive_valve(reply) if reply else None
+            if valve == "SKIP":
+                self._record("event", "proactive check: nothing to relay")
+                self._events.drop(event, time.time())
+                return
+            if valve == "HOLD" or not reply:
+                self._events.hold(event)
+                return
+            # The finding replaces the instruction: what rides into the next
+            # conversation is what was observed, stamped now.
+            self._events.hold(dc_replace(
+                event,
+                summary=reply,
+                created_at=time.time(),
+                expires_at=None,
+            ))
+            print(f"  [checked: {reply}]", flush=True)
+            self._record("event", f"proactive check: {reply}")
+        except Exception:  # noqa: BLE001 - maintenance-slot task must not crash the loop
+            log.exception("verification turn failed")
+            try:
+                self._events.hold(event)
+            except Exception:  # noqa: BLE001 - persistence is best-effort here
+                log.debug("could not hold the failed check", exc_info=True)
 
     async def _collect_unattended(
         self, prompt: str, sentences: list[str]
