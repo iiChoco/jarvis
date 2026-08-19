@@ -316,6 +316,34 @@ async def run_checks(tmp: Path) -> None:
     health.failed(202.0)
     check("a fresh streak after recovery reports again", hq.pending)
 
+    # ── wake-from-sleep catch-up ─────────────────────────────────────────────
+    print("sleep catch-up:")
+    from ciel.pipeline import IdleSchedule
+    from ciel.proactive.calendar import CalendarWatcher
+
+    sched = IdleSchedule(60.0, 600.0)
+    sched.conversation_ended(100.0)
+    sched.clear()
+    check("clear() drops both armed deadlines", sched.due(1e9) is None)
+    sched.conversation_ended(100.0)
+    check("re-arming after clear works", sched.due(200.0) == "reflect")
+
+    watcher = CalendarWatcher(
+        replace(ProactiveConfig(), calendar_poll_s=999.0),
+        EventQueue(tmp / "kick.json", held_max_age_s=3600.0),
+    )
+    scans: list[float] = []
+    watcher._scan_sync = lambda: scans.append(0) or []  # type: ignore[method-assign]
+    await watcher.start()
+    await asyncio.sleep(0.05)
+    check("the poll scans once at start", len(scans) == 1)
+    watcher.kick()
+    await asyncio.sleep(0.05)
+    check("kick() ends the poll wait early", len(scans) == 2)
+    await asyncio.sleep(0.05)
+    check("no extra scan without another kick", len(scans) == 2)
+    await watcher.close()
+
     # ── memory write provenance ──────────────────────────────────────────────
     print("memory provenance:")
     mstore = MemoryStore(tmp / "memory")

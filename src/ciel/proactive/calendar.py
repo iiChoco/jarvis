@@ -54,9 +54,14 @@ class CalendarWatcher:
         self._store = None  # EKEventStore, created lazily in the worker thread
         self._warned_unavailable = False
         self._health = WatcherHealth("calendar", queue)
+        self._kick = asyncio.Event()
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._poll())
+
+    def kick(self) -> None:
+        """Rescan now — the pipeline detected a wake from sleep."""
+        self._kick.set()
 
     async def close(self) -> None:
         if self._task is not None and not self._task.done():
@@ -80,7 +85,15 @@ class CalendarWatcher:
             except Exception:  # noqa: BLE001 - a failed scan must not kill the watcher
                 log.exception("calendar scan failed")
                 self._health.failed(time.time())
-            await asyncio.sleep(self._config.calendar_poll_s)
+            # An interruptible sleep: kick() ends it early. Cleared after the
+            # wait so a kick that lands mid-scan still hurries the next one.
+            try:
+                await asyncio.wait_for(
+                    self._kick.wait(), timeout=self._config.calendar_poll_s
+                )
+            except asyncio.TimeoutError:
+                pass
+            self._kick.clear()
 
     # ── EventKit, on a worker thread ─────────────────────────────────────────
 

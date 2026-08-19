@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Ciel as a LaunchAgent: always on while you're logged in, restarted if it
+  exits. This is the recovery story the mic-stall detector assumes — when
+  CoreAudio doesn't resume the input stream after a sleep/wake cycle, the
+  pipeline ends capture and exits cleanly, and KeepAlive brings it back with
+  fresh device handles. On the way back up, session rehydration, the missed
+  timer sweep, and the Vigil queue all pick up where things left off.
+
+  A LaunchAgent (per-user), NOT a LaunchDaemon: the mic, TCC permissions
+  (Calendars, Contacts, Screen Recording), and Messages all belong to your
+  login session. Install:
+
+      cp deploy/ai.ciel.plist ~/Library/LaunchAgents/
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.ciel.plist
+
+  Stop / remove:
+
+      launchctl bootout gui/$(id -u)/ai.ciel
+
+  Logs land in ~/.ciel/log/. Note: under launchd there is no terminal, so
+  the typed-input lane degrades to nothing by design (pipeline._read_stdin).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.ciel</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>mkdir -p "$HOME/.ciel/log" &amp;&amp; cd "$HOME/jarvis" &amp;&amp; exec uv run ciel</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- If Ciel crash-loops, don't hammer: launchd waits this long between
+       respawns of a process that exited within seconds of starting. -->
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/choco/.ciel/log/ciel.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/choco/.ciel/log/ciel.err.log</string>
+</dict>
+</plist>

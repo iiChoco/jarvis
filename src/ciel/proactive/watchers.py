@@ -36,6 +36,17 @@ class Watcher(Protocol):
 
     async def close(self) -> None: ...
 
+    def kick(self) -> None:
+        """Hurry: rescan now instead of waiting out the poll interval.
+
+        Called when the pipeline detects a wake from sleep — the watcher's
+        ``asyncio.sleep`` was paused with the process, so without this a
+        nudge due right after lid-open would wait out the remainder of a
+        poll interval that no longer corresponds to wall time. Optional in
+        spirit: a watcher with no poll loop implements it as a no-op.
+        """
+        ...
+
 
 class WatcherHealth:
     """Failure-streak self-report: after enough consecutive failures, stop

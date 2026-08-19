@@ -62,6 +62,15 @@ from ciel.ui.indicator import Indicator, build_indicator
 
 log = logging.getLogger(__name__)
 
+_SLEEP_GAP_S = 30.0
+"""A wall-clock jump between frames larger than this means the machine slept
+(or the process was suspended — same consequences). Frames arrive ~33/s while
+awake, so even a wedged maintenance pass never opens a gap like this. Chosen
+well above any legitimate scheduling hiccup and well below the shortest nap a
+lid-close produces. On macOS the monotonic clock largely pauses with the
+process, so every monotonic deadline in the loop silently stretched by the
+nap — the wake-up handler is where reality is reconciled."""
+
 
 class State(Enum):
     WAITING = auto()    # not addressed; frames go to the wake detector
@@ -183,6 +192,20 @@ class IdleSchedule:
             self._rotate_at = None
             return "rotate"
         return None
+
+    def clear(self) -> None:
+        """Drop both deadlines without serving them.
+
+        For waking from a sleep that outlived the resume window: the session
+        the deadlines were armed for can no longer be resumed, so a
+        reflection now would open a *fresh* session and reflect over nothing,
+        and the rotation it guards is moot — the resume window already
+        retired the session. Same reasoning as ``rehydrate_schedule`` arming
+        nothing from a stale record; this is the running-process analog of
+        that startup decision.
+        """
+        self._reflect_at = None
+        self._rotate_at = None
 
 
 def rehydrate_schedule(
@@ -310,6 +333,14 @@ class Pipeline:
         self._maintenance: asyncio.Task[None] | None = None
         """Closure/rotation in flight. Deliberately not the ``turn`` variable:
         turns re-raise via turn.result(); maintenance swallows its failures."""
+        self._last_wall = time.time()
+        """Wall clock at the last frame, for sleep detection — see
+        _SLEEP_GAP_S and _on_wake_from_sleep."""
+        self._timer_missed_sweep = False
+        """Set on wake-from-sleep: the next timer poll runs the grace-filtered
+        missed sweep instead of pop_due, so an alarm that came due mid-nap is
+        announced late-but-honestly and a six-hour-stale "rice is done" is
+        dropped — the startup pop_missed behavior, applied to naps."""
 
         # Vigil (see ciel.proactive): the queue is the only piece the frame
         # loop ever touches at frame rate, and only through its `pending`
@@ -396,6 +427,15 @@ class Pipeline:
                 # pulling frames, barge-in becomes impossible — there is
                 # nothing left listening for the user talking over Ciel.
                 async for frame in mic.frames():
+                    # Sleep detection first: one vDSO clock read per frame.
+                    # Everything below runs against monotonic deadlines that
+                    # paused with the process, so after a nap they are all
+                    # quietly wrong until the wake handler reconciles them.
+                    now_wall = time.time()
+                    if now_wall - self._last_wall > _SLEEP_GAP_S:
+                        self._on_wake_from_sleep(now_wall - self._last_wall)
+                    self._last_wall = now_wall
+
                     # Checked above the state dispatch, not inside BUSY: a
                     # turn abandoned by barge-in leaves BUSY while its hook
                     # can still be pending, and a pending confirmation that
@@ -429,9 +469,21 @@ class Pipeline:
                         # inline, like the wake acknowledgement: announcements
                         # are seconds long, and the mic is drained after so
                         # Ciel's own voice isn't transcribed as a turn.
-                        fired = self._timers.pop_due()
+                        if self._timer_missed_sweep:
+                            # First poll after a nap: grace-filter what came
+                            # due mid-sleep instead of announcing it stale.
+                            self._timer_missed_sweep = False
+                            fired = self._timers.pop_missed(
+                                self._config.timers.missed_grace_s
+                            )
+                            timers_missed = True
+                        else:
+                            fired = self._timers.pop_due()
+                            timers_missed = False
                         if fired:
-                            await self._announce_timers(fired, player, mic)
+                            await self._announce_timers(
+                                fired, player, mic, missed=timers_missed
+                            )
                             continue
 
                     if (
@@ -1566,6 +1618,33 @@ class Pipeline:
             )
             self._conversed = False
             self._brain_conversed = False
+
+    def _on_wake_from_sleep(self, gap_s: float) -> None:
+        """Reconcile the loop with a wall clock that jumped (the machine slept).
+
+        Three deadlines drifted while the monotonic clock was paused:
+
+        * Watchers were mid-``asyncio.sleep`` and would finish their poll
+          interval before rescanning — minutes of lag at exactly the moment a
+          "your nine o'clock is in eight minutes" matters. Kicked awake.
+        * Timers that came due mid-nap would announce however stale they are;
+          the next poll runs the startup missed-sweep instead (grace-filtered,
+          "While I was off…" flavored).
+        * If the nap outlived the resume window, the armed reflect/rotate
+          deadlines point at a session that can no longer be resumed —
+          serving them would reflect a fresh session over nothing. Cleared,
+          mirroring what rehydrate_schedule decides at startup.
+        """
+        log.info("wall clock jumped %.0f s — woke from sleep; catching up", gap_s)
+        self._record("event", f"woke from a {gap_s / 60:.0f} minute sleep")
+        if self._timers is not None:
+            self._timer_missed_sweep = True
+        for watcher in self._vigil_watchers:
+            kick = getattr(watcher, "kick", None)
+            if kick is not None:
+                kick()
+        if gap_s > self._config.brain.resume_window_minutes * 60:
+            self._schedule.clear()
 
     async def _run_reflection(self) -> None:
         """One silent Closure turn; failures are logged shrugs, never crashes."""
