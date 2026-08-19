@@ -187,9 +187,9 @@ class ScheduleWatcher:
             created_at=now,
             expires_at=due + _BRIEF_FRESH_S,
             summary=(
-                "Morning brief: a short good-morning rundown — today's "
-                "calendar and anything held overnight, using the material "
-                "provided; skip whatever is empty."
+                "Morning brief: give a short good-morning rundown — "
+                "today's calendar and anything noted overnight; skip "
+                "whatever is empty."
             ),
             dedupe_key=f"brief:{day}",
         )):

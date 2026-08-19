@@ -142,7 +142,6 @@ class Player:
             self._playing.set()
             buffer = bytearray()
             completed = True
-            device_lost = False
 
             try:
                 # aclosing so a barge-in `break` tears the generator down now,
@@ -175,7 +174,6 @@ class Player:
                 # must not hide in debug logs.
                 log.warning("output device failed during playback", exc_info=True)
                 completed = False
-                device_lost = True
                 self._device_lost = True
                 try:
                     self._stream.close()
@@ -184,7 +182,7 @@ class Player:
                 self._stream = None
             finally:
                 self._playing.clear()
-                if not completed and not device_lost and self._stream is not None:
+                if not completed and not self._device_lost and self._stream is not None:
                     # Drop whatever PortAudio has already buffered, otherwise the
                     # tail of the interrupted sentence keeps playing after we've
                     # stopped feeding it.

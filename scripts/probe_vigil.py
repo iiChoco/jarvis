@@ -153,6 +153,26 @@ async def run_checks(tmp: Path) -> None:
     q3 = EventQueue(corrupt, held_max_age_s=3600.0)
     check("a corrupt file starts empty, not dead", not q3.pending and q3.push(event("c:1")))
 
+    # The peek/begin lifecycle and the in-flight dedupe horizon.
+    q4 = EventQueue(tmp / "inflight.json", held_max_age_s=3600.0)
+    q4.push(event("fl:1"))
+    peeked = q4.peek_next(200.0)
+    check("peek returns without claiming", peeked is not None and q4.pending)
+    check("a peeked event is still deduped", not q4.push(event("fl:1")))
+    q4.begin(peeked)
+    check("begin claims it out of pending", not q4.pending)
+    check("an in-flight key is still deduped", not q4.push(event("fl:1")))
+    q4.mark_spoken(peeked, now=201.0, date="2026-08-18")
+    check("resolution keeps the dedupe (delivered)", not q4.push(event("fl:1")))
+    q4.push(event("fl:2"))
+    q4.begin(q4.peek_next(300.0))
+    q4.hold(event("fl:2"))
+    check(
+        "peek_held sees notes without consuming",
+        len(q4.peek_held(301.0)) == 1 and len(q4.peek_held(301.0)) == 1,
+    )
+    check("count_source counts pending and held", q4.count_source("calendar") == 1)
+
     # ── quiet hours and the policy table ─────────────────────────────────────
     print("interruption policy:")
     check("parse_hhmm reads a clock time", parse_hhmm("22:00") == 1320)
@@ -750,6 +770,26 @@ async def run_checks(tmp: Path) -> None:
         p._owner_messages.sent == [("+15550000001", "Build failed on main.")],
     )
     check("a sent text charges its budget", p._events.messaged_count(today) == 1)
+
+    # A hastening interrupt truncates the compose: held, nothing sent.
+    p = make_turn_pipeline(
+        [[assistant("Your flight to Denver was"), result_msg()]], owner=True
+    )
+    orig_collect = p._collect_unattended
+
+    async def hastened_collect(prompt, sentences):
+        await orig_collect(prompt, sentences)
+        p._unattended_hastened = True  # a user lane interrupted mid-stream
+
+    p._collect_unattended = hastened_collect
+    await p._run_proactive_message(
+        event("e2e:hasty", importance=3, created=time.time())
+    )
+    check("a hastened compose sends nothing", p._owner_messages.sent == [])
+    check(
+        "a hastened compose holds the event",
+        len(p._events.take_held(time.time())) == 1,
+    )
 
     # ── the config section round-trips ───────────────────────────────────────
     print("config round-trip:")

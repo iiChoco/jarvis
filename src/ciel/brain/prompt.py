@@ -316,6 +316,13 @@ semantically duplicate memory under a newly-worded description. Use forget \
 only for memories that are now simply wrong. If an ongoing project moved, \
 update its state with update_project or add a log_progress entry.
 
+Contradictions are the one thing you must not leave standing: if something \
+said in this conversation contradicts a memory shown in your index, resolve \
+it now — update the memory if the new fact supersedes it, forget it if it \
+was simply wrong, and when you cannot tell which, keep the memory but note \
+the tension inside it so a future turn asks instead of asserting either \
+version confidently.
+
 Facts say who the user is; procedures say how. If this conversation taught \
 you how a class of task should be done for this user — a correction you \
 were given, a phrasing that landed, a routine that worked — save it as kind \

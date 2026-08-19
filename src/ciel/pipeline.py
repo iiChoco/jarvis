@@ -350,6 +350,13 @@ class Pipeline:
         missed sweep instead of pop_due, so an alarm that came due mid-nap is
         announced late-but-honestly and a six-hour-stale "rice is done" is
         dropped — the startup pop_missed behavior, applied to naps."""
+        self._unattended_hastened = False
+        """Set by every lane that hastens the maintenance slot with
+        brain.interrupt(). An interrupt ends the SDK stream *normally*, so a
+        composing unattended turn would otherwise carry on with a truncated
+        sentence list — and a truncated compose must never leave the
+        machine as a sent text or a held "finding". _compose_unattended
+        clears it on entry and checks it after collecting."""
 
         # Vigil (see ciel.proactive): the queue is the only piece the frame
         # loop ever touches at frame rate, and only through its `pending`
@@ -449,6 +456,14 @@ class Pipeline:
                             missed, player, mic, missed=True
                         )
 
+                # Re-stamped here, on the eve of the first frame: the value
+                # from __init__ is minutes stale after model warm-up and the
+                # greeting, and a cold start slower than _SLEEP_GAP_S would
+                # otherwise be misread as a wake from sleep — fabricating a
+                # transcript row and, past the resume window, clearing the
+                # deadlines rehydrate_schedule just armed.
+                self._last_wall = time.time()
+
                 # One loop, always consuming. The turn runs as a task rather
                 # than being awaited here, because the moment this loop stops
                 # pulling frames, barge-in becomes impossible — there is
@@ -496,20 +511,17 @@ class Pipeline:
                         # inline, like the wake acknowledgement: announcements
                         # are seconds long, and the mic is drained after so
                         # Ciel's own voice isn't transcribed as a turn.
-                        if self._timer_missed_sweep:
-                            # First poll after a nap: grace-filter what came
-                            # due mid-sleep instead of announcing it stale.
-                            self._timer_missed_sweep = False
-                            fired = self._timers.pop_missed(
-                                self._config.timers.missed_grace_s
-                            )
-                            timers_missed = True
-                        else:
-                            fired = self._timers.pop_due()
-                            timers_missed = False
+                        # First poll after a nap grace-filters what came due
+                        # mid-sleep instead of announcing it stale.
+                        sweep, self._timer_missed_sweep = self._timer_missed_sweep, False
+                        fired = (
+                            self._timers.pop_missed(self._config.timers.missed_grace_s)
+                            if sweep
+                            else self._timers.pop_due()
+                        )
                         if fired:
                             await self._announce_timers(
-                                fired, player, mic, missed=timers_missed
+                                fired, player, mic, missed=sweep
                             )
                             continue
 
@@ -528,6 +540,7 @@ class Pipeline:
                             # Same hastening the wake path does: the typed
                             # turn serializes on the brain's lock, and an
                             # unhurried reflection would hold it for seconds.
+                            self._unattended_hastened = True
                             await self._brain.interrupt()
                         self._state = State.BUSY
                         self._barge_run = 0
@@ -569,6 +582,11 @@ class Pipeline:
                         if self._hold_engaged:
                             self._hold_engaged = False
                             log.info("vigil hold lifted")
+                        # The event is *peeked*, not popped: only an enacted
+                        # decision claims it (begin), so a busy turn slot
+                        # simply leaves it queued — no pop-and-push churn
+                        # rewriting the state file every poll, no event
+                        # rotating to the back for being unlucky.
                         decision, event = self._decide_proactive()
                         if event is not None and decision is not None:
                             if decision.action == "speak":
@@ -576,7 +594,9 @@ class Pipeline:
                                     # Same hastening as the typed lane: the
                                     # proactive turn serializes on the
                                     # brain's lock.
+                                    self._unattended_hastened = True
                                     await self._brain.interrupt()
+                                self._events.begin(event)
                                 self._state = State.BUSY
                                 self._barge_run = 0
                                 turn = asyncio.create_task(
@@ -584,22 +604,23 @@ class Pipeline:
                                 )
                             elif decision.action in ("message", "note"):
                                 # No audio involved, so these run in the
-                                # maintenance slot — swallows failures,
-                                # hastened by any user turn — never as the
-                                # audio-owning `turn`. Slot busy: back into
-                                # the queue, retried next poll.
+                                # maintenance slot — never as the
+                                # audio-owning `turn`. Slot busy: the event
+                                # stays peeked-not-claimed, retried next
+                                # poll.
                                 if self._maintenance is None or self._maintenance.done():
+                                    self._events.begin(event)
                                     runner = (
                                         self._run_proactive_message(event)
                                         if decision.action == "message"
                                         else self._run_proactive_note(event)
                                     )
                                     self._maintenance = asyncio.create_task(runner)
-                                else:
-                                    self._events.push(event)
                             elif decision.action == "hold":
+                                self._events.begin(event)
                                 self._events.hold(event)
                             else:
+                                self._events.begin(event)
                                 self._events.drop(event, time.time())
                         continue
 
@@ -653,11 +674,13 @@ class Pipeline:
                         self._track_noise_floor(frame)
                         if self._wake.push(frame):
                             if self._maintenance is not None and not self._maintenance.done():
-                                # Hasten an in-flight reflection (it still
-                                # consumes to its ResultMessage, so no drain
-                                # debt); a rotation just finishes — either
-                                # way the user's turn serializes on the
-                                # brain's lock, masked by the ack.
+                                # Hasten whatever holds the maintenance slot
+                                # (reflection, rotation, or a composing
+                                # unattended turn — the flag tells that one
+                                # its output is truncated): the user's turn
+                                # serializes on the brain's lock, masked by
+                                # the ack.
+                                self._unattended_hastened = True
                                 await self._brain.interrupt()
                             await self._acknowledge(player, mic)
                             self._enter_listening()
@@ -1236,10 +1259,11 @@ class Pipeline:
     # ── the proactive turn (Vigil) ───────────────────────────────────────────
 
     def _decide_proactive(self) -> tuple[Decision | None, ProactiveEvent | None]:
-        """Pop the next live event and route it through the policy.
+        """Peek the next live event and route it through the policy.
 
-        The caller owns enacting the decision — and owns the event: whatever
-        isn't spoken must be held or dropped, never silently discarded.
+        The event is not yet claimed — the caller claims it with begin()
+        exactly when it enacts the decision, and from then on owns it:
+        every path out must mark, hold, or drop it, never silently discard.
         """
         assert (
             self._events is not None
@@ -1247,7 +1271,7 @@ class Pipeline:
             and self._presence is not None
         )
         now = time.time()
-        event = self._events.pop_next(now)
+        event = self._events.peek_next(now)
         if event is None:
             return None, None
         local = time.localtime(now)
@@ -1285,59 +1309,18 @@ class Pipeline:
         print(f"\n  [proactive: {event.summary}]", flush=True)
         self._record("event", f"proactive: {event.summary}")
         self._indicator.set_state("thinking")
-        sentences: list[str] = []
+        reply = await self._compose_unattended(event, outlet="speak")
+        if reply is None:
+            return  # already routed (declined, held, timed out, hastened)
         try:
-            try:
-                # Same shape as reflection, same hazard: the timeout must
-                # interrupt the brain, or suppression and unattended mode
-                # lift while the turn is still generating.
-                prompt = proactive_prompt(
-                    event.summary, extra=await self._proactive_extra(event)
-                )
-                with self._confirm.suppress(), self._brain.unattended("proactive"):
-                    await asyncio.wait_for(
-                        self._collect_unattended(prompt, sentences),
-                        timeout=self._config.proactive.turn_timeout_s,
-                    )
-            except asyncio.TimeoutError:
-                log.debug("proactive turn timed out — interrupting the brain")
-                try:
-                    await self._brain.interrupt()
-                except Exception:  # noqa: BLE001 - best-effort, as in reflection
-                    log.debug("interrupt after proactive timeout failed", exc_info=True)
-                self._events.hold(event)
-                return
-
-            reply = " ".join(sentences).strip()
-            valve = proactive_valve(reply) if reply else None
-            if valve == "SKIP":
-                print("  [proactive: model declined]", flush=True)
-                self._record("event", "proactive: declined")
-                self._events.drop(event, time.time())
-                return
-            if valve == "HOLD" or not reply:
-                # An empty reply is a malfunction, not a judgement; holding
-                # keeps the note owed to the next conversation either way.
-                print("  [proactive: held for next conversation]", flush=True)
-                self._record("event", "proactive: held")
-                self._events.hold(event)
-                return
-
             self._indicator.set_state("speaking")
             await self._play_ring(player)
-            played_all = True
-            device_lost = False
-            for sentence in sentences:
-                print(f"  ciel (proactive): {sentence}", flush=True)
-                self._record("ciel", f"[proactive] {sentence}")
-                if not await player.play(self._tts.stream(sentence)):
-                    played_all = False
-                    device_lost = player.device_lost
-                    break
-            if device_lost:
+            print(f"  ciel (proactive): {reply}", flush=True)
+            self._record("ciel", f"[proactive] {reply}")
+            completed = await player.play(self._tts.stream(reply))
+            if not completed and player.device_lost:
                 # Nothing reached the room — the notification did not
-                # happen. No budget charge, and the note is still owed:
-                # hold it for the next conversation.
+                # happen. No budget charge, and the note is still owed.
                 self._record("event", "proactive: audio output lost")
                 self._events.hold(event)
                 return
@@ -1347,14 +1330,22 @@ class Pipeline:
             self._events.mark_spoken(
                 event, time.time(), time.strftime("%Y-%m-%d")
             )
-            if not played_all:
+            if not completed:
                 self._record("event", "proactive: interrupted")
+            if event.source == "brief":
+                # The brief's material included the held notes (peeked at
+                # compose time); a delivered brief is their delivery.
+                self._events.take_held(time.time())
             # Rotation is re-armed at the next _enter_waiting — the session
             # grew, so the permanent-session problem stays dead — but
             # reflection isn't owed for a one-line nudge (_brain_conversed
             # stays False), and no follow-up window opens (_spoke stays
             # False), mirroring the timer lane.
             self._conversed = True
+        except asyncio.CancelledError:
+            # Shutdown mid-playback: the claim must not die with the task.
+            self._events.hold(event)
+            raise
         except Exception:  # noqa: BLE001 - an unattended turn must never crash the loop
             log.exception("proactive turn failed")
             self._record("event", "proactive turn failed")
@@ -1365,11 +1356,106 @@ class Pipeline:
         # No mic.drain() here: the BUSY-exit path in the frame loop drains
         # and re-enters WAITING for every turn task, this one included.
 
+    async def _compose_unattended(
+        self,
+        event: ProactiveEvent,
+        *,
+        outlet: str,
+        fallback: ProactiveEvent | None = None,
+    ) -> str | None:
+        """One unattended composition under the Witness rule — the single
+        copy of the choreography every outlet shares.
+
+        Returns the deliverable reply, or None once the event has already
+        been routed: SKIP drops it; HOLD, an empty reply, a timeout, a
+        hastening interrupt, or any composition failure holds it. Three
+        invariants live here so they can never again drift apart between
+        outlets (the review caught all three duplicated, two of them
+        wrong):
+
+        * The timeout interrupts the brain *inside* the suppression block —
+          confirm suppression and unattended mode must not lift while the
+          turn still generates, or a dying turn's tool call speaks a
+          question into an empty room and its memory writes lose their
+          provenance.
+        * A hastening interrupt (a user lane taking the brain lock) ends
+          the stream normally with a truncated sentence list — checked via
+          _unattended_hastened, because a half-composed thought must never
+          leave the machine as a sent text, a spoken fragment, or a held
+          "finding".
+        * Cancellation (reload drain, shutdown) holds the event before
+          re-raising: the claim taken by begin() must not die with the
+          task.
+
+        ``fallback`` is what gets held on the non-delivery paths when the
+        event's own summary is not fit to show a user (the verify
+        instruction); it defaults to the event itself.
+        """
+        assert self._events is not None
+        held = fallback if fallback is not None else event
+        sentences: list[str] = []
+        self._unattended_hastened = False
+        try:
+            extra = await self._proactive_extra(event)
+            timed_out = False
+            with self._confirm.suppress(), self._brain.unattended("proactive"):
+                try:
+                    await asyncio.wait_for(
+                        self._collect_unattended(
+                            proactive_prompt(
+                                event.summary, outlet=outlet, extra=extra
+                            ),
+                            sentences,
+                        ),
+                        timeout=self._config.proactive.turn_timeout_s,
+                    )
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    log.debug("unattended %s turn timed out — interrupting", outlet)
+                    try:
+                        await self._brain.interrupt()
+                    except Exception:  # noqa: BLE001 - best-effort, as in reflection
+                        log.debug("interrupt after timeout failed", exc_info=True)
+            if timed_out:
+                self._events.hold(held)
+                return None
+            if self._unattended_hastened:
+                log.info("unattended %s turn hastened aside — holding", outlet)
+                self._events.hold(held)
+                return None
+        except asyncio.CancelledError:
+            self._events.hold(held)
+            raise
+        except Exception:  # noqa: BLE001 - composition failure must not crash the caller
+            log.exception("unattended %s composition failed", outlet)
+            try:
+                self._events.hold(held)
+            except Exception:  # noqa: BLE001 - persistence is best-effort here
+                log.debug("could not hold the failed event", exc_info=True)
+            return None
+
+        reply = " ".join(sentences).strip()
+        valve = proactive_valve(reply) if reply else None
+        if valve == "SKIP":
+            print("  [proactive: model declined]", flush=True)
+            self._record("event", f"proactive ({outlet}): declined")
+            self._events.drop(event, time.time())
+            return None
+        if valve == "HOLD" or not reply:
+            # An empty reply is a malfunction, not a judgement; holding
+            # keeps the note owed to the next conversation either way.
+            print("  [proactive: held for next conversation]", flush=True)
+            self._record("event", f"proactive ({outlet}): held")
+            self._events.hold(held)
+            return None
+        return reply
+
     async def _proactive_extra(self, event: ProactiveEvent) -> str | None:
         """Event-specific prompt material. The brief gets today's agenda and
-        the overnight held notes — consumed here, because the brief IS their
-        delivery; a brief that then fails loses them to a turn that at least
-        tried, which beats double-delivering them to the next conversation.
+        the overnight held notes — *peeked*, never consumed here: the notes
+        are only taken once the brief actually delivers (spoken or sent).
+        A SKIP, a timeout, or a dead speaker must leave them held, or the
+        brief's failure silently burns everything it was carrying.
         """
         if event.source != "brief" or self._events is None:
             return None
@@ -1381,7 +1467,7 @@ class Pipeline:
                     "Today's calendar:\n"
                     + "\n".join(f"- {line}" for line in agenda)
                 )
-        notes = self._events.take_held(time.time())
+        notes = self._events.peek_held(time.time())
         if notes:
             parts.append(
                 "Held while you were away:\n"
@@ -1407,39 +1493,10 @@ class Pipeline:
         assert self._events is not None and self._owner_messages is not None
         print(f"\n  [proactive → text: {event.summary}]", flush=True)
         self._record("event", f"proactive (text): {event.summary}")
-        sentences: list[str] = []
+        reply = await self._compose_unattended(event, outlet="message")
+        if reply is None:
+            return  # already routed (declined, held, timed out, hastened)
         try:
-            try:
-                prompt = proactive_prompt(
-                    event.summary,
-                    outlet="message",
-                    extra=await self._proactive_extra(event),
-                )
-                with self._confirm.suppress(), self._brain.unattended("proactive"):
-                    await asyncio.wait_for(
-                        self._collect_unattended(prompt, sentences),
-                        timeout=self._config.proactive.turn_timeout_s,
-                    )
-            except asyncio.TimeoutError:
-                log.debug("proactive message turn timed out — interrupting")
-                try:
-                    await self._brain.interrupt()
-                except Exception:  # noqa: BLE001 - best-effort, as in reflection
-                    log.debug("interrupt after timeout failed", exc_info=True)
-                self._events.hold(event)
-                return
-
-            reply = " ".join(sentences).strip()
-            valve = proactive_valve(reply) if reply else None
-            if valve == "SKIP":
-                self._record("event", "proactive (text): declined")
-                self._events.drop(event, time.time())
-                return
-            if valve == "HOLD" or not reply:
-                self._record("event", "proactive (text): held")
-                self._events.hold(event)
-                return
-
             await self._owner_messages.send(
                 self._config.proactive.owner_handle, reply
             )
@@ -1448,6 +1505,14 @@ class Pipeline:
             self._events.mark_messaged(
                 event, time.time(), time.strftime("%Y-%m-%d")
             )
+            if event.source == "brief":
+                self._events.take_held(time.time())
+        except asyncio.CancelledError:
+            # Reload drain or shutdown mid-send: the claim must not die
+            # with the task. The send may or may not have gone out — held
+            # means at-least-once, which beats silently never.
+            self._events.hold(event)
+            raise
         except MessagesUnavailable as exc:
             # The send path refused (switch off, handle malformed, osascript
             # failure). The event is still owed: held for the next
@@ -1478,6 +1543,13 @@ class Pipeline:
         """
         if self._events is None:
             return
+        if self._events.count_source("verify") >= 3:
+            # A backlog cap, not a budget: checks are cheap but each one is
+            # a brain turn and a future held note, and a burst of approved
+            # actions must not turn the next conversation's opening into a
+            # verification report. The journal still holds every record.
+            log.info("read-back backlog full — skipping the check for %s", tool)
+            return
         from ciel.brain.toolguard import describe_call
 
         described = describe_call(tool, args).removesuffix(" — okay?")
@@ -1496,6 +1568,10 @@ class Pipeline:
                 "claimed."
             ),
             dedupe_key=f"verify:{tool}:{int(now * 1000)}",
+            # The human-shaped description, for the note turn's fallback —
+            # the summary above is a directive and must never be read to
+            # the user as a held note.
+            payload={"action": described},
         ))
         log.info("read-back check filed for %s", tool)
 
@@ -1512,33 +1588,25 @@ class Pipeline:
         assert self._events is not None
         print(f"\n  [proactive check: {event.summary[:80]}…]", flush=True)
         self._record("event", "proactive: read-back check")
-        sentences: list[str] = []
+        # What rides into the next conversation on failure: never the raw
+        # instruction — an event summary is promised to be a spoken-English
+        # line, and _with_held_notes would read the directive to the user
+        # verbatim. The fallback says honestly that the check didn't happen.
+        fallback = dc_replace(
+            event,
+            summary=(
+                "I meant to double-check something you approved earlier — "
+                f"{event.payload.get('action', 'a recent action')} — but "
+                "could not; worth confirming it went through."
+            ),
+            expires_at=None,
+        )
+        reply = await self._compose_unattended(
+            event, outlet="note", fallback=fallback
+        )
+        if reply is None:
+            return  # already routed (declined, held with the fallback, ...)
         try:
-            try:
-                prompt = proactive_prompt(event.summary, outlet="note")
-                with self._confirm.suppress(), self._brain.unattended("proactive"):
-                    await asyncio.wait_for(
-                        self._collect_unattended(prompt, sentences),
-                        timeout=self._config.proactive.turn_timeout_s,
-                    )
-            except asyncio.TimeoutError:
-                log.debug("verification turn timed out — interrupting")
-                try:
-                    await self._brain.interrupt()
-                except Exception:  # noqa: BLE001 - best-effort, as in reflection
-                    log.debug("interrupt after timeout failed", exc_info=True)
-                self._events.hold(event)
-                return
-
-            reply = " ".join(sentences).strip()
-            valve = proactive_valve(reply) if reply else None
-            if valve == "SKIP":
-                self._record("event", "proactive check: nothing to relay")
-                self._events.drop(event, time.time())
-                return
-            if valve == "HOLD" or not reply:
-                self._events.hold(event)
-                return
             # The finding replaces the instruction: what rides into the next
             # conversation is what was observed, stamped now.
             self._events.hold(dc_replace(
@@ -1550,11 +1618,7 @@ class Pipeline:
             print(f"  [checked: {reply}]", flush=True)
             self._record("event", f"proactive check: {reply}")
         except Exception:  # noqa: BLE001 - maintenance-slot task must not crash the loop
-            log.exception("verification turn failed")
-            try:
-                self._events.hold(event)
-            except Exception:  # noqa: BLE001 - persistence is best-effort here
-                log.debug("could not hold the failed check", exc_info=True)
+            log.exception("could not hold the finding")
 
     async def _collect_unattended(
         self, prompt: str, sentences: list[str]
@@ -1706,12 +1770,13 @@ class Pipeline:
     def _record(self, speaker: str, text: str) -> None:
         """Append one row to this conversation's transcript, if one is kept.
 
-        Also Vigil's presence tap: every ``user`` row — a spoken turn, a
-        typed line, a confirmation answer — is evidence the user is here.
-        Tapped here, not in _enter_waiting, so Ciel's own proactive speech
-        (which sets _conversed) can never count as the user being around.
+        Also Vigil's presence tap: every ``user`` row (a spoken turn, a
+        typed line) and every ``you-confirm`` row (the broker's speaker for
+        confirmation answers) is evidence the user is here. Tapped here, not
+        in _enter_waiting, so Ciel's own proactive speech (which sets
+        _conversed) can never count as the user being around.
         """
-        if speaker == "user" and self._presence is not None:
+        if speaker in ("user", "you-confirm") and self._presence is not None:
             self._presence.note_conversation(time.monotonic())
         if self._transcript is not None:
             self._transcript.record(speaker, text)

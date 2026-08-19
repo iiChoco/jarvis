@@ -107,10 +107,19 @@ class WorkWatcher:
         self._task = None
 
     async def _poll(self) -> None:
+        # Split on the thread boundary: only the *probing* (a stat can stall
+        # on a network volume, kill-0 is cheap but keeps it company) runs on
+        # a worker; every mutation — the watch list, and pushes into the
+        # queue with their whole-file saves — happens back on the event
+        # loop, where the tool's add_file and the frame loop's queue calls
+        # also live. Everything shared is single-threaded again; the review
+        # found the previous shape interleaving two writers on one tmp file.
         while True:
             try:
                 if self._watches:
-                    await asyncio.to_thread(self.check, time.time())
+                    snapshot = list(self._watches)
+                    completed = await asyncio.to_thread(self._probe, snapshot)
+                    self._resolve(completed, time.time())
             except Exception:  # noqa: BLE001 - a bad watch must not kill the loop
                 log.exception("work watch check failed")
             try:
@@ -120,12 +129,24 @@ class WorkWatcher:
             self._kick.clear()
 
     def check(self, now: float) -> None:
-        """Resolve every finished or expired watch into an event. ``now``
-        injected for the probe; called on a worker thread by the poll loop
-        because a stat against a network volume can stall."""
+        """Probe and resolve synchronously — the single-threaded entry the
+        probes drive; the poll loop uses the split halves directly."""
+        self._resolve(self._probe(list(self._watches)), now)
+
+    def _probe(self, watches: list[Watch]) -> set[str]:
+        """The ids of the completed watches. Reads the world, mutates
+        nothing — safe on a worker thread over a snapshot."""
+        return {w.id for w in watches if self._completed(w)}
+
+    def _resolve(self, completed: set[str], now: float) -> None:
+        """Turn completions and expiries into events, on the event loop.
+
+        Operates on the live list, so a watch added while the probe ran is
+        simply kept for the next round rather than clobbered.
+        """
         keep: list[Watch] = []
         for watch in self._watches:
-            if self._completed(watch):
+            if watch.id in completed:
                 self._queue.push(ProactiveEvent(
                     id=self._queue.next_id(),
                     source="work",

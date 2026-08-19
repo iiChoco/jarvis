@@ -50,6 +50,13 @@ log = logging.getLogger(__name__)
 
 Tier = Literal["deny", "quiet", "confirm"]
 
+GLOB_CONFIRM_REASON = "a pattern in it could match credential or startup files"
+"""The one confirm reason that changes the spoken question. Shared as a
+constant so the guard can recognize it without string-matching prose: a
+confirmation whose whole point is "this glob might touch secrets" must say
+so out loud — especially since long commands are truncated in the prompt
+and the suspicious pattern may be exactly the part that got cut."""
+
 # Leading tokens refused outright, whatever follows. Each is a capability no
 # voice-driven assistant needs: root, the keychain, login persistence, system
 # state, or scripting other applications (osascript reaches Mail, Messages,
@@ -140,13 +147,17 @@ def _forbidden_component(command: str) -> tuple[str, bool] | None:
     alone — no path resolution, which a shell could defeat anyway. Quoting is
     removed first (``cat ~/.a"w"s/credentials`` still trips on ``.aws``).
 
-    A glob component that *could* expand to a forbidden name (``~/.??h/id_*``)
-    trips too, but is reported as inexact: broad globs also match plenty of
-    innocent names (``ls -d .*`` lists every dotfile, ``.ssh`` among them), so
-    the caller sends exact matches to deny and glob-only matches to confirm —
-    the protection survives, the user hears the command, and an ordinary
-    dotfile listing stops landing in the tier with no escape hatch. An exact
-    hit anywhere outranks a glob hit, so ``ls .* ~/.ssh/id_rsa`` still denies.
+    A glob component that could expand to a forbidden name trips too. Which
+    *tier* it earns depends on how much the pattern says: a broad listing
+    glob (``.*``, ``.??*`` — at most one literal character once wildcards
+    are removed) matches every dotfile, ``.ssh`` incidentally among them, so
+    it is reported inexact and the caller downgrades it to confirm — the
+    user hears the command, and an ordinary ``ls -d .*`` stops landing in
+    the tier with no escape hatch. A *targeted* glob (``.ss?``, ``id_*`` —
+    real literal characters spelling out most of a forbidden name) is the
+    obfuscated form of that name, exactly what injected text would choose,
+    and stays an exact-grade deny. An exact hit anywhere outranks a glob
+    hit, so ``ls .* ~/.ssh/id_rsa`` still denies.
     """
     glob_hit: str | None = None
     for token in command.split():
@@ -155,12 +166,15 @@ def _forbidden_component(command: str) -> tuple[str, bool] | None:
             if part in FORBIDDEN_NAMES:
                 return part, True
             if (
-                glob_hit is None
-                and _GLOB_CHARS.search(part)
+                _GLOB_CHARS.search(part)
                 and part.strip("*?[]")  # skip a bare `*`, which matches everything
                 and any(fnmatch.fnmatch(name, part) for name in FORBIDDEN_NAMES)
             ):
-                glob_hit = part
+                literals = re.sub(r"[*?\[\]]", "", part)
+                if len(literals) > 1:
+                    return part, True  # targeted: an obfuscated spelling
+                if glob_hit is None:
+                    glob_hit = part
     return (glob_hit, False) if glob_hit is not None else None
 
 
@@ -177,11 +191,15 @@ def _effective_tokens(tokens: list[str]) -> list[str]:
         base = _normalize(toks[0])
         if base in _WRAPPERS and len(toks) > 1:
             rest = toks[1:]
-            opts: list[str] = []
+            lookup = False  # `command -v/-V`: prints a path, executes nothing
             while rest:
                 arg = rest[0]
                 if arg.startswith("-"):
-                    opts.append(arg)
+                    # Flag-character match, not whole-token: bash accepts the
+                    # clustered `command -pv name` too.
+                    lookup = lookup or bool(
+                        base == "command" and {"v", "V"} & set(arg.lstrip("-"))
+                    )
                     rest = rest[1:]
                     if arg in _WRAPPER_VALUE_OPTS and rest:
                         rest = rest[1:]  # its value is not the wrapped command
@@ -190,11 +208,10 @@ def _effective_tokens(tokens: list[str]) -> list[str]:
                     rest = rest[1:]
                     continue
                 break
-            if base == "command" and any(o in ("-v", "-V") for o in opts):
-                # ``command -v sudo`` prints where sudo lives; it executes
-                # nothing. Peeling it made a pure lookup deny on the name it
-                # was looking up — stop peeling and let it classify as the
-                # lookup it is (not allowlisted, so confirm, never quiet).
+            if lookup:
+                # Peeling made a pure lookup deny on the name it was looking
+                # up — stop peeling and let it classify as the lookup it is
+                # (not allowlisted, so confirm, never quiet).
                 return [base, *toks[1:]]
             toks = rest
             continue
@@ -273,11 +290,12 @@ def classify(command: str, config: ShellConfig) -> tuple[Tier, str]:
                 interpreter_stage = True
 
     if forbidden is not None:
-        # A glob that could expand to a credential or startup-file name, with
-        # no exact mention anywhere. Confirm, not deny: the user hears the
-        # command and decides — see _forbidden_component on why globs are the
-        # one case where the deny tier over-matched real commands.
-        return "confirm", "a pattern in it could match credential or startup files"
+        # A broad glob that could expand to a credential or startup-file
+        # name, with no exact or targeted mention anywhere. Confirm, not
+        # deny — and the reason is spoken (see GLOB_CONFIRM_REASON): the
+        # user must hear *why* this listing needs a yes, or the question
+        # sounds like any other harmless command.
+        return "confirm", GLOB_CONFIRM_REASON
 
     harmless_stripped = _HARMLESS_REDIRECT.sub(" ", text)
     has_structure = bool(
@@ -350,8 +368,11 @@ class ShellGuard:
 
         limit = self._config.max_command_display_chars
         shown = command if len(command) <= limit else f"{command[:limit]}, and so on"
+        question = f"Run: {shown} — okay?"
+        if reason == GLOB_CONFIRM_REASON:
+            question = f"Run: {shown} — careful, {reason} — okay?"
         try:
-            approved = await self._confirm(f"Run: {shown} — okay?")
+            approved = await self._confirm(question)
         except Exception:  # noqa: BLE001 - the hook must always return a decision
             log.exception("confirmation failed — denying %s", command)
             approved = False

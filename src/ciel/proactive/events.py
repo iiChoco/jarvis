@@ -83,6 +83,13 @@ class EventQueue:
         self._pending: list[ProactiveEvent] = []
         self._held: list[ProactiveEvent] = []
         self._delivered: dict[str, float] = {}  # dedupe_key -> when recorded
+        self._inflight: set[str] = set()
+        """Keys handed to a turn via begin() and not yet resolved. Part of
+        the dedupe horizon: a watcher rescan during a long turn re-derives
+        the same key, and without this the second copy is accepted and
+        delivered again. Deliberately not persisted — a crash mid-turn
+        forgets the claim, and the cancel paths hold their event first, so
+        only a hard kill can lose one."""
         self._budget_date = ""
         self._spoken = 0
         self._messaged = 0
@@ -118,36 +125,61 @@ class EventQueue:
         only when it's True."""
         return bool(self._pending)
 
-    def pop_next(self, now: float) -> ProactiveEvent | None:
-        """Remove and return the first live pending event.
+    def peek_next(self, now: float) -> ProactiveEvent | None:
+        """The first live pending event, without claiming it.
 
-        Expired events are dropped here — recorded as delivered so a watcher
+        Expired events are pruned here — recorded as delivered so a watcher
         rescan can't resurrect them, logged so the drop isn't silent. The
-        caller owns the returned event: enact the policy's decision, or give
-        it back via :meth:`hold`.
+        survivor stays in pending: the caller decides, and only an enacted
+        decision claims it via :meth:`begin`. Peek-then-begin (rather than a
+        destructive pop) is what lets a busy turn slot simply *wait* — no
+        pop-and-push churn rewriting the file every poll, no event rotating
+        to the back of the queue for being unlucky.
         """
-        popped: ProactiveEvent | None = None
+        pruned = False
         keep: list[ProactiveEvent] = []
+        head: ProactiveEvent | None = None
         for event in self._pending:
-            if popped is None and event.expires_at is not None and event.expires_at <= now:
+            if head is None and event.expires_at is not None and event.expires_at <= now:
                 log.info("event expired undelivered: %s", event.summary)
                 self._delivered[event.dedupe_key] = now
+                pruned = True
                 continue
-            if popped is None:
-                popped = event
-                continue
+            if head is None:
+                head = event
             keep.append(event)
-        self._pending = keep
+        if pruned:
+            self._pending = keep
+            self._save()
+        return head
+
+    def begin(self, event: ProactiveEvent) -> None:
+        """Claim an event for delivery: out of pending, into the in-flight
+        set. Every path out of a turn must resolve the claim — mark_spoken,
+        mark_messaged, drop, or hold — or the key stays claimed until
+        restart."""
+        self._pending = [
+            e for e in self._pending if e.dedupe_key != event.dedupe_key
+        ]
+        self._inflight.add(event.dedupe_key)
         self._save()
-        return popped
+
+    def pop_next(self, now: float) -> ProactiveEvent | None:
+        """Peek and claim in one step, for callers with no reason to wait."""
+        event = self.peek_next(now)
+        if event is not None:
+            self.begin(event)
+        return event
 
     def hold(self, event: ProactiveEvent) -> None:
         """Keep an event for the start of the next conversation."""
+        self._inflight.discard(event.dedupe_key)
         self._held.append(event)
         self._save()
 
     def drop(self, event: ProactiveEvent, now: float) -> None:
         """Discard an event, remembering its key so it can't come back."""
+        self._inflight.discard(event.dedupe_key)
         self._delivered[event.dedupe_key] = now
         self._save()
 
@@ -157,6 +189,7 @@ class EventQueue:
         Called only after audio actually played — a turn that failed or
         declined must not spend the budget.
         """
+        self._inflight.discard(event.dedupe_key)
         self._delivered[event.dedupe_key] = now
         self._roll_budget(date)
         self._spoken += 1
@@ -173,6 +206,7 @@ class EventQueue:
         """Record a texted delivery and charge the day's texting budget.
         Called only after the send actually succeeded — same reasoning as
         the spoken charge."""
+        self._inflight.discard(event.dedupe_key)
         self._delivered[event.dedupe_key] = now
         self._roll_budget(date)
         self._messaged += 1
@@ -182,6 +216,28 @@ class EventQueue:
         """Texted deliveries so far on the given local date."""
         self._roll_budget(date)
         return self._messaged
+
+    def peek_held(self, now: float) -> list[ProactiveEvent]:
+        """The held notes that would deliver right now, without consuming.
+
+        For material a turn *plans* to deliver (the brief): peek to build
+        the prompt, then consume with :meth:`take_held` only after delivery
+        actually happened — a SKIP, a timeout, or a dead speaker must leave
+        the notes held, or the brief's failure silently burns everything it
+        was carrying.
+        """
+        return [
+            event for event in self._held
+            if not (event.expires_at is not None and event.expires_at <= now)
+            and not (now - event.created_at > self._held_max_age_s)
+        ]
+
+    def count_source(self, source: str) -> int:
+        """Unresolved events (pending + held) from one source — the cheap
+        backlog check that keeps a source from flooding the queue."""
+        return sum(e.source == source for e in self._pending) + sum(
+            e.source == source for e in self._held
+        )
 
     def take_held(self, now: float) -> list[ProactiveEvent]:
         """Consume the held notes worth delivering right now.
@@ -210,6 +266,7 @@ class EventQueue:
     def _seen(self, key: str) -> bool:
         return (
             key in self._delivered
+            or key in self._inflight
             or any(e.dedupe_key == key for e in self._pending)
             or any(e.dedupe_key == key for e in self._held)
         )

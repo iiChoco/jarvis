@@ -55,6 +55,14 @@ class CalendarWatcher:
         self._warned_unavailable = False
         self._health = WatcherHealth("calendar", queue)
         self._kick = asyncio.Event()
+        self._store_lock = threading.Lock()
+        """Guards store creation and authorization. Two worker threads reach
+        EventKit — the poll's scan and the brief's agenda fetch — and both
+        lazily create the store; unguarded, each could allocate one and the
+        second assignment replaces an instance mid-query, or both could
+        fire the one-time permission request. Queries themselves run outside
+        the lock: EKEventStore is documented thread-safe; its *creation*
+        and our auth bookkeeping are not."""
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._poll())
@@ -111,10 +119,11 @@ class CalendarWatcher:
                 )
             return []
 
-        if self._store is None:
-            self._store = EventKit.EKEventStore.alloc().init()
-        if not self._authorized(EventKit):
-            return []
+        with self._store_lock:
+            if self._store is None:
+                self._store = EventKit.EKEventStore.alloc().init()
+            if not self._authorized(EventKit):
+                return []
 
         from Foundation import NSDate
 
@@ -168,10 +177,11 @@ class CalendarWatcher:
             import EventKit
         except ImportError:
             return []
-        if self._store is None:
-            self._store = EventKit.EKEventStore.alloc().init()
-        if not self._authorized(EventKit):
-            return []
+        with self._store_lock:
+            if self._store is None:
+                self._store = EventKit.EKEventStore.alloc().init()
+            if not self._authorized(EventKit):
+                return []
 
         from Foundation import NSDate
 

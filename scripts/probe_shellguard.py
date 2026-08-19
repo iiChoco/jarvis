@@ -223,18 +223,23 @@ async def main() -> None:
         # Legitimate globs that match no forbidden name stay quiet.
         ("grep -r foo *.py", "quiet"),
         ("echo sudo", "quiet"),  # the word sudo as an argument, not the command
-        # Globs that COULD match a forbidden name confirm rather than deny:
-        # `ls -d .*` is an ordinary dotfile listing that happens to match
-        # `.ssh`; the user hears it and decides. An exact forbidden name
-        # anywhere in the command still denies outright.
+        # BROAD globs that could match a forbidden name confirm rather than
+        # deny: `ls -d .*` is an ordinary dotfile listing that happens to
+        # match `.ssh`; the user hears it (with the reason spoken) and
+        # decides. TARGETED globs — real literal characters spelling out
+        # most of a forbidden name — are the obfuscated form of that name
+        # and stay deny, as does an exact name anywhere in the command.
         ("ls -d .*", "confirm"),
         ("grep -r foo .*", "confirm"),
         ("ls .??*", "confirm"),
-        ("cat ~/.??h/config", "confirm"),
+        ("cat ~/.??h/config", "deny"),  # targeted: .??h spells out .ssh
+        ("cat ~/.ss?/id_*", "deny"),  # targeted: an obfuscated credential path
         ("ls .* ~/.ssh/id_rsa", "deny"),  # exact outranks glob
         # `command -v X` prints where X lives and executes nothing — peeling
-        # it used to deny a pure lookup on the name it was looking up.
+        # it used to deny a pure lookup on the name it was looking up. The
+        # clustered POSIX spelling counts too.
         ("command -v sudo", "confirm"),
+        ("command -pv sudo", "confirm"),
         ("command sudo ls", "deny"),  # command actually RUNNING sudo still peels
     ]
     cfg = ShellConfig()
