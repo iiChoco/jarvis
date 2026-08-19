@@ -552,6 +552,205 @@ async def run_checks(tmp: Path) -> None:
     check("watcher text with braces cannot break the prompt", "{weird}" in prompt)
     check("the prompt defines both de-escalations", "SKIP" in prompt and "HOLD" in prompt)
 
+    # ── end-to-end proactive turns on a scripted brain ───────────────────────
+    print("proactive turns (scripted brain):")
+    from ciel.brain.agent import Brain
+    from ciel.confirm import VoiceConfirmBroker
+    from ciel.pipeline import Pipeline
+
+    def make_message(cls, **attrs):
+        msg = cls.__new__(cls)
+        for key, value in attrs.items():
+            try:
+                object.__setattr__(msg, key, value)
+            except Exception:  # noqa: BLE001 - non-frozen SDK dataclasses
+                setattr(msg, key, value)
+        return msg
+
+    def assistant(text):
+        from claude_agent_sdk import AssistantMessage, TextBlock
+
+        block = make_message(TextBlock, text=text)
+        return make_message(
+            AssistantMessage, content=[block], model="fake",
+            parent_tool_use_id=None,
+        )
+
+    def result_msg():
+        from claude_agent_sdk import ResultMessage
+
+        return make_message(
+            ResultMessage, subtype="success", duration_ms=1, duration_api_ms=1,
+            is_error=False, num_turns=1, session_id="s1", total_cost_usd=None,
+            usage=None, result=None,
+        )
+
+    class ScriptClient:
+        """Each query() consumes the next scripted message list."""
+
+        def __init__(self, scripts, stall=None):
+            self.scripts = [list(s) for s in scripts]
+            self.stall = stall
+            self.current: list = []
+            self.interrupted = False
+
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            pass
+
+        async def query(self, text):
+            self.current = self.scripts.pop(0)
+
+        async def interrupt(self):
+            self.interrupted = True
+            if self.stall is not None:
+                self.stall.set()
+
+        async def receive_response(self):
+            if self.stall is not None and not self.stall.is_set():
+                await self.stall.wait()
+            for msg in self.current:
+                yield msg
+
+    class TurnPlayer:
+        def __init__(self, results=None, lose_device=False):
+            self.results = list(results or [])
+            self.lose_device = lose_device
+            self.plays = 0
+            self.device_lost = False
+            self.is_playing = False
+
+        async def play(self, chunks):
+            self.plays += 1
+            ok = self.results.pop(0) if self.results else True
+            if not ok and self.lose_device:
+                self.device_lost = True
+            return ok
+
+        def stop(self):
+            pass
+
+    class TurnTTS:
+        sample_rate = 16000
+
+        def stream(self, text):
+            async def chunks():
+                yield b""
+
+            return chunks()
+
+    class TurnMic:
+        def drain(self):
+            pass
+
+    class TurnIndicator:
+        def set_state(self, state):
+            pass
+
+    class TurnMessenger:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, handle, text):
+            self.sent.append((handle, text))
+
+    case_n = [0]
+
+    def make_turn_pipeline(scripts, *, stall=None, owner=False, timeout=5.0):
+        case_n[0] += 1
+        cfg = replace(
+            Config(),
+            proactive=replace(
+                ProactiveConfig(), enabled=True,
+                state_file=tmp / f"e2e-{case_n[0]}.json",
+                turn_timeout_s=timeout,
+                owner_handle="+15550000001" if owner else "",
+            ),
+        )
+        p = Pipeline.__new__(Pipeline)
+        p._config = cfg
+        p._events = EventQueue(cfg.proactive.state_file, 3600.0)
+        p._confirm = VoiceConfirmBroker(cfg)
+        brain = Brain(cfg)
+        brain._sessions._path = tmp / f"e2e-session-{case_n[0]}.json"
+        brain._client = ScriptClient(scripts, stall)
+        p._brain = brain
+        p._indicator = TurnIndicator()
+        p._presence = None
+        p._transcript = None
+        p._calendar = None
+        p._tts = TurnTTS()
+        p._owner_messages = TurnMessenger() if owner else None
+        p._conversed = False
+        return p
+
+    today = time.strftime("%Y-%m-%d")
+
+    # SKIP: the model declines — dropped, no ring, no budget.
+    p = make_turn_pipeline([[assistant("SKIP"), result_msg()]])
+    ev = event("e2e:skip", expires=None)
+    player = TurnPlayer()
+    await p._run_proactive_turn(ev, player, TurnMic())
+    check("SKIP spends no budget", p._events.spoken_count(today) == 0)
+    check("SKIP plays nothing", player.plays == 0)
+    check("SKIP is remembered as delivered", not p._events.push(event("e2e:skip")))
+
+    # A real reply: ring + sentence, budget charged, rotation re-armed.
+    p = make_turn_pipeline([[assistant("Heads up. Your meeting is close."), result_msg()]])
+    player = TurnPlayer()
+    await p._run_proactive_turn(event("e2e:speak"), player, TurnMic())
+    check("a reply rings then speaks", player.plays >= 2)
+    check("a spoken nudge charges the budget", p._events.spoken_count(today) == 1)
+    check("a spoken nudge re-arms rotation", p._conversed is True)
+
+    # HOLD: de-escalated to a held note, unspent.
+    p = make_turn_pipeline([[assistant("HOLD"), result_msg()]])
+    await p._run_proactive_turn(event("e2e:hold", created=time.time()), TurnPlayer(), TurnMic())
+    held_now = p._events.take_held(time.time())
+    check("HOLD lands in held notes", len(held_now) == 1)
+    check("HOLD spends nothing", p._events.spoken_count(today) == 0)
+
+    # Timeout: the brain is interrupted, the event held.
+    stall = asyncio.Event()
+    p = make_turn_pipeline([[assistant("late"), result_msg()]], stall=stall, timeout=0.2)
+    await p._run_proactive_turn(event("e2e:slow", created=time.time()), TurnPlayer(), TurnMic())
+    check("a hung turn interrupts the brain", p._brain._client.interrupted)
+    check("a hung turn holds the event", len(p._events.take_held(time.time())) == 1)
+
+    # Device loss mid-delivery: held, unspent — nothing reached the room.
+    p = make_turn_pipeline([[assistant("Your meeting is close."), result_msg()]])
+    player = TurnPlayer(results=[True, False], lose_device=True)
+    await p._run_proactive_turn(event("e2e:dead", created=time.time()), player, TurnMic())
+    check("device loss holds the event", len(p._events.take_held(time.time())) == 1)
+    check("device loss spends no budget", p._events.spoken_count(today) == 0)
+
+    # The note turn: the finding replaces the instruction.
+    p = make_turn_pipeline([[assistant("The message to Sam did send."), result_msg()]])
+    note_ev = ProactiveEvent(
+        id="n1", source="verify", importance=1, created_at=time.time(),
+        expires_at=time.time() + 900, summary="Read-back check: send to Sam.",
+        dedupe_key="verify:e2e:1",
+    )
+    await p._run_proactive_note(note_ev)
+    findings = p._events.take_held(time.time())
+    check(
+        "the note turn holds what it observed",
+        [f.summary for f in findings] == ["The message to Sam did send."],
+    )
+
+    # The message turn: composed text goes to the pinned handle only.
+    p = make_turn_pipeline(
+        [[assistant("Build failed on main."), result_msg()]], owner=True
+    )
+    await p._run_proactive_message(event("e2e:text", importance=3, created=time.time()))
+    check(
+        "the away text goes to the pinned handle",
+        p._owner_messages.sent == [("+15550000001", "Build failed on main.")],
+    )
+    check("a sent text charges its budget", p._events.messaged_count(today) == 1)
+
     # ── the config section round-trips ───────────────────────────────────────
     print("config round-trip:")
     toml_path = tmp / "config.toml"
