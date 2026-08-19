@@ -14,10 +14,14 @@ from __future__ import annotations
 import re
 
 # Matched on the whole normalized transcript, so a genuine "thank you" inside
-# a real sentence is untouched.
+# a real sentence is untouched. Entries MUST be in normalized form —
+# lowercase, no punctuation (see `normalize`) — or they can never match:
+# earlier entries like "bye." and "!" were dead weight, their punctuation
+# stripped from every transcript before the comparison. Pure-punctuation
+# transcripts ("." , "?") normalize to "" and are already caught below.
 _HALLUCINATIONS = frozenset({
     "you", "thank you", "thanks for watching", "thank you for watching",
-    "thanks for watching!", "bye", "bye.", "okay", "ok", ".", "!", "?",
+    "bye", "okay", "ok",
     "please subscribe", "subtitles by the amara.org community",
     "transcription by castingwords",
 })

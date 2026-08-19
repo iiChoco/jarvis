@@ -79,6 +79,12 @@ def _apply_overrides(config: Config, args: argparse.Namespace) -> Config:
     return config
 
 
+def _log_level(name: str) -> int:
+    """Map a config log-level name to its numeric level, INFO on nonsense."""
+    level = logging.getLevelName(name.strip().upper())
+    return level if isinstance(level, int) else logging.INFO
+
+
 def _check_auth() -> None:
     """Warn if an API key is set.
 
@@ -110,6 +116,12 @@ def main(argv: list[str] | None = None) -> int:
     _check_auth()
 
     config = _apply_overrides(load_config(), args)
+    if not args.verbose:
+        # -v forces DEBUG; otherwise config.log_level (into which load_config
+        # folds CIEL_LOG_LEVEL) sets the level. basicConfig above already
+        # installed the handler, so adjust the root level here — without this
+        # the log_level field and its env var were parsed and never applied.
+        logging.getLogger().setLevel(_log_level(config.log_level))
     if args.new:
         config.session_file.unlink(missing_ok=True)
 
@@ -130,10 +142,22 @@ def main(argv: list[str] | None = None) -> int:
         # restart in everything but who typed it. execv never returns; the
         # same interpreter, arguments, and environment carry over, and the
         # conversation resumes through the session file.
+        #
+        # --new is stripped from the carried args: it means "start fresh this
+        # launch, once", and it deleted the session file above. Carried
+        # forward, every autoreload restart would delete the session again —
+        # discarding the very conversation the reload is meant to resume.
+        # (argparse accepts unambiguous prefixes, and only --new starts with
+        # "--n", so those abbreviations are dropped too.)
+        raw = list(argv) if argv is not None else sys.argv[1:]
+        carried = [
+            a for a in raw
+            if not (a.startswith("--n") and "--new".startswith(a))
+        ]
         print("restarting...\n")
         os.execv(
             sys.executable,
-            [sys.executable, "-m", "ciel", *(argv if argv is not None else sys.argv[1:])],
+            [sys.executable, "-m", "ciel", *carried],
         )
     return 0
 

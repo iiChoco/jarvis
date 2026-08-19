@@ -107,7 +107,13 @@ class TimerService:
              now.tm_wday, now.tm_yday, -1)
         )
         if due <= time.time():
-            due += 24 * 3600
+            # Tomorrow is not 24 hours away on DST transition days (they run
+            # 23 or 25) — overflow tm_mday and let mktime normalize the date
+            # and re-resolve the offset for it.
+            due = time.mktime(
+                (now.tm_year, now.tm_mon, now.tm_mday + 1, hour, minute, 0,
+                 now.tm_wday, now.tm_yday, -1)
+            )
         return self._add("alarm", due, label)
 
     def cancel(self, query: str = "") -> Timer | None:

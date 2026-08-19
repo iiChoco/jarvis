@@ -31,10 +31,18 @@ from typing import Iterable, Literal
 
 log = logging.getLogger(__name__)
 
-MemoryKind = Literal["identity", "preference", "project", "fact", "reference"]
+MemoryKind = Literal[
+    "identity", "preference", "project", "fact", "reference", "procedure"
+]
 VALID_KINDS: frozenset[str] = frozenset(
-    ("identity", "preference", "project", "fact", "reference")
+    ("identity", "preference", "project", "fact", "reference", "procedure")
 )
+"""``procedure`` is the who-vs-how split: every other kind says who the user
+is or what is true; a procedure says how a class of task should be done for
+this user ("how the morning brief is structured", "how to word a message to
+Sam"). Named for the task class and updated in place as the method improves —
+the overwrite-by-description behavior of ``write`` is what keeps one
+procedure per task instead of a pile of one-session variants."""
 
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n?(.*)\Z", re.DOTALL)
 _WORD = re.compile(r"[a-z0-9]+")
@@ -58,14 +66,27 @@ class Memory:
     content: str
     created_at: float
     path: Path
+    context: str = "conversation"
+    """Write provenance: what kind of turn saved this. "conversation" means a
+    user was part of it (live turns, and reflection distilling a conversation
+    the user just had); "proactive" means an unattended turn observed it with
+    nobody around. The distinction is epistemics, not bookkeeping — a fact no
+    user ever heard or confirmed deserves a hedge when it is spoken back, and
+    recall renders exactly that hedge."""
 
     def to_markdown(self) -> str:
+        # The description sits on one frontmatter line, so any newline in it
+        # would spill into the block and be reparsed as another `key: value` —
+        # a model-supplied "foo\nkind: identity" would spoof the kind. Collapse
+        # whitespace to keep the frontmatter a flat, unforgeable header.
+        description = " ".join(self.description.split())
         return (
             "---\n"
             f"name: {self.name}\n"
-            f"description: {self.description}\n"
+            f"description: {description}\n"
             f"kind: {self.kind}\n"
             f"created_at: {self.created_at:.0f}\n"
+            f"context: {self.context}\n"
             "---\n\n"
             f"{self.content.strip()}\n"
         )
@@ -149,8 +170,25 @@ class MemoryStore:
         return sorted(found, key=lambda m: m.created_at, reverse=True)
 
     def get(self, name: str) -> Memory | None:
-        path = self._dir / f"{slugify(name)}.md"
-        return self._read(path) if path.exists() else None
+        return self._resolve(name)
+
+    def _resolve(self, name: str) -> Memory | None:
+        """Find a memory by name, tolerating hand-authored files.
+
+        The fast path is the slug filename ``write`` uses. But a file the user
+        created by hand may be named anything, with its real name in the
+        frontmatter, so a miss falls back to scanning for a memory whose name
+        (or filename stem) matches — otherwise ``get``/``forget`` can't touch
+        exactly the memories the module invites the user to hand-edit.
+        """
+        direct = self._dir / f"{slugify(name)}.md"
+        if direct.exists():
+            return self._read(direct)
+        target = slugify(name)
+        for memory in self.all():
+            if slugify(memory.name) == target or memory.path.stem == name:
+                return memory
+        return None
 
     def _read(self, path: Path) -> Memory | None:
         try:
@@ -193,16 +231,28 @@ class MemoryStore:
             content=match.group(2).strip(),
             created_at=created,
             path=path,
+            # Files predating the field (and hand-written ones) read as
+            # conversation-provenance: the user made or saw them.
+            context=meta.get("context", "conversation"),
         )
 
     # ── writing ──────────────────────────────────────────────────────────────
 
-    def write(self, description: str, content: str, kind: str = "fact") -> Memory:
+    def write(
+        self,
+        description: str,
+        content: str,
+        kind: str = "fact",
+        context: str = "conversation",
+    ) -> Memory:
         """Create or replace a memory.
 
         Named from its description, so saving a refined version of something
         Ciel already knows overwrites it instead of accumulating near-duplicates
-        that later contradict each other.
+        that later contradict each other. ``context`` is the write provenance
+        (see the field on :class:`Memory`); a rewrite keeps the original
+        created_at but takes the new context — the latest write is the claim
+        being made now.
         """
         if kind not in VALID_KINDS:
             kind = "fact"
@@ -218,6 +268,7 @@ class MemoryStore:
             content=content.strip(),
             created_at=existing.created_at if existing else time.time(),
             path=path,
+            context=context,
         )
 
         self._dir.mkdir(parents=True, exist_ok=True)
@@ -227,12 +278,12 @@ class MemoryStore:
         return memory
 
     def forget(self, name: str) -> bool:
-        path = self._dir / f"{slugify(name)}.md"
-        if not path.exists():
+        memory = self._resolve(name)
+        if memory is None:
             return False
-        path.unlink()
+        memory.path.unlink(missing_ok=True)
         self._write_human_index()
-        log.info("forgot memory: %s", name)
+        log.info("forgot memory: %s", memory.name)
         return True
 
     # ── search ───────────────────────────────────────────────────────────────

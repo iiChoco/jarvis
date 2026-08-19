@@ -41,10 +41,6 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 # ── fakes ────────────────────────────────────────────────────────────────────
 
-class FakeResult:
-    """Duck-typed ResultMessage — isinstance is checked, so we subclass."""
-
-
 def make_result(session_id: str, cost: float):
     from claude_agent_sdk import ResultMessage
 

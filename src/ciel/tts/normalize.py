@@ -30,8 +30,10 @@ _RESPELL: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bm+-?h+m+\b", re.IGNORECASE), "mm-hmm"),
     (re.compile(r"\bh+m+\b", re.IGNORECASE), "hmm"),
     # Hyphen guards keep this off the halves of an already-canonical
-    # "mm-hmm" produced by the rule above.
-    (re.compile(r"(?<!-)\bm{2,}\b(?!-)", re.IGNORECASE), "mmm"),
+    # "mm-hmm" produced by the rule above. The digit-space guard keeps it off
+    # the unit "mm": "50 mm" is a measurement, not a hum, and respelling it to
+    # "50 mmm" makes the voice hum a number's units.
+    (re.compile(r"(?<!-)(?<!\d\s)\bm{2,}\b(?!-)", re.IGNORECASE), "mmm"),
 ]
 
 # Still vowel-free and still unverified as hums — stripped as before.

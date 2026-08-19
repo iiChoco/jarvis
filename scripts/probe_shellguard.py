@@ -199,6 +199,30 @@ async def main() -> None:
         ("launchctl load com.evil.plist", "deny"),
         ("osascript -e 'tell app \"Messages\"'", "deny"),
         ("", "deny"),
+        # Obfuscated credential paths: quotes, backslashes, and globs all
+        # resolve to a forbidden name once the shell sees them, so the gate
+        # must too — these slipped through literal name-matching before.
+        ('cat ~/.a"w"s/credentials', "deny"),
+        ("cat ~/.s\\sh/config", "deny"),
+        ("cat ~/.??h/id_rsa", "deny"),
+        # A bare & is a command separator: the second command must reach the
+        # deny scan, not hide inside the first segment.
+        ("ls & rm -rf ~", "deny"),
+        ("git status & sudo reboot", "deny"),
+        # Path-qualified and wrapper-fronted privilege escalation / rm must
+        # normalize to the bare name for the deny scan.
+        ("/usr/bin/sudo ls", "deny"),
+        ("/bin/rm -rf ~", "deny"),
+        ("env sudo ls", "deny"),
+        ("nohup sudo ls", "deny"),
+        # sort/uniq can write a file, so they are no longer quiet.
+        ("ps | sort", "confirm"),
+        ("ls | uniq", "confirm"),
+        ("printf 'x\\n' | sort -o ~/notes.txt", "confirm"),  # write target -> confirm
+        ("printf 'x\\n' | sort -o ~/.zshrc", "deny"),  # forbidden name still bites
+        # Legitimate globs that match no forbidden name stay quiet.
+        ("grep -r foo *.py", "quiet"),
+        ("echo sudo", "quiet"),  # the word sudo as an argument, not the command
     ]
     cfg = ShellConfig()
     for command, expected in table:

@@ -96,6 +96,11 @@ class WhisperSTT:
             # short valid utterances entirely.
             vad_filter=False,
             condition_on_previous_text=False,  # stops one bad decode cascading
+            # Two fallback temperatures, not the default six-step ladder —
+            # each step is a full re-decode, and the worst case (six decodes
+            # of a noisy utterance) is all spent while the user waits. See
+            # the mlx engine for the long version.
+            temperature=[0.0, 0.4],
         )
         return " ".join(segment.text.strip() for segment in segments).strip()
 

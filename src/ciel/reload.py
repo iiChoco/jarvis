@@ -59,7 +59,17 @@ class SourceWatcher:
                     for path in root.rglob("*.py"):
                         if "__pycache__" in path.parts:
                             continue
-                        snap[path] = path.stat().st_mtime
+                        try:
+                            snap[path] = path.stat().st_mtime
+                        except OSError:
+                            # rglob yielded it, so it exists; a stat blip here
+                            # is transient. Carry the last reading forward
+                            # rather than dropping the file — dropping it (and,
+                            # before, every file after it, since one failure
+                            # abandoned the whole scan) reads as a mass removal
+                            # and fires a spurious reload.
+                            if path in self._baseline:
+                                snap[path] = self._baseline[path]
             except OSError:
                 continue
         return snap

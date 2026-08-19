@@ -31,6 +31,15 @@ dependencies = [
     # capture, because `screencapture` without the grant silently omits every
     # window instead of failing.
     "pyobjc-framework-Quartz>=10.1",
+    # Contact resolution: an in-process CNContactStore query (<50 ms) instead
+    # of driving Contacts.app over AppleScript (1-4 s, and it launches the
+    # app). The AppleScript path survives as the fallback.
+    "pyobjc-framework-Contacts>=10.1",
+    # Calendar proximity nudges (Vigil): EventKit reads the local calendar
+    # store in-process — AppleScript against Calendar.app takes seconds and
+    # launches the app, and the store's SQLite schema churns across macOS
+    # releases. Needs the one-time Calendars permission on first use.
+    "pyobjc-framework-EventKit>=10.1",
 ]
 
 [project.optional-dependencies]

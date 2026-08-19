@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import sys
 import time
 from contextlib import aclosing
 from types import TracebackType
@@ -29,6 +30,8 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    CLIConnectionError,
+    ProcessError,
     ResultMessage,
     StreamEvent,
     TextBlock,
@@ -40,27 +43,46 @@ from ciel.brain.session import SessionStore
 from ciel.brain.recorder import ActionRecorder
 from ciel.brain.shellguard import ShellGuard
 from ciel.brain.toolguard import ConfirmToolGuard
+from ciel.brain.witness import UnattendedMode, WitnessGuard, witness_allowed
 from ciel.config import BrainConfig, Config
 from ciel.journal import ActionJournal
 
 log = logging.getLogger(__name__)
 
-# A sentence ends at .?! followed by whitespace — but not when the period is
-# part of a decimal ("3.5" — the lookahead already rejects it, since the next
-# character is a digit) or an ellipsis. Getting this wrong is audible: a
-# premature split makes Ciel pause mid-number.
-_BOUNDARY = re.compile(r"(?<!\.)([.!?])(?=[\s\"')\]]|$)")
+# Transport failures that mean the SDK subprocess is gone (crash, OOM-kill,
+# killed during sleep). Distinct from a model/turn error: the client object is
+# dead and must be torn down so the next turn reconnects rather than querying a
+# corpse forever. BrokenPipe/ConnectionError cover the OS-level write to a
+# terminated process underneath the SDK's own wrappers.
+_TRANSPORT_ERRORS = (CLIConnectionError, ProcessError, BrokenPipeError, ConnectionError)
+
+# A sentence ends at .?! followed by whitespace or a closing quote/bracket — but
+# not when the period is part of a decimal ("3.5" — the lookahead rejects it,
+# since the next character is a digit) or an ellipsis. End-of-buffer is
+# deliberately NOT a boundary: mid-stream the buffer ends at an arbitrary delta
+# cut, so "3." at a delta boundary must wait for the next delta rather than
+# split the number — the true end of a response is emitted by ask()'s tail flush
+# instead. Getting this wrong is audible: a premature split pauses mid-number.
+_BOUNDARY = re.compile(r"(?<!\.)([.!?])(?=[\s\"')\]])")
 
 # Abbreviations that end in a period without ending a sentence. The prompt
 # discourages these, but the model still produces them occasionally. Ordinary
 # words that double as abbreviations ("no", "us") don't belong here — "The
 # answer is no." is a complete sentence far more often than "No. 5" appears.
 _ABBREVIATIONS = frozenset({
-    "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc", "eg", "ie",
+    "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc",
     "approx", "fig", "inc", "ltd", "co", "uk",
 })
 
-_TRAILING_WORD = re.compile(r"([A-Za-z]+)\.$")
+# Abbreviations recognized only in their dotted spelling ("e.g.", "i.e.",
+# "a.m.", "U.S."). Their dotless forms ("eg", "am", "us") are ordinary words
+# that legitimately end sentences, so they qualify only when the trailing token
+# actually carried internal periods.
+_DOTTED_ABBREVIATIONS = frozenset({"eg", "ie", "am", "pm", "us"})
+
+# The trailing token before a sentence-final period, keeping any internal dots
+# so "e.g." is seen whole rather than as a bare "g".
+_TRAILING_WORD = re.compile(r"([A-Za-z.]+)\.$")
 
 
 def _is_real_boundary(candidate: str) -> bool:
@@ -68,7 +90,13 @@ def _is_real_boundary(candidate: str) -> bool:
     match = _TRAILING_WORD.search(candidate.strip())
     if match is None:
         return True
-    return match.group(1).lower() not in _ABBREVIATIONS
+    token = match.group(1)
+    word = token.replace(".", "").lower()
+    if word in _ABBREVIATIONS:
+        return False
+    if "." in token and word in _DOTTED_ABBREVIATIONS:
+        return False
+    return True
 
 
 class Brain:
@@ -139,24 +167,42 @@ class Brain:
         # reach allowed_tools' quiet tier, and the calls deny like any other
         # unresolved confirmation would.
         self._tool_guard: ConfirmToolGuard | None = None
-        self._gated_tools = frozenset(
+        gated = {
             f"mcp__{name}__{tool}"
             for name, entry in config.mcp.items()
             for tool in entry.confirm
-        )
+        }
+        # The in-process iMessage send is irreversible and outward-acting, so it
+        # belongs behind the same enforced spoken-yes gate as connector sends —
+        # not merely journaled after the fact. Adding it here means the hook
+        # blocks the call for a real confirmation, and _build_options withholds
+        # it entirely when no confirmer exists (as it does for connector tools),
+        # rather than letting it run silently on the tool description's say-so.
+        if config.messages.enabled and config.messages.allow_send:
+            gated.add("mcp__ciel__send_message")
+        self._gated_tools = frozenset(gated)
         if self._gated_tools and confirmer is not None:
             self._tool_guard = ConfirmToolGuard(self._gated_tools, confirmer)
             log.info("%d connector tools behind the voice gate", len(self._gated_tools))
 
+        # The Witness rule (see witness.py): while unattended mode is engaged
+        # — reflection, Vigil's proactive turns — everything outside the
+        # read-only observers and Ciel's own notebook denies. Always
+        # constructed, not gated on config.proactive.enabled: reflection is
+        # unattended today, and its "no messages, no searches" was a request
+        # in the prompt until this made it enforcement. Disengaged, the hook
+        # is a dict lookup that returns immediately.
+        self._unattended = UnattendedMode()
+        self._witness_guard = WitnessGuard(self._unattended, witness_allowed(config))
+
         # The recorder watches whatever can mutate: the file tools and Bash
-        # (built into it), every confirm-gated connector tool, and the
-        # iMessage send. It observes only — journaling lives outside the
-        # guards so nothing here can grow into an enforcement path.
+        # (built into it) and every confirm-gated tool (connector sends plus the
+        # iMessage send, both already in _gated_tools). It observes only —
+        # journaling lives outside the guards so nothing here can grow into an
+        # enforcement path.
         self._recorder: ActionRecorder | None = None
         if journal is not None:
-            self._recorder = ActionRecorder(
-                journal, self._gated_tools | {"mcp__ciel__send_message"}
-            )
+            self._recorder = ActionRecorder(journal, self._gated_tools)
 
     @property
     def session_id(self) -> str | None:
@@ -206,10 +252,31 @@ class Brain:
         if self._tool_guard is None and extra_tools:
             extra_tools = [t for t in extra_tools if t not in self._gated_tools]
 
+        # The base set of built-in tools actually shipped to the model —
+        # allowed_tools below merely auto-approves, it does not restrict
+        # availability. Left unset, the CLI defaults to the FULL Claude Code
+        # toolset, so every disabled tool still rides along as schema in
+        # context (cold prefill on the first turn after each rotation) and
+        # sits there callable-but-denied, inviting the occasional wasted
+        # round trip (a TodoWrite into "dontAsk", say). Mirrors the
+        # allowlist; MCP tools arrive via mcp_servers and don't belong here.
+        # The web pair stays whenever deep-thought exists, even if the
+        # allowlist drops it: the subagent draws its tools from this base
+        # set, and its whole point is being able to search.
+        base_tools = list(dict.fromkeys([
+            *self._brain_config.allowed_tools,
+            *file_tools,
+            *(["Bash"] if self._shell_guard else []),
+            *(["Agent", "Task", "WebSearch", "WebFetch"]
+              if self._brain_config.deep_effort else []),
+        ]))
+
         return ClaudeAgentOptions(
             model=self._brain_config.model,
+            tools=base_tools,
             system_prompt=build_system_prompt(
                 self._memory_index_provider() if self._memory_index_provider else None,
+                personality=self._brain_config.personality,
                 workspace=str(self._guard.workspace) if self._guard else None,
                 shell=self._shell_guard is not None,
                 confirmed_actions=self._tool_guard is not None,
@@ -272,7 +339,8 @@ class Brain:
             effort=self._brain_config.effort,
             # The escalation valve: ordinary turns run at the low default
             # above, and when the model judges a question genuinely hard it
-            # hands the question to this agent — same model, real effort.
+            # hands the question to this agent — real effort, and whatever
+            # model deep_model names (a stronger one, when the driver is fast).
             # Effort is fixed per connection in the SDK, so escalation is a
             # subagent with its own level rather than a mid-session switch.
             agents={
@@ -296,7 +364,7 @@ class Brain:
                         "no lists, no URLs."
                     ),
                     tools=["WebSearch", "WebFetch"],
-                    model="inherit",
+                    model=self._brain_config.deep_model,
                     effort=self._brain_config.deep_effort,
                 ),
             }
@@ -312,10 +380,14 @@ class Brain:
         """Merge the hook matchers of whichever guards and observers exist.
 
         Guards first, recorder last: when a guard denies, the recorder's
-        pre-hook should never have snapshotted a call that won't run.
+        pre-hook should never have snapshotted a call that won't run. The
+        Witness guard leads even the guards — its deny must land before a
+        confirm guard consults the (suppressed) broker for an answer that
+        can only be no.
         """
         hooks: dict[str, list] = {}
         pre = hooks.setdefault("PreToolUse", [])
+        pre.extend(self._witness_guard.as_hooks()["PreToolUse"])
         if self._guard is not None:
             pre.extend(self._guard.as_hooks()["PreToolUse"])
         if self._shell_guard is not None:
@@ -370,6 +442,11 @@ class Brain:
         )
         await client.connect()
         self._client = client
+        # A fresh client has no abandoned turn behind it, so any drain debt from
+        # the previous (now-discarded) client is void. Centralizing the reset
+        # here means every reconnect path — lazy, rotation, post-eviction —
+        # starts clean without each having to remember to clear it.
+        self._needs_drain = False
         self._last_connect_s = time.monotonic() - started
         log.info(
             "brain connected in %.2fs (model=%s)",
@@ -417,6 +494,23 @@ class Brain:
             except Exception:  # pragma: no cover - races with turn completion
                 log.debug("interrupt failed (turn likely already done)", exc_info=True)
 
+    async def _evict_client(self) -> None:
+        """Tear down a client whose subprocess has died so the next turn
+        reconnects. Callers hold the turn lock; this must not re-acquire it.
+
+        Without this a dead client stays installed and every later ask() —
+        which only reconnects when ``_client is None`` — queries the corpse and
+        fails identically, wedging Ciel until the process restarts.
+        """
+        client = self._client
+        self._client = None
+        self._needs_drain = False
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:  # noqa: BLE001 - it is already dead; best effort
+                log.debug("disconnect of dead client failed", exc_info=True)
+
     # ── the conversational turn ──────────────────────────────────────────────
 
     async def ask(self, text: str) -> AsyncIterator[tuple[str, str]]:
@@ -443,6 +537,7 @@ class Brain:
         buffer = ""
         spoken_any = False
         saw_result = False
+        query_sent = False
         last_kind: str | None = None
 
         await self._turn_lock.acquire()
@@ -455,9 +550,15 @@ class Brain:
 
             await self._drain_stale()
             await self._client.query(text)
+            query_sent = True
 
             async for message in self._client.receive_response():
                 if isinstance(message, StreamEvent):
+                    # Deep-thought subagent output carries its spawner's
+                    # tool-use id. Its internal streaming must never be spoken —
+                    # the parent turn relays the final answer as its own text.
+                    if message.parent_tool_use_id is not None:
+                        continue
                     raw = message.event
                     if raw.get("type") == "content_block_start":
                         block = raw.get("content_block") or {}
@@ -502,7 +603,11 @@ class Brain:
                 elif isinstance(message, AssistantMessage):
                     # Fallback for a non-streaming turn. Partial events normally
                     # cover everything; this catches the case where they don't,
-                    # so Ciel never goes mute on a valid response.
+                    # so Ciel never goes mute on a valid response. Subagent
+                    # messages (a non-None parent) are skipped for the same
+                    # reason as their stream events — only the parent is voiced.
+                    if message.parent_tool_use_id is not None:
+                        continue
                     if not spoken_any and not buffer:
                         for block in message.content:
                             if isinstance(block, TextBlock) and block.text.strip():
@@ -518,16 +623,47 @@ class Brain:
             if tail:
                 yield _label(last_kind), tail
         finally:
-            # Abandoned mid-stream (barge-in): the rest of this turn's
-            # messages — including its terminal ResultMessage — are still
-            # queued, and receive_response() stops at the first ResultMessage
-            # it sees, so they would otherwise be consumed as the start of the
-            # *next* turn's response. Runs promptly only because consumers
-            # close the generator (see the docstring) — that close is also
-            # what releases the lock.
-            if not saw_result:
+            exc = sys.exc_info()[1]
+            if isinstance(exc, _TRANSPORT_ERRORS):
+                # The SDK subprocess died (mid-query or mid-stream). Evict the
+                # dead client so the next turn reconnects instead of querying a
+                # corpse forever; the exception still propagates so the pipeline
+                # logs the failed turn as before, but recovery is now automatic.
+                log.warning("brain transport died; evicting client")
+                await self._evict_client()
+            elif query_sent and not saw_result:
+                # Abandoned mid-stream (barge-in): the rest of this turn's
+                # messages — including its terminal ResultMessage — are still
+                # queued, and receive_response() stops at the first ResultMessage
+                # it sees, so they would otherwise be consumed as the start of
+                # the *next* turn's response. Gated on query_sent so a turn that
+                # never reached query() (a failed connect) doesn't saddle the
+                # next turn with a pointless 10-second drain of an empty stream.
+                # Runs promptly only because consumers close the generator (see
+                # the docstring) — that close is also what releases the lock.
                 self._needs_drain = True
             self._turn_lock.release()
+
+    def unattended(self, label: str = "unattended"):
+        """Engage the Witness rule for the enclosing block.
+
+        Ambient like confirmation suppression, and used alongside it::
+
+            with confirm.suppress(), brain.unattended("reflection"):
+                ...one turn with nobody listening...
+
+        The label names the kind of unattended turn so writes made inside it
+        can carry their provenance. The same hazard applies to both flags:
+        if the turn inside has a timeout, interrupt the brain on expiry so
+        neither lifts while the turn is still generating.
+        """
+        return self._unattended.engage(label)
+
+    @property
+    def unattended_context(self) -> str | None:
+        """The current unattended engagement's label, None when attended.
+        Read by the memory tools to stamp write provenance."""
+        return self._unattended.context
 
     async def reflect(self, prompt: str) -> None:
         """One silent turn: send the prompt, discard everything it says.
@@ -560,7 +696,6 @@ class Brain:
         """Consume messages left over from a turn abandoned mid-stream."""
         if not self._needs_drain or self._client is None:
             return
-        self._needs_drain = False
 
         client = self._client
 
@@ -571,6 +706,12 @@ class Brain:
 
         try:
             await asyncio.wait_for(consume(), timeout=10.0)
+            # Cleared only on success: a drain that times out has NOT consumed
+            # the abandoned turn's ResultMessage, so the flag must survive to
+            # retry on the next turn. Clearing it up front (as before) left the
+            # stale messages in the stream to be misread as the next turn's
+            # answer, offsetting every reply by one from then on.
+            self._needs_drain = False
         except Exception:  # noqa: BLE001 - a failed drain must not block the turn
             log.debug("could not drain the abandoned turn", exc_info=True)
 

@@ -49,9 +49,11 @@ class SessionStore:
                 session_id=str(raw["session_id"]),
                 updated_at=float(raw["updated_at"]),
             )
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-            # A corrupt state file should cost a fresh conversation, never a
-            # crash on startup.
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            # A corrupt *or* unreadable state file should cost a fresh
+            # conversation, never a crash on startup — OSError covers a
+            # permission error and the exists()/read_text() race where the file
+            # vanishes in between (FileNotFoundError is an OSError).
             log.warning("session state at %s is unreadable — starting fresh", self._path)
             return None
 

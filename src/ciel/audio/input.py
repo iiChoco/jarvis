@@ -24,6 +24,13 @@ from ciel.config import CHANNELS, FRAME_BYTES, FRAME_SAMPLES, SAMPLE_RATE, Audio
 
 log = logging.getLogger(__name__)
 
+# A live microphone delivers frames continuously — silence is frames of near
+# zero, not the absence of frames — so a multi-second gap means PortAudio
+# stopped calling the callback: the input device was lost. frames() would
+# otherwise wait forever, silently freezing the whole pipeline.
+_STALL_TIMEOUT_S = 3.0
+_STALL_LIMIT = 2  # consecutive stalls tolerated before ending capture
+
 
 def pcm_to_float(frame: bytes) -> np.ndarray:
     """int16 PCM bytes to float32 in [-1, 1], the form every model wants."""
@@ -125,15 +132,40 @@ class MicStream:
     # ── consumption ──────────────────────────────────────────────────────────
 
     async def frames(self) -> AsyncIterator[bytes]:
-        """Yield 30 ms int16 PCM frames until the stream is closed."""
+        """Yield 30 ms int16 PCM frames until the stream is closed.
+
+        Ends if the microphone stalls (no frames for several seconds), so a
+        disconnected input device stops the loop cleanly — the pipeline can
+        shut down and be restarted — instead of blocking here forever.
+        """
         assert self._wakeup is not None, "MicStream used outside its context manager"
+        stalls = 0
         while not self._closed:
             while self._queue:
                 yield self._queue.popleft()
             self._wakeup.clear()
             if self._queue:  # raced with the callback between pop and clear
                 continue
-            await self._wakeup.wait()
+            try:
+                await asyncio.wait_for(self._wakeup.wait(), timeout=_STALL_TIMEOUT_S)
+                stalls = 0
+            except asyncio.TimeoutError:
+                if self._closed:
+                    break
+                stalls += 1
+                if stalls < _STALL_LIMIT:
+                    log.warning(
+                        "no microphone audio for %.0fs — waiting for the device",
+                        _STALL_TIMEOUT_S,
+                    )
+                    continue
+                log.error(
+                    "no microphone audio for %.0fs — the input device was likely "
+                    "disconnected; ending capture so the pipeline can shut down "
+                    "instead of hanging",
+                    _STALL_TIMEOUT_S * stalls,
+                )
+                return
 
     def drain(self) -> None:
         """Discard buffered audio.

@@ -41,12 +41,17 @@ from ciel.audio.input import MicStream, float_to_pcm
 from ciel.audio.output import Player
 from ciel.audio.speaker import build_speaker_gate
 from ciel.audio.vad import Endpointer
-from ciel.audio.wake import WakeDetector, build_wake_detector
+from ciel.audio.wake import HotkeyWake, WakeDetector, build_wake_detector
 from ciel.brain.agent import Brain
-from ciel.brain.prompt import REFLECTION_PROMPT
+from ciel.brain.prompt import REFLECTION_PROMPT, proactive_prompt
 from ciel.brain.tools import build_tool_server
+from ciel.brain.tools.memory import bind_context as bind_memory_context
 from ciel.config import SAMPLE_RATE, AudioConfig, Config
 from ciel.confirm import VoiceConfirmBroker
+from ciel.proactive.calendar import CalendarWatcher
+from ciel.proactive.events import EventQueue, ProactiveEvent
+from ciel.proactive.policy import Decision, InterruptionPolicy
+from ciel.proactive.presence import PresenceProbe
 from ciel.reload import SourceWatcher, default_roots
 from ciel.commands import Command, match as match_command
 from ciel.stt import SpeechToText, build_stt
@@ -96,6 +101,19 @@ def trails_off(heard: str, audio: AudioConfig) -> bool:
     return True
 
 
+def proactive_valve(reply: str) -> str | None:
+    """The one-way valve's de-escalations, read off an unattended reply.
+
+    A whole reply of exactly SKIP or HOLD (punctuation and quotes tolerated,
+    case ignored) is the model declining or deferring — returned as the
+    token. Anything else, including SKIP buried inside a sentence, is a
+    reply to deliver: the valve only ever quiets an event, so ambiguity
+    resolves toward speaking what the policy already approved.
+    """
+    match = re.fullmatch(r"\W*(skip|hold)\W*", reply, re.IGNORECASE)
+    return match.group(1).upper() if match else None
+
+
 def build_tts(config: Config) -> TextToSpeech:
     """Instantiate the configured speech engine.
 
@@ -137,12 +155,20 @@ class IdleSchedule:
         self._reflect_at: float | None = None
         self._rotate_at: float | None = None
 
-    def conversation_ended(self, now: float) -> None:
-        """Re-arms both deadlines — rotation is always relative to the
-        *latest* conversation, not the first."""
-        self._reflect_at = (
-            now + self._reflect_delay if self._reflect_delay is not None else None
-        )
+    def conversation_ended(self, now: float, *, brain: bool = True) -> None:
+        """Re-arms the deadlines — rotation always, relative to the *latest*
+        conversation, not the first.
+
+        Reflection is armed only when the brain took part: a local-command
+        exchange ("ten minute timer") never touches the session, so reflecting
+        after one is a full model turn over a transcript with nothing new in
+        it. A reflect deadline already pending from an earlier brain
+        conversation survives such an exchange untouched — that conversation
+        is still owed its one opportunity before rotation."""
+        if brain:
+            self._reflect_at = (
+                now + self._reflect_delay if self._reflect_delay is not None else None
+            )
         self._rotate_at = now + self._rotate_delay
 
     def due(self, now: float) -> str | None:
@@ -237,6 +263,15 @@ class Pipeline:
             journal=self._journal,
             projects_index_provider=self._projects.index_prompt if self._projects else None,
         )
+        # Memory writes carry provenance: "proactive" when a Vigil turn with
+        # nobody around is writing, "conversation" otherwise — reflection
+        # included, since it distills a conversation the user was part of.
+        # Recall renders the hedge for proactive-written facts.
+        bind_memory_context(
+            lambda: "proactive"
+            if self._brain.unattended_context == "proactive"
+            else "conversation"
+        )
         self._transcript: Transcript | None = (
             Transcript(config.transcripts.dir) if config.transcripts.enabled else None
         )
@@ -247,12 +282,18 @@ class Pipeline:
         self._followup_until: float | None = None
         self._spoke = False
         self._conversed = False  # any speech since the last WAITING — outlives _spoke
+        self._brain_conversed = False  # a *brain* turn since the last WAITING —
+        # local commands leave it False, so Closure never reflects a
+        # conversation the session file has no trace of
         self._pending_text: str | None = None
         self._continue_listening = False
-        self._typed: deque[str] = deque()
-        """Lines from stdin awaiting their turn (Isomorphism). A deque, not a
-        variable: lines can arrive faster than turns complete, and dropping
-        one would silently eat a request the user watched themselves type."""
+        self._typed: deque[tuple[float, str]] = deque()
+        """Lines from stdin awaiting their turn (Isomorphism), each stamped with
+        its monotonic arrival time. A deque, not a variable: lines can arrive
+        faster than turns complete, and dropping one would silently eat a
+        request the user watched themselves type. The timestamp lets a pending
+        confirmation tell a genuine answer from a request that predates the
+        question (see the frame loop)."""
         self._stdin_task: asyncio.Task[None] | None = None
 
         self._schedule = IdleSchedule(
@@ -269,6 +310,40 @@ class Pipeline:
         self._maintenance: asyncio.Task[None] | None = None
         """Closure/rotation in flight. Deliberately not the ``turn`` variable:
         turns re-raise via turn.result(); maintenance swallows its failures."""
+
+        # Vigil (see ciel.proactive): the queue is the only piece the frame
+        # loop ever touches at frame rate, and only through its `pending`
+        # boolean — policy, presence, and Quartz run at most once per
+        # policy_poll_s, and only while something is actually waiting.
+        self._events: EventQueue | None = None
+        self._policy: InterruptionPolicy | None = None
+        self._presence: PresenceProbe | None = None
+        self._vigil_watchers: list = []
+        self._next_policy_check = 0.0
+        self._hold_sentinel = config.state_dir / "hold"
+        """The emergency brake: while this file exists, no proactive event is
+        delivered — they queue and wait. A file sentinel rather than config
+        because it can be tripped from outside the process (`touch
+        ~/.ciel/hold`), survives crashes and restarts, and lifting it is
+        just as visible. In-flight speech and user-requested timers are
+        untouched — the brake stops new starts, never running work."""
+        self._hold_engaged = False  # log the engagement once, not per poll
+        if config.proactive.enabled:
+            self._events = EventQueue(
+                config.proactive.state_file,
+                config.proactive.held_max_age_h * 3600,
+            )
+            self._policy = InterruptionPolicy(config.proactive)
+            self._presence = PresenceProbe(config.proactive)
+            if config.proactive.calendar_enabled:
+                self._vigil_watchers.append(
+                    CalendarWatcher(config.proactive, self._events)
+                )
+            log.info(
+                "vigil enabled (%d watcher%s)",
+                len(self._vigil_watchers),
+                "" if len(self._vigil_watchers) == 1 else "s",
+            )
 
         self._watcher: SourceWatcher | None = (
             SourceWatcher(default_roots(config.state_dir))
@@ -298,7 +373,8 @@ class Pipeline:
                     noise_floor=lambda: self._noise_floor,
                     record=self._record,
                 )
-                await player.play(self._tts.stream("Ciel here."))
+                greeting = random.choice(self._config.wake.greeting_phrases)
+                await player.play(self._tts.stream(greeting))
                 mic.drain()
                 self._stdin_task = asyncio.create_task(self._read_stdin())
                 self._announce_ready()
@@ -326,10 +402,17 @@ class Pipeline:
                     # stops receiving frames never resolves.
                     if self._confirm.active:
                         # A typed line while a question is pending is an
-                        # answer, if the broker will take it; otherwise it
-                        # stays queued and becomes the next turn.
-                        if self._typed and self._confirm.answer(self._typed[0]):
-                            self._typed.popleft()
+                        # answer — but only if it arrived *after* the question
+                        # was put. A line typed earlier (while the turn was
+                        # still busy) is the user's next request, and consuming
+                        # it would eat that request and let a stray "yes"/"no"
+                        # in it silently decide the gated action. Predating
+                        # lines stay queued and become the next turn.
+                        asked = self._confirm.asked_at
+                        if self._typed and asked is not None:
+                            ts, line = self._typed[0]
+                            if ts >= asked and self._confirm.answer(line):
+                                self._typed.popleft()
                         self._confirm.feed(frame)
                         continue
 
@@ -369,9 +452,61 @@ class Pipeline:
                             await self._brain.interrupt()
                         self._state = State.BUSY
                         self._barge_run = 0
+                        _ts, line = self._typed.popleft()
                         turn = asyncio.create_task(
-                            self._handle_typed_turn(self._typed.popleft())
+                            self._handle_typed_turn(line)
                         )
+                        continue
+
+                    if (
+                        self._events is not None
+                        and self._state is State.WAITING
+                        and self._events.pending
+                        and time.monotonic() >= self._next_policy_check
+                    ):
+                        # Vigil: a pending event gets its policy decision.
+                        # Fourth in line behind confirmations, timers, and
+                        # the keyboard — the user always outranks the
+                        # machine — and stricter than the timer lane on
+                        # purpose: WAITING only, never into a live listening
+                        # window; the held-notes path covers those moments.
+                        # The frame-rate cost is the boolean above; presence
+                        # and policy run at most once per policy_poll_s.
+                        self._next_policy_check = (
+                            time.monotonic()
+                            + self._config.proactive.policy_poll_s
+                        )
+                        if self._hold_sentinel.exists():
+                            # The emergency brake (see __init__): events wait,
+                            # nothing is dropped, and the engagement is logged
+                            # once rather than every poll.
+                            if not self._hold_engaged:
+                                self._hold_engaged = True
+                                log.info(
+                                    "vigil holding — remove %s to resume",
+                                    self._hold_sentinel,
+                                )
+                            continue
+                        if self._hold_engaged:
+                            self._hold_engaged = False
+                            log.info("vigil hold lifted")
+                        decision, event = self._decide_proactive()
+                        if event is not None and decision is not None:
+                            if decision.action == "speak":
+                                if self._maintenance is not None and not self._maintenance.done():
+                                    # Same hastening as the typed lane: the
+                                    # proactive turn serializes on the
+                                    # brain's lock.
+                                    await self._brain.interrupt()
+                                self._state = State.BUSY
+                                self._barge_run = 0
+                                turn = asyncio.create_task(
+                                    self._run_proactive_turn(event, player, mic)
+                                )
+                            elif decision.action == "hold":
+                                self._events.hold(event)
+                            else:
+                                self._events.drop(event, time.time())
                         continue
 
                     if self._state is State.WAITING:
@@ -524,7 +659,14 @@ class Pipeline:
                     log.info("%s", reason)
                     print(f"\n  [{reason} — ignored]", flush=True)
                     self._record("event", reason)
-                    return
+                    if self._pending_text is None:
+                        return
+                    # A stranger spoke during a continuation window, but the
+                    # user's held thought is still owed an answer — the same
+                    # courtesy the followup-expiry and noise-blip paths give.
+                    # Drop the stranger's audio and answer what the user had
+                    # already said by falling through with no utterance.
+                    utterance = None
 
             if utterance is not None:
                 heard = await self._stt.transcribe(utterance)
@@ -559,8 +701,12 @@ class Pipeline:
                     text = pending
                 self._pending_text = None
             else:
-                # The continuation window lapsed with nothing more said.
-                text = pending_text
+                # Nothing more was said, or a stranger interrupted the
+                # continuation window. Either way, answer the held thought:
+                # pending_text carries it when the window lapsed, and
+                # self._pending_text when a rejected utterance dropped us here.
+                text = pending_text if pending_text is not None else self._pending_text
+                self._pending_text = None
             assert text is not None
 
             # Mechanical requests skip the brain entirely: no model latency,
@@ -591,9 +737,15 @@ class Pipeline:
             # reply's audio ends — so the "starting now" the user just heard
             # is when the count actually starts, not the tool call seconds
             # earlier. In the finally so a turn that errors after arming
-            # still starts what it promised.
+            # still starts what it promised. Guarded: this is disk I/O in a
+            # finally, and an OSError escaping here is re-raised by turn.result()
+            # in the frame loop, taking the whole assistant down over a timer
+            # that merely failed to persist.
             if self._timers is not None:
-                self._timers.commit_pending()
+                try:
+                    self._timers.commit_pending()
+                except Exception:  # noqa: BLE001 - a failed commit must not crash the loop
+                    log.exception("could not start a pending timer")
             # Ciel's own voice was captured while the speakers were live;
             # drained so it isn't transcribed as the user's next turn. Not on
             # the continuation path though: nothing was played there, and the
@@ -643,6 +795,9 @@ class Pipeline:
                 return
 
             started = time.monotonic()
+            # Held Vigil notes, after the local-command bypass — a "cancel
+            # the timer" line shouldn't consume notes no model will see.
+            text = self._with_held_notes(text)
             # Same aclosing obligation as _respond: ask() holds the brain's
             # turn lock, and an abandoned generator would deadlock the next
             # turn behind it.
@@ -662,6 +817,7 @@ class Pipeline:
                     # them the same reflection, rotation the same fresh
                     # session afterwards.
                     self._conversed = True
+                    self._brain_conversed = True
             log.info(
                 "typed turn: %.2fs total, $%.4f",
                 time.monotonic() - started,
@@ -674,9 +830,13 @@ class Pipeline:
             print("  (something went wrong there — see the log)", flush=True)
         finally:
             # Same anchoring as the spoken path: a typed turn has no audio to
-            # wait for, so its timers start as the turn's text lands.
+            # wait for, so its timers start as the turn's text lands. Guarded
+            # for the same reason — a failed persist must not crash the loop.
             if self._timers is not None:
-                self._timers.commit_pending()
+                try:
+                    self._timers.commit_pending()
+                except Exception:  # noqa: BLE001 - a failed commit must not crash the loop
+                    log.exception("could not start a pending timer")
 
     async def _read_stdin(self) -> None:
         """Feed typed lines into the turn queue — the tier-one chatbox.
@@ -686,6 +846,12 @@ class Pipeline:
         pending. Consumption happens on the frame loop, not here, so the
         one-place-decides-state rule holds for the keyboard exactly as it
         does for the microphone.
+
+        This is the *only* reader of stdin. In hotkey mode a bare Enter arms
+        the wake through here rather than through a second reader in
+        HotkeyWake — two readers of one descriptor race per line, and the
+        asyncio side flips the descriptor non-blocking underneath a thread
+        blocked in readline, silently breaking Enter-to-talk.
 
         Degrades to nothing, silently, when stdin isn't readable — launchd,
         a closed terminal, probes piping their own stdin. Typed input is a
@@ -710,7 +876,11 @@ class Pipeline:
                 return
             line = raw.decode(errors="replace").strip()
             if line:
-                self._typed.append(line)
+                self._typed.append((time.monotonic(), line))
+            elif isinstance(self._wake, HotkeyWake):
+                # A bare Enter in hotkey mode is the wake signal, delivered
+                # through the one stdin reader so nothing competes for fd 0.
+                self._wake.arm()
 
     async def _run_local_command(
         self, cmd: Command, text: str, player: Player
@@ -731,9 +901,13 @@ class Pipeline:
         print(f"  ciel: {reply}")
         self._record("ciel", reply)
         self._indicator.set_state("speaking")
-        # _spoke mirrors _respond: a completed reply opens the follow-up
-        # window ("...and a five minute one too"), an interrupted one doesn't.
-        self._spoke = await player.play(self._tts.stream(reply))
+        # _spoke is set unconditionally, exactly as _respond_stream does: an
+        # interrupted reply must still open the follow-up window so the user's
+        # barge-in ("...and a five minute one too") is heard without re-waking.
+        # Setting it to the play's completion instead would drop that speech
+        # and force a fresh wake — the one behavior this is meant to avoid.
+        await player.play(self._tts.stream(reply))
+        self._spoke = True
 
     def _apply_local_command(self, cmd: Command) -> str | None:
         """Execute a local command and return what to say (None: stay quiet).
@@ -794,28 +968,52 @@ class Pipeline:
     async def _respond(self, text: str, player: Player, mic: MicStream) -> None:
         print(f"\n  you: {text}")
         self._record("user", text)
+        # Held Vigil notes ride into the model's view of this turn; the
+        # print and record above stay the user's raw words.
+        text = self._with_held_notes(text)
         started = time.monotonic()
         self._interrupted = False
 
-        # The audible "I heard you": a short filler spoken while the brain
-        # starts thinking. Launched as a task so it overlaps the model's
-        # latency instead of adding to it; every later play awaits it first
-        # so two voices never overlap. Deliberately does not set _spoke — a
-        # filler alone must not open a follow-up window.
-        ack_task: asyncio.Task[bool] | None = None
+        # The audible "I heard you": a short filler spoken if the brain is
+        # still silent after a grace window. Launched as a task so it overlaps
+        # the model's latency instead of adding to it; every later play awaits
+        # it first so two voices never overlap. A first sentence that beats
+        # the window cancels the filler unspoken — "Let me think about that."
+        # chased instantly by the answer is theater, and it would delay the
+        # real reply behind its own playback. Deliberately does not set
+        # _spoke — a filler alone must not open a follow-up window.
+        ack_task: asyncio.Task[None] | None = None
+        ack_speaking = False
         if self._config.brain.ack_phrases:
-            ack_task = asyncio.create_task(
-                player.play(self._tts.stream(random.choice(self._config.brain.ack_phrases)))
-            )
+
+            async def _ack_filler() -> None:
+                nonlocal ack_speaking
+                await asyncio.sleep(self._config.brain.ack_delay_s)
+                ack_speaking = True
+                await player.play(
+                    self._tts.stream(random.choice(self._config.brain.ack_phrases))
+                )
+
+            ack_task = asyncio.create_task(_ack_filler())
 
         async def ack_done() -> None:
             nonlocal ack_task
-            if ack_task is not None:
-                try:
-                    await ack_task
-                except Exception:  # noqa: BLE001 — a lost filler costs nothing
-                    log.debug("ack playback failed", exc_info=True)
-                ack_task = None
+            if ack_task is None:
+                return
+            if not ack_speaking:
+                # Still inside the grace window (or between sleep and speech,
+                # which is the same thing: nothing audible yet) — skip it.
+                ack_task.cancel()
+            task, ack_task = ack_task, None
+            try:
+                await task
+            except asyncio.CancelledError:
+                if not task.cancelled():
+                    # The cancellation was aimed at *us*, not the filler —
+                    # swallowing it here would eat the turn's own teardown.
+                    raise
+            except Exception:  # noqa: BLE001 — a lost filler costs nothing
+                log.debug("ack playback failed", exc_info=True)
 
         try:
             await self._respond_stream(text, player, started, ack_done)
@@ -859,9 +1057,21 @@ class Pipeline:
                         await ack_done()
                         self._indicator.set_state("speaking")
                         first_spoken = time.monotonic() - started
-                        await player.play(self._tts.stream(line))
+                        completed = await player.play(self._tts.stream(line))
                         self._spoke = True
                         self._conversed = True
+                        self._brain_conversed = True
+                        if not completed:
+                            # Barging in on the announcement means the deep
+                            # pass must die too — otherwise the subagent runs
+                            # on for a minute and then answers a question the
+                            # user already abandoned.
+                            self._interrupted = True
+                            self._confirm.cancel("interrupted")
+                            await self._brain.interrupt()
+                            print("  (interrupted)")
+                            self._record("event", "interrupted")
+                            break
                     self._indicator.set_state("thinking")
                     continue
 
@@ -900,6 +1110,7 @@ class Pipeline:
                 completed = await player.play(self._tts.stream(sentence))
                 self._spoke = True
                 self._conversed = True
+                self._brain_conversed = True
                 # Back to "thinking" between sentences: the model is still
                 # generating, and leaving it on "speaking" during the gap would
                 # misreport what Ciel is actually doing.
@@ -934,6 +1145,170 @@ class Pipeline:
                 time.monotonic() - started,
                 self._brain.last_turn_cost_usd,
             )
+
+    # ── the proactive turn (Vigil) ───────────────────────────────────────────
+
+    def _decide_proactive(self) -> tuple[Decision | None, ProactiveEvent | None]:
+        """Pop the next live event and route it through the policy.
+
+        The caller owns enacting the decision — and owns the event: whatever
+        isn't spoken must be held or dropped, never silently discarded.
+        """
+        assert (
+            self._events is not None
+            and self._policy is not None
+            and self._presence is not None
+        )
+        now = time.time()
+        event = self._events.pop_next(now)
+        if event is None:
+            return None, None
+        local = time.localtime(now)
+        decision = self._policy.decide(
+            event,
+            presence=self._presence.state(time.monotonic()),
+            spoken_today=self._events.spoken_count(
+                time.strftime("%Y-%m-%d", local)
+            ),
+            now=now,
+            local_minutes=local.tm_hour * 60 + local.tm_min,
+        )
+        log.info(
+            "vigil: %s → %s (%s)", event.summary, decision.action, decision.reason
+        )
+        return decision, event
+
+    async def _run_proactive_turn(
+        self, event: ProactiveEvent, player: Player, mic: MicStream
+    ) -> None:
+        """One unattended turn over an event the policy approved for speech.
+
+        The brain composes under the Witness rule (suppress + unattended:
+        confirm-tier denies silently, everything world-facing denies with a
+        reason) and the reply is *buffered*, not streamed — nobody is
+        waiting, and the whole reply is what the one-way valve reads: SKIP
+        drops the event, HOLD de-escalates it to a held note, anything else
+        is rung and spoken. The budget is charged only after audio actually
+        played. Failures hold the event rather than losing it — the next
+        conversation still hears the note — and never escape: like the
+        typed lane, an exception here must not reach turn.result().
+        """
+        assert self._events is not None
+        print(f"\n  [proactive: {event.summary}]", flush=True)
+        self._record("event", f"proactive: {event.summary}")
+        self._indicator.set_state("thinking")
+        sentences: list[str] = []
+        try:
+            try:
+                # Same shape as reflection, same hazard: the timeout must
+                # interrupt the brain, or suppression and unattended mode
+                # lift while the turn is still generating.
+                with self._confirm.suppress(), self._brain.unattended("proactive"):
+                    await asyncio.wait_for(
+                        self._collect_unattended(
+                            proactive_prompt(event.summary), sentences
+                        ),
+                        timeout=self._config.proactive.turn_timeout_s,
+                    )
+            except asyncio.TimeoutError:
+                log.debug("proactive turn timed out — interrupting the brain")
+                try:
+                    await self._brain.interrupt()
+                except Exception:  # noqa: BLE001 - best-effort, as in reflection
+                    log.debug("interrupt after proactive timeout failed", exc_info=True)
+                self._events.hold(event)
+                return
+
+            reply = " ".join(sentences).strip()
+            valve = proactive_valve(reply) if reply else None
+            if valve == "SKIP":
+                print("  [proactive: model declined]", flush=True)
+                self._record("event", "proactive: declined")
+                self._events.drop(event, time.time())
+                return
+            if valve == "HOLD" or not reply:
+                # An empty reply is a malfunction, not a judgement; holding
+                # keeps the note owed to the next conversation either way.
+                print("  [proactive: held for next conversation]", flush=True)
+                self._record("event", "proactive: held")
+                self._events.hold(event)
+                return
+
+            self._indicator.set_state("speaking")
+            await self._play_ring(player)
+            played_all = True
+            for sentence in sentences:
+                print(f"  ciel (proactive): {sentence}", flush=True)
+                self._record("ciel", f"[proactive] {sentence}")
+                if not await player.play(self._tts.stream(sentence)):
+                    # Barged in: the user is talking, the rest of the nudge
+                    # is noise. The event still counts as delivered — its
+                    # ring and first words reached the room.
+                    played_all = False
+                    break
+            self._events.mark_spoken(
+                event, time.time(), time.strftime("%Y-%m-%d")
+            )
+            if not played_all:
+                self._record("event", "proactive: interrupted")
+            # Rotation is re-armed at the next _enter_waiting — the session
+            # grew, so the permanent-session problem stays dead — but
+            # reflection isn't owed for a one-line nudge (_brain_conversed
+            # stays False), and no follow-up window opens (_spoke stays
+            # False), mirroring the timer lane.
+            self._conversed = True
+        except Exception:  # noqa: BLE001 - an unattended turn must never crash the loop
+            log.exception("proactive turn failed")
+            self._record("event", "proactive turn failed")
+            try:
+                self._events.hold(event)
+            except Exception:  # noqa: BLE001 - persistence is best-effort here
+                log.debug("could not hold the failed event", exc_info=True)
+        # No mic.drain() here: the BUSY-exit path in the frame loop drains
+        # and re-enters WAITING for every turn task, this one included.
+
+    async def _collect_unattended(
+        self, prompt: str, sentences: list[str]
+    ) -> None:
+        """Drain one brain turn into a buffer instead of the speakers.
+
+        Mutates ``sentences`` rather than returning, so a timeout that
+        cancels this mid-stream still leaves the caller holding whatever
+        arrived. Same aclosing obligation as every other consumer.
+        """
+        async with aclosing(self._brain.ask(prompt)) as stream:
+            async for kind, sentence in stream:
+                if kind == "escalation":
+                    # The Witness guard denies the spawn; nothing to await.
+                    print("  [proactive: escalation denied — unattended]", flush=True)
+                    continue
+                if kind == "thinking":
+                    print(f"  ciel (thinking): {sentence}", flush=True)
+                    self._record("ciel-thinking", sentence)
+                    continue
+                sentences.append(sentence)
+
+    def _with_held_notes(self, text: str) -> str:
+        """Prefix a user turn with Vigil's held notes, consuming them.
+
+        The transcript records the user's raw words plus an ``event`` row —
+        the prefix goes only to the model, so the record never lies about
+        what was said. No budget charge: the user initiated this turn.
+        """
+        if self._events is None:
+            return text
+        notes = self._events.take_held(time.time())
+        if not notes:
+            return text
+        print(f"  [delivering {len(notes)} held note(s)]", flush=True)
+        self._record("event", f"held notes delivered ({len(notes)})")
+        listing = " ".join(note.summary for note in notes)
+        return (
+            "(System note — things that came up while you were away: "
+            f"{listing} Work the relevant ones into your reply naturally; "
+            "if one is stale, drop it silently.)\n\n"
+            f"{text}"
+        )
 
     async def _announce_timers(
         self,
@@ -1017,7 +1392,15 @@ class Pipeline:
             log.debug("could not play the thinking chime", exc_info=True)
 
     def _record(self, speaker: str, text: str) -> None:
-        """Append one row to this conversation's transcript, if one is kept."""
+        """Append one row to this conversation's transcript, if one is kept.
+
+        Also Vigil's presence tap: every ``user`` row — a spoken turn, a
+        typed line, a confirmation answer — is evidence the user is here.
+        Tapped here, not in _enter_waiting, so Ciel's own proactive speech
+        (which sets _conversed) can never count as the user being around.
+        """
+        if speaker == "user" and self._presence is not None:
+            self._presence.note_conversation(time.monotonic())
         if self._transcript is not None:
             self._transcript.record(speaker, text)
 
@@ -1149,9 +1532,15 @@ class Pipeline:
             # clock. _conversed (not _spoke, which resets per turn and can be
             # False after a trailing noise blip) is consumed here so a later
             # false wake — which also funnels through this method — can't
-            # re-arm and reflect the same conversation twice.
-            self._schedule.conversation_ended(time.monotonic())
+            # re-arm and reflect the same conversation twice. Reflection is
+            # armed only when the brain participated: a timer set by the
+            # command grammar costs zero model turns end to end, and a
+            # reflection over it would quietly break that.
+            self._schedule.conversation_ended(
+                time.monotonic(), brain=self._brain_conversed
+            )
             self._conversed = False
+            self._brain_conversed = False
 
     async def _run_reflection(self) -> None:
         """One silent Closure turn; failures are logged shrugs, never crashes."""
@@ -1160,12 +1549,27 @@ class Pipeline:
         try:
             # Suppressed confirmations: nobody is listening, so a stray
             # confirm-tier tool call inside the reflection denies silently
-            # instead of voicing a question into an empty room.
-            with self._confirm.suppress():
+            # instead of voicing a question into an empty room. Unattended
+            # mode alongside it: reflection is bound by the Witness rule,
+            # so its "no messages, no searches" is enforced by the guard,
+            # not merely requested by the prompt.
+            with self._confirm.suppress(), self._brain.unattended("reflection"):
                 await asyncio.wait_for(
                     self._brain.reflect(REFLECTION_PROMPT),
                     timeout=self._config.reflection.timeout_s,
                 )
+        except asyncio.TimeoutError:
+            # wait_for cancelled reflect(), but the SDK is still generating into
+            # a turn nobody will read. Interrupt so it stops promptly and the
+            # next user turn's drain is short — otherwise it runs to completion
+            # (still billing, still holding the turn's tail) with confirm
+            # suppression already lifted, and its leftover stream corrupts the
+            # next turn until drained. Mirrors the wake/typed hastening paths.
+            log.debug("reflection timed out — interrupting the brain")
+            try:
+                await self._brain.interrupt()
+            except Exception:  # noqa: BLE001 - best-effort; the drain still recovers
+                log.debug("interrupt after reflection timeout failed", exc_info=True)
         except Exception:  # noqa: BLE001 - reflection is best-effort
             log.debug("reflection failed", exc_info=True)
 
@@ -1173,8 +1577,14 @@ class Pipeline:
         """Retire the idle session; the next conversation starts clean."""
         try:
             await self._brain.rotate()
-            print("\n  [fresh session]", flush=True)
+            # A rotated session is a new conversation, so its transcript is a
+            # new file — the one-file-per-conversation contract. Rotated after
+            # the session so the "session rotated" marker below lands as the
+            # last row of the conversation it closes, not the first of the next.
             self._record("event", "session rotated")
+            if self._transcript is not None:
+                self._transcript.rotate()
+            print("\n  [fresh session]", flush=True)
         except Exception:  # noqa: BLE001 - ask() reconnects on demand anyway
             log.exception("rotation failed")
 
@@ -1204,6 +1614,10 @@ class Pipeline:
             startup.append(self._speaker.warm_up())
         if self._watcher is not None:
             startup.append(self._watcher.start())
+        # Vigil watchers start here but never block here: start() only
+        # spawns their poll tasks — a permission dialog stalls a watcher,
+        # not the greeting.
+        startup.extend(w.start() for w in self._vigil_watchers)
         await asyncio.gather(*startup)
         log.info("ready in %.1fs", time.monotonic() - started)
 
@@ -1238,6 +1652,7 @@ class Pipeline:
             closers.append(self._speaker.close())
         if self._watcher is not None:
             closers.append(self._watcher.close())
+        closers.extend(w.close() for w in self._vigil_watchers)
         await asyncio.gather(*closers, return_exceptions=True)
         if self._transcript is not None:
             self._transcript.close()

@@ -74,6 +74,18 @@ class Transcript:
         self.path = path
         log.debug("transcript: %s", path)
 
+    def rotate(self) -> None:
+        """End this conversation's file so the next :meth:`record` starts a new
+        one. Called when the session rotates — one file per conversation is the
+        contract, and a single long-running process holds many conversations.
+
+        A fresh conversation also earns a fresh attempt: a directory that was
+        unwritable earlier may not be now, so the give-up flag is cleared.
+        """
+        self.close()
+        self.path = None
+        self._failed = False
+
     def close(self) -> None:
         if self._file is not None:
             try:

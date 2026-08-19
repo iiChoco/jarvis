@@ -278,7 +278,21 @@ class SpeakerGate:
             log.warning("voice gate enabled with no profile at %s",
                         self._config.profile)
             return
-        await self._encoder.warm_up()
+        try:
+            await self._encoder.warm_up()
+        except Exception as exc:  # noqa: BLE001 - the module's fail-open contract
+            # A model download can fail on a bad network, and the import can
+            # fail on a broken install. The docstring promises "the model
+            # missing with the gate enabled means everything passes" — so drop
+            # the references and fail open rather than taking the whole
+            # assistant down at startup over an identity *filter*.
+            print(
+                "\nvoice gate: enabled but the speaker model could not be "
+                f"loaded ({exc}) — everyone passes until it is available",
+                flush=True,
+            )
+            log.warning("voice gate model unavailable — failing open", exc_info=True)
+            self._references = None
 
     async def check(self, utterance: np.ndarray) -> tuple[bool, float]:
         """(is the enrolled speaker, similarity).

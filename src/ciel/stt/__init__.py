@@ -6,6 +6,7 @@ build the configured engine without importing the whole assistant.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 
 from ciel.config import STTConfig
@@ -21,14 +22,17 @@ def build_stt(config: STTConfig) -> SpeechToText:
     which is the whole point of the protocol.
     """
     if config.engine == "mlx-whisper":
-        try:
+        # Probed with find_spec, not imported — MlxWhisperSTT loads
+        # mlx_whisper lazily, so constructing it succeeds even when the
+        # package is missing and the ImportError would otherwise surface as
+        # a startup crash in warm_up instead of this fallback.
+        if importlib.util.find_spec("mlx_whisper") is not None:
             from ciel.stt.local_mlx import MlxWhisperSTT
 
             return MlxWhisperSTT(config)
-        except ImportError:
-            # A missing or broken mlx install should cost GPU speed, not the
-            # whole assistant — faster-whisper on CPU still works everywhere.
-            log.warning("mlx-whisper is not installed — falling back to faster-whisper")
+        # A missing mlx install should cost GPU speed, not the whole
+        # assistant — faster-whisper on CPU still works everywhere.
+        log.warning("mlx-whisper is not installed — falling back to faster-whisper")
 
     from ciel.stt.local_whisper import WhisperSTT
 

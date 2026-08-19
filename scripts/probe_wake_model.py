@@ -61,7 +61,12 @@ async def main() -> None:
     model_path = sys.argv[1]
 
     config = load_config()
-    wake_config = replace(config.wake, model=model_path)
+    # Force wakeword mode: the probe exists to measure the wake *model*, but the
+    # user's config might set mode to hotkey or always, and build_wake_detector
+    # would then hand back a detector that ignores audio entirely — silently
+    # measuring the wrong thing (AlwaysAwake fires on every clip, HotkeyWake on
+    # none) instead of the model named on the command line.
+    wake_config = replace(config.wake, mode="wakeword", model=model_path)
     detector = build_wake_detector(wake_config)
     await detector.start()
 

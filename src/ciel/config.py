@@ -10,12 +10,15 @@ overridden by ``CIEL_*`` environment variables.
 
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from types import UnionType
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
+
+log = logging.getLogger(__name__)
 
 # ── Audio constants ──────────────────────────────────────────────────────────
 # 16 kHz mono int16 is the common denominator: webrtcvad requires it, Whisper
@@ -175,6 +178,12 @@ class WakeConfig:
     style). Keep them to a syllable or two: the microphone is drained while one
     plays, so a long phrase eats the opening of a command spoken in the same
     breath as the wake word."""
+
+    greeting_phrases: tuple[str, ...] = ("Ciel here.",)
+    """Spoken once, at process launch, before anything else — picked at
+    random so every boot doesn't sound identical. Unlike ``ack_phrases``
+    nothing is waiting on this one to finish (no command follows in the same
+    breath), so a slightly longer phrase is fine."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -404,8 +413,10 @@ class ShellConfig:
         # in confirm because head had no entry, and a gate that confirms
         # harmless status checks teaches reflexive yeses. Deliberately absent:
         # awk and sed (both can write files), tee (exists to write), xargs and
-        # find (both can execute).
-        "head", "tail", "wc", "cut", "sort", "uniq", "tr", "column", "nl",
+        # find (both can execute), and sort/uniq — despite reading like pure
+        # filters, "sort -o FILE" and "uniq IN OUT" write a file, so they escape
+        # to confirm where the write is heard.
+        "head", "tail", "wc", "cut", "tr", "column", "nl",
         "grep", "echo", "printf",
         # File reads. A widening, chosen with eyes open: quiet shell reads
         # reach anything your user account can, beyond the file gate's
@@ -534,6 +545,14 @@ class JournalConfig:
 class BrainConfig:
     model: str = "claude-opus-5"
 
+    personality: Literal["jarvis", "ciel"] = "jarvis"
+    """Who Ciel is being — an entry in prompt.PERSONALITIES. "jarvis" is an
+    unflappable English butler with a dry wit; "ciel" is the original
+    persona, warm and direct, kept in storage. Only the persona changes:
+    speech rules and conversation mechanics are properties of the medium and
+    stay identical underneath. A Literal so a typo warns at load instead of
+    silently falling back."""
+
     allowed_tools: tuple[str, ...] = ("WebSearch", "WebFetch")
     """The Agent SDK ships the full Claude Code toolset — Bash, Write, Edit and
     all. A voice assistant that can silently run shell commands is not what we
@@ -563,13 +582,31 @@ class BrainConfig:
     to ``xhigh`` if deep answers still feel shallow — at the cost of longer
     silences. ``None`` removes the agent entirely."""
 
+    deep_model: str = "inherit"
+    """Which model the deep-thought agent runs on.
+
+    ``"inherit"`` keeps it on the same model as ordinary turns, which is
+    right when that model is already the strongest one available. When the
+    driver is a fast, cheap model, this is the other half of the escalation
+    valve: name a stronger model here ("opus", say) and hard questions get
+    both more effort *and* more model, while conversation stays snappy.
+    Aliases ("opus", "sonnet") and full model ids both work."""
+
     ack_phrases: tuple[str, ...] = ("Hmm.", "Let me see.", "Let me think about that.")
-    """Spoken the moment a turn heads to the brain — the audible "I heard
-    you". Transcription is fast, but the brain's first sentence is one to
-    several seconds away, and that silence reads as not having been heard.
-    One of these plays (chosen at random) overlapped with the brain starting
-    to think, so it fills the gap rather than adding to it. Only brain turns:
-    local commands answer instantly and need no filler. Empty disables."""
+    """Spoken when a brain turn is taking a moment — the audible "I heard
+    you". The brain's first sentence can be one to several seconds away, and
+    that silence reads as not having been heard. One of these plays (chosen
+    at random) overlapped with the brain thinking, so it fills the gap
+    rather than adding to it. Only brain turns: local commands answer
+    instantly and need no filler. Empty disables."""
+
+    ack_delay_s: float = 0.6
+    """How long the brain may stay silent before an ack phrase covers the
+    gap. The filler exists for the *long* thinks; a reply that arrives
+    inside this window plays immediately and the filler is skipped —
+    otherwise "Let me think about that." chased instantly by the answer is
+    theater, and worse, it delays the actual reply behind its own playback.
+    0 restores speak-always."""
 
     speak_thinking: bool = True
     """Speak the model's reasoning aloud as it thinks, before the answer.
@@ -724,6 +761,16 @@ class MCPServerConfig:
     is the tier for actions that leave the machine — sending mail, changing
     a calendar — where "recoverable" stops being true."""
 
+    unattended: tuple[str, ...] = ()
+    """Tools an *unattended* turn (reflection, a Vigil proactive turn) may
+    call — your declaration that they are read-only enough for a turn nobody
+    supervises, e.g. a calendar's ``list-events`` so a nudge can verify the
+    meeting still exists before announcing it. Everything not listed here
+    denies under the Witness rule while unattended, including the whole
+    ``confirm`` tier (there is no one to say yes). These names must also be
+    callable at all — on ``tools``, or on a server whose ``tools`` is None;
+    this list never widens what the model may reach, only when."""
+
 
 @dataclass(frozen=True, slots=True)
 class DevConfig:
@@ -806,6 +853,112 @@ class TimersConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ProactiveConfig:
+    """Vigil — the watching layer: events, presence, and the earned right to
+    interrupt.
+
+    Watchers (the calendar first) push events into one persistent queue; a
+    deterministic policy decides whether a moment justifies speaking
+    unprompted; an *unattended* brain turn — bound by the Witness rule, so it
+    can look and remember but change nothing outside Ciel's own notebook —
+    composes the words or declines. Everything that can't be spoken now is
+    held for the start of the next conversation. The policy picks the
+    ceiling and the model may only quiet it further, never escalate: event
+    text (calendar titles!) is written by other people, and routing
+    authority stays out of its reach.
+
+    The emergency brake: ``touch <state_dir>/hold`` pauses all proactive
+    delivery — events queue, nothing is dropped — until the file is removed.
+    A sentinel rather than a config edit so it can be tripped from outside
+    the process and survives restarts."""
+
+    enabled: bool = False
+    """Off by default. A standing right to speak unprompted is opted into
+    deliberately, never inherited from an upgrade."""
+
+    state_file: Path = field(
+        default_factory=lambda: Path.home() / ".ciel" / "proactive.json"
+    )
+    """The queue, held notes, dedupe record, and daily budget, mirrored on
+    every change — same reasoning as timers.json: the autoreloader re-execs
+    the process constantly, and a restart must not swallow a nudge or reset
+    the day's budget."""
+
+    quiet_hours_start: str = "22:00"
+    """Start of the window in which nothing is voiced, HH:MM local time.
+    Events arriving inside it hold for the next conversation instead. Set
+    equal to ``quiet_hours_end`` to have no quiet window at all."""
+
+    quiet_hours_end: str = "08:00"
+    """End of the quiet window. The window may span midnight — the default
+    pair does — and the policy handles the wrap."""
+
+    max_spoken_per_day: int = 6
+    """The hard budget of unprompted speech per local day. Every
+    interruption spends trust; when the budget is gone, Ciel holds the rest
+    for the next conversation no matter how the day goes. Deliveries the
+    user initiated (held notes, answers) never count against it."""
+
+    min_importance_to_speak: int = 2
+    """Events below this importance (watchers rate 1–3) never interrupt —
+    importance 1 is news, and news waits until you're already talking."""
+
+    presence_mode: Literal["any", "hid", "conversation"] = "any"
+    """Which signals count as "the user is around": ``hid`` trusts the
+    screen-lock state and keyboard/mouse recency (a machine somebody sits
+    at), ``conversation`` trusts only having recently talked to Ciel (a
+    box with no keyboard, where the mic is the interface), ``any`` accepts
+    either. Default ``any`` because the deployment machine is undecided —
+    tighten it once the box is chosen."""
+
+    presence_idle_s: float = 300.0
+    """Keyboard/mouse recency that still counts as "at the desk". Five
+    minutes: long enough to survive reading something, short enough that a
+    machine left for lunch stops counting as attended."""
+
+    conversation_presence_s: float = 180.0
+    """Having talked to Ciel this recently is presence too — the signal that
+    works when there is no keyboard to watch."""
+
+    policy_poll_s: float = 5.0
+    """How often presence and policy are re-evaluated while events are
+    pending. The frame loop itself only ever checks a boolean; the Quartz
+    reads and policy walk happen at most this often, and only when
+    something is actually waiting."""
+
+    turn_timeout_s: float = 60.0
+    """Hard cap on one unattended turn — reflection's reasoning exactly: a
+    hung turn holds the brain's lock, and a held lock is a mute assistant.
+    Shorter than reflection's cap because a nudge turn composes a sentence,
+    not a review."""
+
+    held_max_age_h: float = 18.0
+    """Held notes older than this die unspoken — the missed-timer grace
+    reasoning: "your two o'clock was about to start" delivered tomorrow
+    helps no one. 18 hours lets an overnight hold survive to the morning
+    conversation and nothing older."""
+
+    calendar_enabled: bool = True
+    """The first watcher. On when Vigil itself is enabled: proximity nudges
+    are the whole reason to turn this layer on today. Off leaves the rest of
+    the plumbing running for other watchers."""
+
+    calendar_lead_minutes: float = 10.0
+    """The nudge horizon — "your two o'clock is in ten minutes". A nudge
+    expires at the event's start: better silent than late."""
+
+    calendar_poll_s: float = 180.0
+    """How often EventKit is rescanned. Comfortably under the lead horizon,
+    so an event can't slip from "too far out" to "already started" between
+    scans."""
+
+    calendars: tuple[str, ...] = ()
+    """Calendar names to watch, matched against calendar titles. Empty means
+    all of them — right until the first shared calendar full of other
+    people's reminders, which is what this filter is for."""
+
+
+@dataclass(frozen=True, slots=True)
 class ScreenConfig:
     enabled: bool = True
     """Whether Ciel may look at the screen. The tool is only offered to the
@@ -843,6 +996,7 @@ class Config:
     commands: CommandsConfig = field(default_factory=CommandsConfig)
     screen: ScreenConfig = field(default_factory=ScreenConfig)
     timers: TimersConfig = field(default_factory=TimersConfig)
+    proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
     transcripts: TranscriptConfig = field(default_factory=TranscriptConfig)
     dev: DevConfig = field(default_factory=DevConfig)
     ui: UIConfig = field(default_factory=UIConfig)
@@ -876,6 +1030,7 @@ _SECTIONS = {
     "commands": CommandsConfig,
     "screen": ScreenConfig,
     "timers": TimersConfig,
+    "proactive": ProactiveConfig,
     "transcripts": TranscriptConfig,
     "dev": DevConfig,
     "ui": UIConfig,
@@ -900,6 +1055,19 @@ def _coerce(value: Any, target_type: Any) -> Any:
     else:
         members = {target_type}
     members.discard(type(None))
+
+    # A Literal field ("say"/"piper", wake modes, indicator kinds) has a fixed
+    # set of valid values. Coercion can't fix a wrong one, but it can say so:
+    # otherwise a typo'd engine passes straight through and silently falls back
+    # at the use site, which reads as "my config did nothing".
+    literal_allowed = tuple(
+        arg for m in members if get_origin(m) is Literal for arg in get_args(m)
+    )
+    if literal_allowed and value not in literal_allowed:
+        log.warning(
+            "config value %r is not one of %s — it may not take effect",
+            value, literal_allowed,
+        )
 
     if Path in members:
         return Path(value).expanduser()
@@ -932,11 +1100,18 @@ def _apply(section: Any, overrides: dict[str, Any]) -> Any:
     # nothing and env vars stay strings — which then explodes at arithmetic.
     types = get_type_hints(type(section))
     valid = {f.name for f in fields(section)}
-    clean = {
-        key: _coerce(value, types.get(key))
-        for key, value in overrides.items()
-        if key in valid
-    }
+    clean: dict[str, Any] = {}
+    for key, value in overrides.items():
+        if key not in valid:
+            # A misspelled key was silently dropped before, so "engien = piper"
+            # looked accepted but changed nothing. Name it — a config that
+            # ignores half of what you wrote should at least tell you which half.
+            log.warning(
+                "unknown config key %r in [%s] — ignored",
+                key, type(section).__name__,
+            )
+            continue
+        clean[key] = _coerce(value, types.get(key))
     return replace(section, **clean) if clean else section
 
 
@@ -980,8 +1155,14 @@ def load_config(path: Path | None = None) -> Config:
         }
         if found:
             env_updates[name] = _apply(section, found)
+    # The two top-level fields aren't in _SECTIONS, so they need naming here to
+    # honor the documented CIEL_* override contract — CIEL_STATE_DIR was
+    # missing entirely, so the state directory could not be set from the
+    # environment like everything else.
     if "CIEL_LOG_LEVEL" in os.environ:
         env_updates["log_level"] = os.environ["CIEL_LOG_LEVEL"]
+    if "CIEL_STATE_DIR" in os.environ:
+        env_updates["state_dir"] = _coerce(os.environ["CIEL_STATE_DIR"], Path)
     if env_updates:
         cfg = replace(cfg, **env_updates)
 

@@ -54,14 +54,22 @@ class PiperTTS:
         model = self._dir / f"{name}.onnx"
 
         if not model.exists():
-            log.info("downloading piper voice %s (~60 MB, one time)...", name)
-            from piper.download_voices import download_voice
-
-            self._dir.mkdir(parents=True, exist_ok=True)
-            await asyncio.to_thread(download_voice, name, self._dir)
+            await self._download(name)
 
         started = time.monotonic()
-        self._voice = await asyncio.to_thread(PiperVoice.load, str(model))
+        try:
+            self._voice = await asyncio.to_thread(PiperVoice.load, str(model))
+        except Exception:  # noqa: BLE001 - a corrupt model is recoverable
+            # An interrupted download leaves a truncated .onnx that exists() —
+            # so the download is skipped next launch — but won't load, which
+            # would wedge TTS on `say` permanently. Treat an unloadable model
+            # as corrupt: drop it, fetch once more, and load the fresh copy. A
+            # second failure propagates and the pipeline falls back to `say`.
+            log.warning("piper voice %s failed to load — refetching", name, exc_info=True)
+            model.unlink(missing_ok=True)
+            (self._dir / f"{name}.onnx.json").unlink(missing_ok=True)
+            await self._download(name)
+            self._voice = await asyncio.to_thread(PiperVoice.load, str(model))
         self._syn_config = self._build_syn_config()
 
         # The true rate comes from the voice config, not from us — Piper voices
@@ -131,6 +139,13 @@ class PiperTTS:
             finally:
                 abandoned.set()
                 await worker
+
+    async def _download(self, name: str) -> None:
+        log.info("downloading piper voice %s (~60 MB, one time)...", name)
+        from piper.download_voices import download_voice
+
+        self._dir.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(download_voice, name, self._dir)
 
     def _build_syn_config(self) -> Any:
         """Piper's per-synthesis knobs, or ``None`` on an older Piper.

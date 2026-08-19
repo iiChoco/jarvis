@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from contextlib import aclosing
 from types import TracebackType
 from typing import AsyncIterator, Self
 
@@ -38,6 +39,12 @@ class Player:
         self._stream: sd.RawOutputStream | None = None
         self._stop = threading.Event()
         self._playing = threading.Event()
+        # Serializes play() so two overlapping calls — the turn's own sentence
+        # and, say, a confirmation prompt that fires between sentences — can't
+        # interleave PCM into one stream or clear each other's stop flag. stop()
+        # stays outside the lock: barge-in must be able to interrupt the play
+        # that holds it.
+        self._play_lock = asyncio.Lock()
         self._chunk_bytes = (sample_rate * CHUNK_MS // 1000) * 2
 
     @property
@@ -90,57 +97,82 @@ class Player:
         """Play a stream of int16 PCM chunks.
 
         Returns ``True`` if playback ran to completion, ``False`` if it was
-        interrupted. The caller uses that to decide whether to abandon the rest
-        of the turn — an interrupted sentence means the user wants something
-        else, so queued sentences behind it are stale.
+        interrupted *or the output device failed*. The caller uses that to
+        decide whether to abandon the rest of the turn — an interrupted
+        sentence means the user wants something else, so queued sentences
+        behind it are stale; a device failure means nothing was heard, and
+        reporting completion would leave Ciel believing it spoke into a mute
+        device.
         """
-        if self._stream is None:
-            await self.open()
-        assert self._stream is not None
+        async with self._play_lock:
+            if self._stream is None:
+                await self.open()
+            assert self._stream is not None
 
-        self._stop.clear()
-        self._playing.set()
-        buffer = bytearray()
-        completed = True
+            self._stop.clear()
+            self._playing.set()
+            buffer = bytearray()
+            completed = True
+            device_lost = False
 
-        try:
-            async for chunk in chunks:
-                if self._stop.is_set():
-                    completed = False
-                    break
-                buffer.extend(chunk)
-                while len(buffer) >= self._chunk_bytes:
-                    if self._stop.is_set():
-                        completed = False
-                        break
-                    piece = bytes(buffer[: self._chunk_bytes])
-                    del buffer[: self._chunk_bytes]
-                    await asyncio.to_thread(self._write, piece)
-                if not completed:
-                    break
+            try:
+                # aclosing so a barge-in `break` tears the generator down now,
+                # not whenever GC gets to it — a Piper stream wraps a
+                # subprocess, and a leaked one lingers until finalization.
+                async with aclosing(chunks) as stream:
+                    async for chunk in stream:
+                        if self._stop.is_set():
+                            completed = False
+                            break
+                        buffer.extend(chunk)
+                        while len(buffer) >= self._chunk_bytes:
+                            if self._stop.is_set():
+                                completed = False
+                                break
+                            piece = bytes(buffer[: self._chunk_bytes])
+                            del buffer[: self._chunk_bytes]
+                            await asyncio.to_thread(self._write, piece)
+                        if not completed:
+                            break
 
-            if completed and buffer:
-                await asyncio.to_thread(self._write, bytes(buffer))
-        finally:
-            self._playing.clear()
-            if not completed:
-                # Drop whatever PortAudio has already buffered, otherwise the
-                # tail of the interrupted sentence keeps playing after we've
-                # stopped feeding it.
+                    if completed and buffer:
+                        await asyncio.to_thread(self._write, bytes(buffer))
+            except sd.PortAudioError:
+                # The device failed mid-playback (unplugged, a sample-rate
+                # change). Report the sentence unspoken and drop the dead
+                # stream so the next play reopens rather than writing into a
+                # broken handle forever. Warning, not debug: a mute assistant
+                # that thinks it is talking is exactly the kind of failure that
+                # must not hide in debug logs.
+                log.warning("output device failed during playback", exc_info=True)
+                completed = False
+                device_lost = True
                 try:
-                    self._stream.abort()
-                    self._stream.start()
-                except Exception:  # pragma: no cover - device teardown races
-                    log.debug("could not abort output stream", exc_info=True)
+                    self._stream.close()
+                except Exception:  # noqa: BLE001 - already broken; best effort
+                    pass
+                self._stream = None
+            finally:
+                self._playing.clear()
+                if not completed and not device_lost and self._stream is not None:
+                    # Drop whatever PortAudio has already buffered, otherwise the
+                    # tail of the interrupted sentence keeps playing after we've
+                    # stopped feeding it.
+                    try:
+                        self._stream.abort()
+                        self._stream.start()
+                    except Exception:  # pragma: no cover - device teardown races
+                        log.debug("could not abort output stream", exc_info=True)
 
-        return completed
+            return completed
 
     def _write(self, data: bytes) -> None:
+        # Deliberately lets sd.PortAudioError propagate: play() turns it into a
+        # not-completed result and reopens the stream. Swallowing it here (as
+        # before) made every write to a lost device look like a success, so
+        # Ciel reported speaking while the room heard nothing.
         assert self._stream is not None
-        try:
-            self._stream.write(data)
-        except sd.PortAudioError:  # pragma: no cover
-            log.debug("write to output stream failed", exc_info=True)
+        self._stream.write(data)
 
 
 __all__ = ["Player", "CHUNK_MS"]

@@ -64,17 +64,22 @@ async def set_timer(args: dict[str, Any]) -> dict[str, Any]:
     label = str(args.get("label") or "")
 
     if at:
+        # Explicit checks, not assert: these validate model-controlled input,
+        # and `python -O` strips assert — leaving set_at to normalize a bogus
+        # 25:99 into a silently wrong time. The range guard must always run.
         try:
             hour, minute = (int(p) for p in at.split(":"))
-            assert 0 <= hour <= 23 and 0 <= minute <= 59
-        except (ValueError, AssertionError):
+        except ValueError:
+            return _text(f"Could not parse {at!r} — pass 24-hour HH:MM, like 07:00.")
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
             return _text(f"Could not parse {at!r} — pass 24-hour HH:MM, like 07:00.")
         timer = _service.set_at(hour, minute, label)
     elif seconds is not None:
         try:
             seconds = float(seconds)
-            assert seconds > 0
-        except (TypeError, ValueError, AssertionError):
+        except (TypeError, ValueError):
+            return _text("`seconds` must be a positive number.")
+        if seconds <= 0:
             return _text("`seconds` must be a positive number.")
         timer = _service.set_relative(seconds, label)
     else:

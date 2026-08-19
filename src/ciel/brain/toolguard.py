@@ -72,11 +72,23 @@ def _describe_respond(args: dict[str, Any]) -> str:
     return f"Respond {_shorten(response)} to a calendar invitation"
 
 
+def _describe_send_message(args: dict[str, Any]) -> str:
+    to = args.get("to")
+    body = args.get("text")
+    parts = ["Send a message"]
+    if to:
+        parts.append(f"to {_shorten(to)}")
+    if body:
+        parts.append(f"saying {_shorten(body)}")
+    return " ".join(parts)
+
+
 # Keyed by the *unprefixed* tool name, matching what goes in a `confirm` list.
 # The dict is small on purpose: only tools someone chose to gate need a voice,
 # and the fallback below keeps unlisted ones askable, just less gracefully.
 _FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "send_email": _describe_send_email,
+    "send_message": _describe_send_message,
     "create-event": _describe_event("Create"),
     "update-event": _describe_event("Update"),
     "delete-event": _describe_event("Delete"),

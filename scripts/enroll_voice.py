@@ -395,6 +395,18 @@ async def calibrate(config, encoder, *, offer_prune: bool = True) -> None:
             "conditions to bounce — re-record it with --add, or --prune it."
         )
 
+    if threshold <= worst_impostor:
+        # The 0.70 clamp can pull the threshold *below* the best impostor when
+        # the impostor corpus scores unusually high — silently storing a gate
+        # the measurement says leaks. Say so, rather than letting a clamp
+        # contradict the numbers printed just above it.
+        print(
+            f"\nwarning: the stored threshold ({threshold}) is at or below the "
+            f"best impostor score ({worst_impostor:.2f}) after clamping — "
+            "impostors in this corpus would pass it. Add cleaner takes with "
+            "--add, or set [voice] threshold manually above the impostor range."
+        )
+
     save_profile(profile, list(takes), threshold=threshold, labels=labels)
     print(f"stored with the profile ({profile.name}); "
           "[voice] threshold in config stays unset and inherits it")

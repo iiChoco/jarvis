@@ -35,7 +35,9 @@ that callback runs, so only the hook is consulted for the tool it constrains.
 
 from __future__ import annotations
 
+import fnmatch
 import logging
+import os
 import re
 from typing import Any, Awaitable, Callable, Literal
 
@@ -65,6 +67,26 @@ _DENY_TOKENS = frozenset({
 _PIPE_INTERPRETERS = frozenset({"sh", "bash", "zsh", "dash", "python", "python3", "perl", "ruby", "node"})
 _DOWNLOADERS = frozenset({"curl", "wget"})
 
+# Transparent prefixes: they run the command that follows, so the deny scan has
+# to see *through* them to the real command (``env sudo``, ``nohup rm -rf ~``).
+# Deliberately excludes xargs/find/sh -c, which take their own operands and can
+# execute an allowlisted-looking inner command — peeling those would *widen* the
+# quiet tier, so they stay at confirm (they are absent from the allowlist).
+_WRAPPERS = frozenset({
+    "env", "command", "nohup", "exec", "builtin", "setsid", "stdbuf",
+    "nice", "time", "ionice",
+})
+# Wrapper options that consume the following token as their value, so it is not
+# mistaken for the wrapped command (``nice -n 10 sudo`` → sudo, not 10).
+_WRAPPER_VALUE_OPTS = frozenset({
+    "-u", "--unset", "-C", "--chdir", "-S", "--split-string", "-n", "--adjustment",
+})
+
+# Glob metacharacters. A component carrying one may expand to a forbidden path,
+# so it is matched against the credential names with the component as the
+# pattern (``.??h`` can match ``.ssh``).
+_GLOB_CHARS = re.compile(r"[*?\[]")
+
 # Structure the classifier cannot see through. Redirection can write anywhere,
 # substitution hides a second command inside the first, & backgrounds it out
 # from under the confirmation. None of these are denied — they escalate a
@@ -80,7 +102,33 @@ _BACKGROUND = re.compile(r"(?<![&>])&(?![&])")  # bare &, not && or >&
 # listening, which is the exact failure the quiet tier exists to prevent.
 _HARMLESS_REDIRECT = re.compile(r"\d*>&\d+|\d*>>?\s*/dev/null|&>\s*/dev/null")
 
-_PIPELINE_SPLIT = re.compile(r"&&|\|\||[;\n]")
+# Command separators the deny scan must see across: ``&&``/``||``/``;``/newline,
+# and a *bare* ``&`` (``A & B`` runs B after backgrounding A — B would otherwise
+# hide inside A's segment, invisible to the deny checks). The bare-``&``
+# alternative excludes ``&&`` and the fd forms ``2>&1``/``&>`` so those stay
+# whole for the structure check rather than splitting a redirection in two.
+_PIPELINE_SPLIT = re.compile(r"&&|\|\||[;\n]|(?<![&>])&(?![&>])")
+
+
+def _unquote(token: str) -> str:
+    """Strip the shell quoting the classifier would otherwise be fooled by.
+
+    Stripping only the *outer* quotes left ``.a"w"s`` reading as a literal
+    ``.a"w"s`` — which is not ``.aws`` — so a quoted spelling of a credential
+    path slipped past the names while the shell went on to expand it anyway.
+    Interior quotes and backslashes are removed so the comparison happens on the
+    string the shell will actually use.
+    """
+    return token.replace('"', "").replace("'", "").replace("\\", "")
+
+
+def _normalize(token: str) -> str:
+    """Unquote a command token and reduce it to its basename.
+
+    So ``/usr/bin/sudo``, ``\\sudo`` and ``"sudo"`` all reduce to ``sudo`` for
+    the deny comparison, which matches on the bare name.
+    """
+    return os.path.basename(_unquote(token))
 
 
 def _forbidden_component(command: str) -> str | None:
@@ -88,14 +136,53 @@ def _forbidden_component(command: str) -> str | None:
 
     Matched against path components of every whitespace token, so
     ``cat ~/.ssh/id_rsa`` and ``echo x >> ~/.zshrc`` both trip on the name
-    alone — no path resolution, which a shell could defeat anyway.
+    alone — no path resolution, which a shell could defeat anyway. Quoting is
+    removed first (``cat ~/.a"w"s/credentials`` still trips on ``.aws``), and a
+    glob component that could expand to a forbidden name (``~/.??h/id_*``) trips
+    too, since a shell resolves both spellings identically.
     """
     for token in command.split():
-        cleaned = token.strip("\"'")
+        cleaned = _unquote(token)
         for part in cleaned.split("/"):
             if part in FORBIDDEN_NAMES:
                 return part
+            if (
+                _GLOB_CHARS.search(part)
+                and part.strip("*?[]")  # skip a bare `*`, which matches everything
+                and any(fnmatch.fnmatch(name, part) for name in FORBIDDEN_NAMES)
+            ):
+                return part
     return None
+
+
+def _effective_tokens(tokens: list[str]) -> list[str]:
+    """Peel transparent wrappers and normalize the command to its basename.
+
+    ``env sudo rm`` → ``[sudo, rm]``, ``/bin/rm -rf ~`` → ``[rm, -rf, ~]`` — so
+    the deny scan sees the command that will actually run rather than the
+    wrapper or the path it was spelled with. The allowlist still matches on the
+    original tokens, so a wrapper never *widens* the quiet tier.
+    """
+    toks = list(tokens)
+    while toks:
+        base = _normalize(toks[0])
+        if base in _WRAPPERS and len(toks) > 1:
+            rest = toks[1:]
+            while rest:
+                arg = rest[0]
+                if arg.startswith("-"):
+                    rest = rest[1:]
+                    if arg in _WRAPPER_VALUE_OPTS and rest:
+                        rest = rest[1:]  # its value is not the wrapped command
+                    continue
+                if "=" in arg:  # env VAR=value assignment
+                    rest = rest[1:]
+                    continue
+                break
+            toks = rest
+            continue
+        return [base, *toks[1:]]
+    return toks
 
 
 def _pipelines(command: str) -> list[list[list[str]]]:
@@ -127,8 +214,11 @@ def _dangerous_rm(tokens: list[str]) -> bool:
     Plain ``rm`` (even ``rm -rf ./build``) stays confirm-tier — the user hears
     it. What must never ride on a "yes" to a half-heard question is the
     unrecoverable case: recursive, forced, and rooted at ``~`` or ``/``.
+
+    ``tokens`` is expected to be wrapper-peeled and basename-normalized, so
+    ``/bin/rm`` and ``env rm`` reach here as ``rm``.
     """
-    if tokens[0] != "rm":
+    if not tokens or tokens[0] != "rm":
         return False
     flag_chars = set("".join(t.lstrip("-") for t in tokens[1:] if t.startswith("-")))
     if not ({"r", "R"} & flag_chars and "f" in flag_chars):
@@ -154,13 +244,15 @@ def classify(command: str, config: ShellConfig) -> tuple[Tier, str]:
     for pipeline in pipelines:
         interpreter_stage = False
         for tokens in pipeline:
-            if tokens[0] in deny_tokens:
+            effective = _effective_tokens(tokens)
+            head = effective[0] if effective else ""
+            if head in deny_tokens:
                 return "deny", "it escalates privileges or changes system state"
-            if _dangerous_rm(tokens):
+            if _dangerous_rm(effective):
                 return "deny", "it recursively deletes your home directory or worse"
-            if interpreter_stage and tokens[0] in _PIPE_INTERPRETERS:
+            if interpreter_stage and head in _PIPE_INTERPRETERS:
                 return "deny", "it pipes downloaded content into an interpreter"
-            if tokens[0] in _DOWNLOADERS:
+            if head in _DOWNLOADERS:
                 interpreter_stage = True
 
     harmless_stripped = _HARMLESS_REDIRECT.sub(" ", text)

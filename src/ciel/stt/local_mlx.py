@@ -50,8 +50,9 @@ class MlxWhisperSTT:
         if self._warmed:
             return
 
-        # Import checked here, not at module top: a missing install should
-        # fail at startup where build_stt can fall back, not mid-conversation.
+        # Imported here, not at module top: build_stt probes for the package
+        # before picking this engine, and keeping the import lazy means
+        # building the engine doesn't pay mlx's load time.
         import mlx_whisper  # noqa: F401
 
         started = time.monotonic()
@@ -91,6 +92,13 @@ class MlxWhisperSTT:
             language=self._config.language,
             initial_prompt=self._config.initial_prompt or None,
             condition_on_previous_text=False,  # stops one bad decode cascading
+            # Two fallback temperatures, not the library's six-step ladder
+            # (0.0..1.0): every step re-runs the FULL encode+decode, so
+            # marginal audio could cost six decodes of deaf time while the
+            # user waits. One retry still breaks the degenerate repetition
+            # loops the fallback exists for; the further rungs mostly polish
+            # transcripts of noise.
+            temperature=(0.0, 0.4),
             # No vad_filter here: mlx-whisper has none, and the endpointer has
             # already trimmed silence anyway. beam_size is likewise a
             # faster-whisper knob — MLX decodes greedily with temperature

@@ -119,9 +119,16 @@ class ActionJournal:
             entries.append(entry)
             kept, dropped = entries[-self._max_entries:], entries[:-self._max_entries]
             self.ensure()
-            with self._file.open("w", encoding="utf-8") as f:
+            # Write-then-rename: a crash or a full disk mid-write leaves the
+            # temp file behind and the real journal intact. Rewriting in place
+            # ("w") could truncate the whole history to nothing over one failed
+            # append — the record exists precisely for the moments things go
+            # wrong, so it must not evaporate at one.
+            tmp = self._file.with_suffix(".jsonl.tmp")
+            with tmp.open("w", encoding="utf-8") as f:
                 for e in kept:
                     f.write(json.dumps(e, ensure_ascii=False) + "\n")
+            tmp.replace(self._file)
             self._prune_snapshots(dropped, kept)
         except OSError:
             log.warning("could not write the action journal", exc_info=True)

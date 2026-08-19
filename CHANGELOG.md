@@ -2,6 +2,98 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-08-18 — lessons taken from hermes-agent
+
+**Why.** A deep read of NousResearch's hermes-agent (see
+`reports/2026-08-18-hermes-agent-steals.md`) confirmed Vigil is ahead on
+interruption policy — Hermes has none — but Hermes carries scar tissue
+worth having: rules about what a self-improving agent must *not* save,
+provenance on machine-written memory, and watchers that report their own
+failure.
+
+**What.** Six adoptions. Closure's prompt gains a negative-capture list
+(never save "tool X is broken" — transient failures harden into refusals
+cited long after the fix; save the workaround, never an unresolved failure
+as a method). Memory gains kind `procedure` — facts say who the user is,
+procedures say how a class of task is done for this user, updated in place
+— with frustration named a first-class procedure signal. Every memory now
+records write provenance (`context: conversation | proactive`), stamped
+through the Witness mode's new labels, and recall renders the hedge for
+facts no user ever heard ("noted unattended — unconfirmed"): the runtime
+states provenance, the model doesn't narrate it. The recall tool states the
+source-first rule: memory is never evidence about current external state —
+check the live source before asserting absence; "I recall" is not "I
+checked". Watchers get a failure-streak self-report (three failed scans →
+one importance-1 event → a held note names the broken watcher, instead of a
+log line nobody reads). And `touch ~/.ciel/hold` is the emergency brake:
+proactive delivery pauses, events queue, nothing is dropped, until the file
+is removed. Deferred steals (duplicate-marked redelivery, dead-target
+registry, watcher notepads, hash-suppression tier, propose-never-auto-enable
+suggestions, the hub wake contract) are assigned to their phases in the
+report.
+
+## 2026-08-18 — Vigil: the right to speak unprompted, earned
+
+**Why.** Ciel existed only while being spoken to — her own capability
+wishlist put it first: between turns there is no process of hers watching
+anything, so a meeting can draw near, a job can finish, and nothing is said
+unless the user happens to ask at the right moment. Timers proved the
+mechanism (speak later, unprompted); what was missing was everything around
+it — event sources, and the policy for when interrupting is justified,
+which the wishlist correctly called the hard part.
+
+**What.** A proactive layer, codename **Vigil** (`ciel.proactive`), off by
+default behind `[proactive] enabled`. Watchers push events into one queue
+persisted at `~/.ciel/proactive.json` — queue, held notes, dedupe record,
+and the day's budget all survive the autoreloader's re-exec. The first
+watcher reads the calendar through EventKit (new dep, one-time Calendars
+permission) and nudges "your two o'clock is in ten minutes", expiring
+unspoken at the meeting's start. A pure `InterruptionPolicy` — quiet hours
+that may span midnight, an importance floor, presence, and a hard daily
+budget of unprompted speech — picks each event's route: speak now, hold
+for the start of the next conversation (delivered as a system note the
+transcript never confuses with the user's words), or drop. Presence reads
+the screen-lock state and keyboard recency through Quartz plus
+conversation recency through the mic, selectable via `presence_mode`
+because the deployment box is undecided; all of it is evaluated lazily,
+never at frame rate — the voice hot path gained one boolean check.
+
+The turn itself runs unattended under a new named rule, the **Witness
+rule** (`brain/witness.py`): a turn with nobody listening may look and may
+remember — read-only tools and Ciel's own memory/projects notebook — but
+nothing outside the notebook changes; messages, timers, files, shell,
+searches, and unlisted connector tools deny in a PreToolUse hook that
+leads the guard chain. Reflection now runs under the same rule, so its
+"no messages, no searches" is enforced rather than requested. Connector
+entries gain an `unattended` list for reads a nudge may verify against
+("check the meeting still exists before announcing it"). Routing is a
+one-way valve: the policy picks the ceiling and the model may only decline
+(SKIP) or de-escalate to a held note (HOLD) — event text is written by
+other people, and words in a calendar title must never be able to argue
+something off the machine. `scripts/probe_vigil.py` drives all of it —
+queue persistence, the policy table, the midnight wrap, the Witness
+matrix, the valve — on injected clocks and fakes, no audio required.
+
+## 2026-08-18 — a fast driver and a slow specialist
+
+**Why.** Opus drove every turn, including "set a timer" and "what's on my
+calendar". That is the strongest model in the house spending its time on
+work that cannot use it — paid for twice, once in time-to-first-speech
+against a half-second target, and once in Max quota that then ran out
+mid-afternoon. The escalation valve already existed for depth; the model
+choice was still all-or-nothing.
+
+**What.** The driver moves to Sonnet at `medium` effort (up from `low` —
+low read as careless on the fiddlier turns, and medium still fits the
+latency budget). Depth is not surrendered, it is relocated: a new
+`[brain] deep_model` sets the model for the deep-thought agent, defaulting
+to `"inherit"` and set to `"opus"` here, so the escalation valve now buys a
+stronger model as well as more effort. Everything else about escalation is
+unchanged — the same prompt rules, the same spoken "give me a moment", the
+same per-question judgment — which is why this was one new setting rather
+than a second escalation path. Fable left unwired pending a decision on
+where it sits.
+
 ## 2026-08-18 — the sounds of listening and thinking
 
 **Why.** Three silences were lying. After you spoke, nothing happened until

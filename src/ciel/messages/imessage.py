@@ -30,6 +30,7 @@ import asyncio
 import logging
 import re
 import sqlite3
+import threading
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
@@ -133,6 +134,21 @@ def _apple_time(raw: int | None) -> datetime | None:
 
 def _digits(handle: str) -> str:
     return re.sub(r"\D", "", handle)
+
+
+# A group chat's identifier as it appears in chat.db: "chat" followed by a long
+# decimal id. Distinct from a phone number, which never carries that prefix.
+_GROUP_IDENTIFIER = re.compile(r"^chat\d+$", re.IGNORECASE)
+
+
+def is_group_identifier(value: str) -> bool:
+    """Whether a recipient string is a group-chat identifier.
+
+    Group ids (``chat523938370228380820``) otherwise pass ``looks_like_handle``
+    on their digit count alone, and macOS group sends fail *silently*, so the
+    send path must reject them explicitly rather than hand them to AppleScript.
+    """
+    return bool(_GROUP_IDENTIFIER.match(value.strip()))
 
 
 def looks_like_handle(value: str) -> bool:
@@ -240,8 +256,17 @@ class MessagesClient:
         # ``closing``, not ``with connection``: the connection context manager
         # only wraps a transaction, and these run on a background thread often
         # enough that leaking one per call would matter.
-        with closing(self._connect()) as connection:
-            rows = connection.execute(sql, [*params, limit]).fetchall()
+        try:
+            with closing(self._connect()) as connection:
+                rows = connection.execute(sql, [*params, limit]).fetchall()
+        except sqlite3.Error as exc:
+            # An immutable=1 read of a live WAL database can tear mid-query and
+            # raise "database disk image is malformed". It is transient, not
+            # fatal — surface it as unavailability so the turn ends gracefully
+            # instead of crashing with an unhandled DatabaseError.
+            raise MessagesUnavailable(
+                "The Messages database was busy or mid-write. Try again in a moment."
+            ) from exc
 
         messages = []
         for row in rows:
@@ -275,11 +300,17 @@ class MessagesClient:
         The fallback when Contacts is unavailable or the person isn't in the
         address book: a chat's display name is often the only name we have.
         """
-        with closing(self._connect()) as connection:
-            rows = connection.execute(
-                "SELECT DISTINCT c.chat_identifier, c.display_name "
-                "FROM chat c WHERE c.room_name IS NULL OR c.room_name = ''"
-            ).fetchall()
+        try:
+            with closing(self._connect()) as connection:
+                rows = connection.execute(
+                    "SELECT DISTINCT c.chat_identifier, c.display_name "
+                    "FROM chat c WHERE c.room_name IS NULL OR c.room_name = ''"
+                ).fetchall()
+        except sqlite3.Error as exc:
+            # See _recent_sync: a torn immutable read is transient, not fatal.
+            raise MessagesUnavailable(
+                "The Messages database was busy or mid-write. Try again in a moment."
+            ) from exc
 
         needle = query.strip().lower()
         found = []
@@ -299,6 +330,87 @@ class MessagesClient:
         return found
 
     # ── contacts ─────────────────────────────────────────────────────────────
+
+    def _contacts_framework_sync(self, query: str) -> list[Contact]:
+        """Resolve a name through the Contacts framework, in-process.
+
+        The AppleScript route below launches Contacts.app if it isn't running
+        and walks the address book over the Apple Event bridge — one to four
+        seconds on a real address book, spent between "send it to Sam" and
+        the confirmation prompt. CNContactStore reads the same data through
+        an indexed native query, typically well under 50 ms, and never
+        launches anything. Raises :class:`MessagesUnavailable` when the
+        framework, its permission, or the query is unavailable, so the
+        caller can fall back to AppleScript.
+        """
+        try:
+            import Contacts
+        except ImportError as exc:
+            raise MessagesUnavailable(
+                "The Contacts framework bindings are not installed."
+            ) from exc
+
+        store = Contacts.CNContactStore.alloc().init()
+        status = Contacts.CNContactStore.authorizationStatusForEntityType_(
+            Contacts.CNEntityTypeContacts
+        )
+        if status == Contacts.CNAuthorizationStatusNotDetermined:
+            # First use: put the system permission dialog up and wait like a
+            # person would. The completion handler fires on a private queue;
+            # this runs on a to_thread worker, so blocking on it is fine.
+            answered = threading.Event()
+            verdict: list[bool] = []
+
+            def _answer(granted: bool, _error: object) -> None:
+                verdict.append(bool(granted))
+                answered.set()
+
+            store.requestAccessForEntityType_completionHandler_(
+                Contacts.CNEntityTypeContacts, _answer
+            )
+            if not answered.wait(self._config.script_timeout_s) or not (
+                verdict and verdict[0]
+            ):
+                raise MessagesUnavailable(
+                    "Contacts access was not granted. It may be showing a "
+                    "permission prompt — check the screen."
+                )
+        elif status in (
+            Contacts.CNAuthorizationStatusRestricted,
+            Contacts.CNAuthorizationStatusDenied,
+        ):
+            raise MessagesUnavailable("Contacts access is denied.")
+
+        keys = [
+            Contacts.CNContactFormatter.descriptorForRequiredKeysForStyle_(
+                Contacts.CNContactFormatterStyleFullName
+            ),
+            Contacts.CNContactPhoneNumbersKey,
+            Contacts.CNContactEmailAddressesKey,
+        ]
+        people, error = store.unifiedContactsMatchingPredicate_keysToFetch_error_(
+            Contacts.CNContact.predicateForContactsMatchingName_(query), keys, None
+        )
+        if error is not None:
+            raise MessagesUnavailable(f"Contacts query failed: {error}")
+
+        found: list[Contact] = []
+        for person in people or []:
+            name = str(
+                Contacts.CNContactFormatter.stringFromContact_style_(
+                    person, Contacts.CNContactFormatterStyleFullName
+                )
+                or query
+            ).strip()
+            for labeled in person.phoneNumbers():
+                value = str(labeled.value().stringValue()).strip()
+                if value:
+                    found.append(Contact(name=name, kind="phone", handle=value))
+            for labeled in person.emailAddresses():
+                value = str(labeled.value()).strip()
+                if value:
+                    found.append(Contact(name=name, kind="email", handle=value))
+        return found
 
     async def _osascript(self, script: str, *args: str) -> str:
         """Run an AppleScript with arguments passed as argv.
@@ -348,28 +460,53 @@ class MessagesClient:
             return [Contact(name=query, kind=kind, handle=query)]
 
         contacts: list[Contact] = []
+        consulted = False
         try:
-            raw = await self._osascript(_CONTACTS_SCRIPT, query)
-            for line in raw.splitlines():
-                parts = line.split("\t")
-                if len(parts) != 3:
-                    continue
-                name, kind, handle = (p.strip() for p in parts)
-                if handle:
-                    contacts.append(Contact(name=name, kind=kind, handle=handle))
-        except MessagesUnavailable as exc:
-            # Contacts access is a separate permission from Full Disk Access,
-            # and it being missing shouldn't take out name lookup entirely —
-            # the chat history knows plenty of names on its own.
-            log.debug("Contacts lookup failed (%s) — falling back to chat history", exc)
+            contacts = await asyncio.to_thread(self._contacts_framework_sync, query)
+            consulted = True
+        except Exception as exc:  # noqa: BLE001 - the fallback must be load-bearing
+            # Framework unavailable (bindings missing, permission denied) — or
+            # any pyobjc-level surprise (objc.error, a missing symbol on older
+            # bindings). All of them mean the same thing here: this route
+            # failed, and the AppleScript route reads the same address book
+            # under its own separate Automation permission, so it may still
+            # succeed. A narrow catch would let a bridge quirk kill the whole
+            # turn to protect a fallback that exists for exactly that case.
+            log.debug("Contacts framework failed (%s) — trying AppleScript", exc)
+
+        if not consulted:
+            try:
+                raw = await self._osascript(_CONTACTS_SCRIPT, query)
+                for line in raw.splitlines():
+                    parts = line.split("\t")
+                    if len(parts) != 3:
+                        continue
+                    name, kind, handle = (p.strip() for p in parts)
+                    if handle:
+                        contacts.append(Contact(name=name, kind=kind, handle=handle))
+            except MessagesUnavailable as exc:
+                # Contacts access is a separate permission from Full Disk
+                # Access, and it being missing shouldn't take out name lookup
+                # entirely — the chat history knows plenty of names on its own.
+                log.debug(
+                    "Contacts lookup failed (%s) — falling back to chat history", exc
+                )
 
         if not contacts:
             contacts = await asyncio.to_thread(self._known_handles_sync, query)
 
-        # Same person, same number, listed twice in different places.
+        # Same person, same number, listed twice in different places. Emails key
+        # on the full address, never on their digits: "sam2@x.com" and
+        # "bob2@y.com" share the digit "2", and collapsing them would silently
+        # drop a distinct person. Only phone-style handles dedup by digits, so
+        # +1 (555) 010 and 15550010 count as one.
         seen, unique = set(), []
         for contact in contacts:
-            key = _digits(contact.handle) or contact.handle.lower()
+            handle = contact.handle.strip()
+            if "@" in handle:
+                key = handle.lower()
+            else:
+                key = _digits(handle) or handle.lower()
             if key in seen:
                 continue
             seen.add(key)
@@ -396,6 +533,15 @@ class MessagesClient:
             raise MessagesUnavailable("No recipient.")
         if not text:
             raise MessagesUnavailable("No message body.")
+        if is_group_identifier(handle):
+            # Refused outright: a group send reports success while the message
+            # lands nowhere on current macOS — the one failure a voice assistant
+            # must never have. This must precede looks_like_handle, which a
+            # group id passes on its digit count.
+            raise MessagesUnavailable(
+                f"'{handle}' is a group chat, and group sends fail silently on "
+                "this macOS. Tell the user to send it from Messages themselves."
+            )
         if not looks_like_handle(handle):
             # A name reaching this far means contact resolution was skipped.
             # Messages would interpret it as a literal address and fail
@@ -419,5 +565,6 @@ __all__ = [
     "Message",
     "MessagesClient",
     "MessagesUnavailable",
+    "is_group_identifier",
     "looks_like_handle",
 ]

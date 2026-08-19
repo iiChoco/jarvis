@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-import threading
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -52,49 +51,49 @@ class WakeDetector(Protocol):
 class HotkeyWake:
     """Wake on Enter.
 
-    stdin is read on a daemon thread and hands over a flag, so the audio loop
-    never blocks waiting for a keypress. Deliberately the dumbest thing that
+    Armed externally by the pipeline's single stdin reader — a bare Enter on
+    the typed lane arms it — rather than opening its own reader. There is
+    exactly one reader of stdin for the same reason there is one reader of the
+    microphone: two readers of one file descriptor race per line, and an
+    asyncio reader also flips the descriptor non-blocking underneath a thread
+    blocked in ``readline``. So this detector holds no thread and touches no
+    stdin; it only carries the armed flag. Deliberately the dumbest thing that
     works — it is how the rest of the pipeline gets tested before the
     microphone is trusted, and it stays useful whenever the room is noisy.
+
+    ``arm`` and ``push``/``reset`` all run on the event loop (the stdin task
+    and the frame loop), never preempting each other, so a plain bool needs no
+    lock.
     """
 
     def __init__(self, prompt: str = "[press Enter to talk]") -> None:
         self._prompt = prompt
-        self._armed = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._stop = threading.Event()
+        self._armed = False
 
     async def start(self) -> None:
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._reader, daemon=True)
-        self._thread.start()
         self._announce()
 
     def _announce(self) -> None:
         sys.stdout.write(f"\n{self._prompt} ")
         sys.stdout.flush()
 
-    def _reader(self) -> None:
-        while not self._stop.is_set():
-            try:
-                if sys.stdin.readline() == "":  # EOF
-                    return
-            except (ValueError, OSError):
-                return
-            self._armed.set()
+    def arm(self) -> None:
+        """Register a bare Enter as a wake. Called by the pipeline's stdin
+        reader, which owns the one descriptor."""
+        self._armed = True
 
     def push(self, frame: bytes) -> bool:  # noqa: ARG002 - audio is irrelevant here
-        if self._armed.is_set():
-            self._armed.clear()
+        if self._armed:
+            self._armed = False
             return True
         return False
 
     def reset(self) -> None:
-        self._armed.clear()
+        self._armed = False
         self._announce()
 
     async def close(self) -> None:
-        self._stop.set()
+        return None
 
 
 class AlwaysAwake:

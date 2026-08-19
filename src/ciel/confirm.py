@@ -107,6 +107,7 @@ class VoiceConfirmBroker:
         self._suppressed = 0
         self._utterance: asyncio.Future[np.ndarray | None] | None = None
         self._typed_answer: str | None = None
+        self._asked_at: float | None = None
         self._barge_run = 0
 
         self._player: Player | None = None
@@ -154,6 +155,19 @@ class VoiceConfirmBroker:
     def active(self) -> bool:
         """Whether the frame loop should be routing frames to :meth:`feed`."""
         return self._phase is not _Phase.IDLE
+
+    @property
+    def asked_at(self) -> float | None:
+        """Monotonic time the current question was first put, or None if no
+        question is awaiting an answer.
+
+        The pipeline uses this to reject a typed line that predates the
+        question: a request typed while the turn was still busy is the user's
+        *next* turn, not a clairvoyant answer, and consuming it would both eat
+        the request and let a line beginning "yes"/"no" silently decide a gated
+        action nobody was answering.
+        """
+        return self._asked_at
 
     def feed(self, frame: bytes) -> None:
         """Accept one mic frame from the frame loop; meaning depends on phase."""
@@ -249,11 +263,13 @@ class VoiceConfirmBroker:
                 if self._cancelled.is_set():
                     return False
 
+                self._asked_at = time.monotonic()
                 await self._speak(question)
 
                 # One re-prompt on an unclear answer, then deny. A gate that
                 # keeps asking becomes background noise to say yes at.
-                for _ in range(2):
+                attempts = 2
+                for attempt in range(attempts):
                     if self._cancelled.is_set():
                         return False
                     self._mic.drain()  # our own prompt is in the queue
@@ -267,7 +283,7 @@ class VoiceConfirmBroker:
                         heard = typed.strip()
                         print(f"  you (confirm, typed): {heard}", flush=True)
                     elif utterance is None:
-                        await self._speak("No answer — skipping it.")
+                        await self._announce("No answer — skipping it.")
                         return False
                     else:
                         heard = (await self._stt.transcribe(utterance)).strip()
@@ -278,12 +294,18 @@ class VoiceConfirmBroker:
                     if verdict is True:
                         return True
                     if verdict is False:
-                        await self._speak("Okay, skipping it.")
+                        await self._announce("Okay, skipping it.")
                         return False
-                    await self._speak("Yes or no?")
+                    # Unclear. Re-prompt only if another listen follows;
+                    # speaking "Yes or no?" after the last attempt would ask a
+                    # question nothing is left to hear the answer to.
+                    if attempt < attempts - 1:
+                        await self._speak("Yes or no?")
+                await self._announce("I'll take that as a no.")
                 return False
             finally:
                 self._phase = _Phase.IDLE
+                self._asked_at = None
                 self._endpointer.reset()
 
     # ── internals ────────────────────────────────────────────────────────────
@@ -309,6 +331,24 @@ class VoiceConfirmBroker:
             await self._player.play(self._tts.stream(text))
         except Exception:  # noqa: BLE001
             log.debug("could not speak the confirmation prompt", exc_info=True)
+
+    async def _announce(self, text: str) -> None:
+        """Speak a closing line after the verdict is decided, without listening.
+
+        The phase drops to IDLE first so :meth:`answer` stops accepting input
+        for the rest of this exchange: the decision is made, and a line typed
+        during "Okay, skipping it." is the user's next request, not an answer to
+        eat. Otherwise identical to :meth:`_speak` — echoed and recorded.
+        """
+        assert self._player is not None and self._tts is not None
+        self._phase = _Phase.IDLE
+        print(f"\n  ciel (confirm): {text}", flush=True)
+        if self._record is not None:
+            self._record("ciel-confirm", text)
+        try:
+            await self._player.play(self._tts.stream(text))
+        except Exception:  # noqa: BLE001
+            log.debug("could not speak the confirmation closing", exc_info=True)
 
     def _check_early_answer(self, frame: bytes) -> None:
         """Let the user answer over the prompt, when barge-in is trusted.

@@ -154,7 +154,13 @@ class ProjectStore:
         if existing is None and not description:
             description = name.strip()
         if status is not None and status not in VALID_STATUSES:
-            status = "active"
+            # Raise, don't coerce: silently rewriting a typo'd status to
+            # "active" reverts a project the user had marked done or paused,
+            # losing exactly the state this store exists to keep. The error
+            # reaches the model as a tool failure and teaches the valid set.
+            raise ValueError(
+                f"Unknown status {status!r}. Use one of: {', '.join(VALID_STATUSES)}."
+            )
 
         now = time.time()
         project = Project(
@@ -177,7 +183,11 @@ class ProjectStore:
         existing = self._read(path) if path.exists() else None
         if existing is None:
             return False
-        stamped = f"{_iso(time.time())}: {entry.strip()}"
+        # One log entry is one line: the reader keeps only lines beginning
+        # "- ", so a newline in the entry would drop everything after it on the
+        # next read — or, worse, a line the model wrote as "- foo" would be
+        # parsed back as a separate forged log entry. Collapse to a single line.
+        stamped = f"{_iso(time.time())}: {' '.join(entry.split())}"
         updated = Project(
             name=existing.name,
             description=existing.description,
@@ -229,10 +239,15 @@ class ProjectStore:
     def _save(self, project: Project) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
         log_lines = "\n".join(f"- {line}" for line in project.log)
+        # The description is one frontmatter line; a newline in it would be
+        # reparsed as another key and could spoof status/timestamps. Collapse
+        # it. State is intentionally multi-line and lives in the body, so it is
+        # left alone.
+        description = " ".join(project.description.split())
         text = (
             "---\n"
             f"name: {project.name}\n"
-            f"description: {project.description}\n"
+            f"description: {description}\n"
             f"status: {project.status}\n"
             f"created_at: {_iso(project.created_at)}\n"
             f"updated_at: {_iso(project.updated_at)}\n"

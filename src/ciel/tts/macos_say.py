@@ -113,7 +113,21 @@ class SayTTS:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await proc.communicate()
+        try:
+            _, stderr = await proc.communicate()
+        except BaseException:
+            # Cancelled (a barge-in closing the stream mid-synthesis) or
+            # errored: kill the `say` process and drop its temp file rather
+            # than orphaning a subprocess and leaking the WAV until shutdown.
+            # BaseException, not Exception, because CancelledError is the case
+            # that matters and it is not an Exception.
+            try:
+                proc.kill()
+                await proc.wait()
+            except BaseException:  # noqa: BLE001 - already tearing down; best effort
+                pass
+            path.unlink(missing_ok=True)
+            raise
         if proc.returncode != 0:
             path.unlink(missing_ok=True)
             raise RuntimeError(
