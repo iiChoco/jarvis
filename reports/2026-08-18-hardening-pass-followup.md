@@ -136,3 +136,26 @@ intent, not a bug.
 `MicStream.frames` logs "waiting for the device" on the first stall and returns on the
 second, so effective tolerance is six seconds. Matches the comment — just note that
 `_STALL_LIMIT = 2` means one retry, not two.
+
+---
+
+## Resolution (later on 2026-08-18)
+
+All four issues are now closed, in commits `4c1109e` ("The review's open
+items, closed") and `e079be0` ("The review's ten findings, fixed"):
+
+- **A** — glob-only matches downgrade to confirm, but only *broad* listing
+  globs (`ls -d .*`); targeted globs (`.ss?`, `id_*`) remain deny as
+  obfuscated credential names, and the glob-confirm question now speaks its
+  reason. `command -v` (including clustered `-pv`) classifies as the lookup
+  it is.
+- **B** — `Player.device_lost` distinguishes device failure from barge-in;
+  every abandon path records the true cause via `_abandon_playback`, and a
+  proactive nudge that dies to a dead speaker holds its event unspent.
+- **C** — `stop()` stamps its time; a `play()` queued on the lock when the
+  stop landed returns False instead of clearing the flag and speaking.
+- **D** — closed per this report's own reasoning, unchanged.
+
+The Contacts fallback was already load-bearing in the tree when this was
+committed, and STT warm-up now falls back to faster-whisper on a
+present-but-broken mlx install.

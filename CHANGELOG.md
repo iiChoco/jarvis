@@ -2,6 +2,32 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-08-18 — the night review: ten findings, ten fixes
+
+**Why.** A day that shipped three Vigil phases deserved an adversarial
+pass before anyone slept on it. An eight-angle review of the day's diff
+surfaced ten confirmed-or-plausible defects — several of them exactly the
+class of bug an unattended layer must not have.
+
+**What.** The worst: a user turn hastening the maintenance slot could ship
+a *truncated* iMessage (interrupt ends the stream normally; nothing
+checked); the brief consumed its overnight held notes before knowing
+whether it would deliver, so a SKIP burned them; cancelling an unattended
+turn (autoreload, shutdown) lost its event entirely; the WorkWatcher
+mutated the queue from a worker thread, able to corrupt the whole state
+file; and the new glob leniency in the shell gate let *targeted*
+credential globs (`.ss?/id_*`) escape deny. All fixed — the unattended
+choreography now lives once in `_compose_unattended` (timeout-interrupt
+inside the suppression block, hastening detection, hold-on-cancel), the
+queue moved to a peek/claim lifecycle with an in-flight dedupe horizon,
+the brief peeks and consumes only on delivery, watcher threads only read,
+and the glob downgrade applies to broad listing patterns alone, with the
+reason spoken in the confirmation. Also: cold starts are no longer misread
+as wakes from sleep, verify failures hold an honest fallback instead of an
+internal directive, read-back checks cap their backlog at three, and the
+older hardening reviews' four open issues are closed (resolution appended
+to the report). Probes grew to 153 + 148 + 56 checks.
+
 ## 2026-08-18 — Vigil phase three: done means observed
 
 **Why.** The wishlist's second structural item: Ciel reports success
