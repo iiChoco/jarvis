@@ -1065,12 +1065,9 @@ class Pipeline:
                             # Barging in on the announcement means the deep
                             # pass must die too — otherwise the subagent runs
                             # on for a minute and then answers a question the
-                            # user already abandoned.
-                            self._interrupted = True
-                            self._confirm.cancel("interrupted")
-                            await self._brain.interrupt()
-                            print("  (interrupted)")
-                            self._record("event", "interrupted")
+                            # user already abandoned. A lost output device
+                            # abandons it the same way, but says so honestly.
+                            await self._abandon_playback(player.device_lost)
                             break
                     self._indicator.set_state("thinking")
                     continue
@@ -1117,16 +1114,12 @@ class Pipeline:
                 self._indicator.set_state("thinking")
 
                 if not completed:
-                    # The user talked over us. Everything still queued behind
-                    # this sentence is a reply to a question they've moved on
-                    # from, so abandon the turn rather than finishing it. A
-                    # confirmation racing in from this dying turn's hook is
-                    # resolved to deny for the same reason.
-                    self._interrupted = True
-                    self._confirm.cancel("interrupted")
-                    await self._brain.interrupt()
-                    print("  (interrupted)")
-                    self._record("event", "interrupted")
+                    # Either the user talked over us — everything queued
+                    # behind this sentence answers a question they've moved
+                    # on from — or the output device died and nothing is
+                    # being heard. Both abandon the turn; the recorded cause
+                    # differs, and the difference matters (see the helper).
+                    await self._abandon_playback(player.device_lost)
                     break
 
         if first_spoken is not None:
@@ -1237,15 +1230,24 @@ class Pipeline:
             self._indicator.set_state("speaking")
             await self._play_ring(player)
             played_all = True
+            device_lost = False
             for sentence in sentences:
                 print(f"  ciel (proactive): {sentence}", flush=True)
                 self._record("ciel", f"[proactive] {sentence}")
                 if not await player.play(self._tts.stream(sentence)):
-                    # Barged in: the user is talking, the rest of the nudge
-                    # is noise. The event still counts as delivered — its
-                    # ring and first words reached the room.
                     played_all = False
+                    device_lost = player.device_lost
                     break
+            if device_lost:
+                # Nothing reached the room — the notification did not
+                # happen. No budget charge, and the note is still owed:
+                # hold it for the next conversation.
+                self._record("event", "proactive: audio output lost")
+                self._events.hold(event)
+                return
+            # Barge-in mid-nudge still counts as delivered — the ring and
+            # first words reached the room, and the user chose to talk over
+            # them; re-delivering would nag.
             self._events.mark_spoken(
                 event, time.time(), time.strftime("%Y-%m-%d")
             )
@@ -1309,6 +1311,29 @@ class Pipeline:
             "if one is stale, drop it silently.)\n\n"
             f"{text}"
         )
+
+    async def _abandon_playback(self, device_lost: bool) -> None:
+        """Abandon the rest of a turn whose sentence didn't finish playing.
+
+        Two causes share the mechanics — stop generating, resolve any pending
+        confirmation to deny, mark the turn interrupted — but not the record:
+        barge-in means the user wants something else; a dead output device
+        means nothing was heard. Logging the second as "(interrupted)" sends
+        whoever reads the transcript to barge-in tuning when the real problem
+        is a cable (the hardening review's issue B — two call sites had
+        exactly that misreport).
+        """
+        self._interrupted = True
+        if device_lost:
+            self._confirm.cancel("output device lost")
+            await self._brain.interrupt()
+            print("  (audio output lost — abandoning the turn)")
+            self._record("event", "audio output lost")
+        else:
+            self._confirm.cancel("interrupted")
+            await self._brain.interrupt()
+            print("  (interrupted)")
+            self._record("event", "interrupted")
 
     async def _announce_timers(
         self,
@@ -1604,7 +1629,7 @@ class Pipeline:
         # seconds to start; do them together so startup is bounded by the
         # slowest one, not their sum.
         startup = [
-            self._stt.warm_up(),
+            self._warm_up_stt(),
             self._warm_up_tts(),
             self._wake.start(),
             self._indicator.start(),
@@ -1620,6 +1645,31 @@ class Pipeline:
         startup.extend(w.start() for w in self._vigil_watchers)
         await asyncio.gather(*startup)
         log.info("ready in %.1fs", time.monotonic() - started)
+
+    async def _warm_up_stt(self) -> None:
+        """Load the transcriber, falling back to faster-whisper if it won't.
+
+        ``build_stt`` already falls back when mlx-whisper is *absent*; this
+        covers present-but-broken — an ImportError or model failure that only
+        surfaces in warm_up's lazy import (the hardening follow-up's note).
+        Same reasoning as the TTS fallback below: losing GPU transcription
+        speed is acceptable, losing the ears is not, and faster-whisper is a
+        hard dependency that works everywhere. Runs before the confirm broker
+        binds its engines, so the replacement is what gets bound.
+        """
+        from ciel.stt.local_whisper import WhisperSTT
+
+        try:
+            await self._stt.warm_up()
+            return
+        except Exception as exc:  # noqa: BLE001 - any failure means fall back
+            if isinstance(self._stt, WhisperSTT):
+                raise  # already the engine of last resort; nothing to fall to
+            log.warning("%s failed to start (%s) — falling back to faster-whisper",
+                        type(self._stt).__name__, exc)
+
+        self._stt = WhisperSTT(self._config.stt)
+        await self._stt.warm_up()
 
     async def _warm_up_tts(self) -> None:
         """Load the speech engine, falling back to ``say`` if it won't start.

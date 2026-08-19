@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from contextlib import aclosing
 from types import TracebackType
 from typing import AsyncIterator, Self
@@ -46,10 +47,27 @@ class Player:
         # that holds it.
         self._play_lock = asyncio.Lock()
         self._chunk_bytes = (sample_rate * CHUNK_MS // 1000) * 2
+        self._stop_at: float | None = None
+        """When stop() last fired (monotonic). A stop aims at the current
+        play *and* any play already queued on the lock when it landed — the
+        queued call would otherwise clear the flag and speak into a moment
+        the user just interrupted. Each play records its own request time and
+        compares; a play requested after the stop proceeds normally."""
+        self._device_lost = False
 
     @property
     def is_playing(self) -> bool:
         return self._playing.is_set()
+
+    @property
+    def device_lost(self) -> bool:
+        """Whether the most recent play() failed because the output device
+        died, as opposed to being stopped by barge-in. Callers that abandon a
+        turn on ``play() -> False`` read this to report the true cause — an
+        unplugged speaker is not the user changing their mind, and logging it
+        as an interruption sends whoever reads the transcript to the wrong
+        place. Valid until the next play() begins (plays are serialized)."""
+        return self._device_lost
 
     async def __aenter__(self) -> Self:
         await self.open()
@@ -89,22 +107,33 @@ class Player:
 
         Safe to call from anywhere, including while nothing is playing. Uses a
         threading.Event rather than an asyncio one so the barge-in detector can
-        trip it without needing to be on the event loop.
+        trip it without needing to be on the event loop. Also stamps the stop
+        time, so a play() already queued on the lock when this fires is covered
+        too instead of clearing the flag and speaking anyway.
         """
+        self._stop_at = time.monotonic()
         self._stop.set()
 
     async def play(self, chunks: AsyncIterator[bytes]) -> bool:
         """Play a stream of int16 PCM chunks.
 
         Returns ``True`` if playback ran to completion, ``False`` if it was
-        interrupted *or the output device failed*. The caller uses that to
-        decide whether to abandon the rest of the turn — an interrupted
-        sentence means the user wants something else, so queued sentences
-        behind it are stale; a device failure means nothing was heard, and
-        reporting completion would leave Ciel believing it spoke into a mute
-        device.
+        stopped or the output device failed — ``device_lost`` distinguishes
+        the two. The caller uses the result to decide whether to abandon the
+        rest of the turn: an interrupted sentence means the user wants
+        something else, so queued sentences behind it are stale; a device
+        failure means nothing was heard, and reporting completion would leave
+        Ciel believing it spoke into a mute device.
         """
+        requested_at = time.monotonic()
         async with self._play_lock:
+            self._device_lost = False
+            if self._stop_at is not None and self._stop_at >= requested_at:
+                # A stop landed while this play was waiting on the lock. The
+                # stop was aimed at everything in flight at that moment, this
+                # play included — speaking now would talk over whatever the
+                # user interrupted for.
+                return False
             if self._stream is None:
                 await self.open()
             assert self._stream is not None
@@ -147,6 +176,7 @@ class Player:
                 log.warning("output device failed during playback", exc_info=True)
                 completed = False
                 device_lost = True
+                self._device_lost = True
                 try:
                     self._stream.close()
                 except Exception:  # noqa: BLE001 - already broken; best effort

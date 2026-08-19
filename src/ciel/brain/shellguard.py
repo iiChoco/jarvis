@@ -131,28 +131,37 @@ def _normalize(token: str) -> str:
     return os.path.basename(_unquote(token))
 
 
-def _forbidden_component(command: str) -> str | None:
-    """The first credential/startup-file name the command mentions, if any.
+def _forbidden_component(command: str) -> tuple[str, bool] | None:
+    """The first credential/startup-file name the command mentions, if any,
+    as ``(component, exact)``.
 
     Matched against path components of every whitespace token, so
     ``cat ~/.ssh/id_rsa`` and ``echo x >> ~/.zshrc`` both trip on the name
     alone — no path resolution, which a shell could defeat anyway. Quoting is
-    removed first (``cat ~/.a"w"s/credentials`` still trips on ``.aws``), and a
-    glob component that could expand to a forbidden name (``~/.??h/id_*``) trips
-    too, since a shell resolves both spellings identically.
+    removed first (``cat ~/.a"w"s/credentials`` still trips on ``.aws``).
+
+    A glob component that *could* expand to a forbidden name (``~/.??h/id_*``)
+    trips too, but is reported as inexact: broad globs also match plenty of
+    innocent names (``ls -d .*`` lists every dotfile, ``.ssh`` among them), so
+    the caller sends exact matches to deny and glob-only matches to confirm —
+    the protection survives, the user hears the command, and an ordinary
+    dotfile listing stops landing in the tier with no escape hatch. An exact
+    hit anywhere outranks a glob hit, so ``ls .* ~/.ssh/id_rsa`` still denies.
     """
+    glob_hit: str | None = None
     for token in command.split():
         cleaned = _unquote(token)
         for part in cleaned.split("/"):
             if part in FORBIDDEN_NAMES:
-                return part
+                return part, True
             if (
-                _GLOB_CHARS.search(part)
+                glob_hit is None
+                and _GLOB_CHARS.search(part)
                 and part.strip("*?[]")  # skip a bare `*`, which matches everything
                 and any(fnmatch.fnmatch(name, part) for name in FORBIDDEN_NAMES)
             ):
-                return part
-    return None
+                glob_hit = part
+    return (glob_hit, False) if glob_hit is not None else None
 
 
 def _effective_tokens(tokens: list[str]) -> list[str]:
@@ -168,9 +177,11 @@ def _effective_tokens(tokens: list[str]) -> list[str]:
         base = _normalize(toks[0])
         if base in _WRAPPERS and len(toks) > 1:
             rest = toks[1:]
+            opts: list[str] = []
             while rest:
                 arg = rest[0]
                 if arg.startswith("-"):
+                    opts.append(arg)
                     rest = rest[1:]
                     if arg in _WRAPPER_VALUE_OPTS and rest:
                         rest = rest[1:]  # its value is not the wrapped command
@@ -179,6 +190,12 @@ def _effective_tokens(tokens: list[str]) -> list[str]:
                     rest = rest[1:]
                     continue
                 break
+            if base == "command" and any(o in ("-v", "-V") for o in opts):
+                # ``command -v sudo`` prints where sudo lives; it executes
+                # nothing. Peeling it made a pure lookup deny on the name it
+                # was looking up — stop peeling and let it classify as the
+                # lookup it is (not allowlisted, so confirm, never quiet).
+                return [base, *toks[1:]]
             toks = rest
             continue
         return [base, *toks[1:]]
@@ -235,8 +252,8 @@ def classify(command: str, config: ShellConfig) -> tuple[Tier, str]:
     if not text:
         return "deny", "it is empty"
 
-    name = _forbidden_component(text)
-    if name is not None:
+    forbidden = _forbidden_component(text)
+    if forbidden is not None and forbidden[1]:
         return "deny", "it touches credentials, shell configuration, or agent state"
 
     deny_tokens = _DENY_TOKENS | set(config.deny_extra)
@@ -254,6 +271,13 @@ def classify(command: str, config: ShellConfig) -> tuple[Tier, str]:
                 return "deny", "it pipes downloaded content into an interpreter"
             if head in _DOWNLOADERS:
                 interpreter_stage = True
+
+    if forbidden is not None:
+        # A glob that could expand to a credential or startup-file name, with
+        # no exact mention anywhere. Confirm, not deny: the user hears the
+        # command and decides — see _forbidden_component on why globs are the
+        # one case where the deny tier over-matched real commands.
+        return "confirm", "a pattern in it could match credential or startup files"
 
     harmless_stripped = _HARMLESS_REDIRECT.sub(" ", text)
     has_structure = bool(
