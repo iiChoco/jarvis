@@ -2008,7 +2008,11 @@ class Pipeline:
     def _announce_ready(self) -> None:
         mode = self._config.wake.mode
         if mode == "wakeword":
-            print(f"\nReady. Say \"{self._config.wake.model.replace('_', ' ')}\".")
+            # The model may be a pretrained NAME ("hey_jarvis") or a PATH to
+            # a custom model ("~/.ciel/models/hey_ciel.onnx") — the phrase is
+            # the stem either way, not the directory it lives in.
+            phrase = Path(self._config.wake.model).stem.replace("_", " ")
+            print(f'\nReady. Say "{phrase}".')
         elif mode == "always":
             print("\nReady. Just talk.")
         # hotkey prints its own prompt via reset()/start()
