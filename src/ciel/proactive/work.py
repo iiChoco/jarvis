@@ -26,6 +26,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ciel.proactive.events import EventQueue, ProactiveEvent
+from ciel.proactive.watchers import poll_loop
 
 log = logging.getLogger(__name__)
 
@@ -114,19 +115,13 @@ class WorkWatcher:
         # loop, where the tool's add_file and the frame loop's queue calls
         # also live. Everything shared is single-threaded again; the review
         # found the previous shape interleaving two writers on one tmp file.
-        while True:
-            try:
-                if self._watches:
-                    snapshot = list(self._watches)
-                    completed = await asyncio.to_thread(self._probe, snapshot)
-                    self._resolve(completed, time.time())
-            except Exception:  # noqa: BLE001 - a bad watch must not kill the loop
-                log.exception("work watch check failed")
-            try:
-                await asyncio.wait_for(self._kick.wait(), timeout=_POLL_S)
-            except asyncio.TimeoutError:
-                pass
-            self._kick.clear()
+        async def tick() -> None:
+            if self._watches:
+                snapshot = list(self._watches)
+                completed = await asyncio.to_thread(self._probe, snapshot)
+                self._resolve(completed, time.time())
+
+        await poll_loop(self._kick, _POLL_S, tick)
 
     def check(self, now: float) -> None:
         """Probe and resolve synchronously — the single-threaded entry the

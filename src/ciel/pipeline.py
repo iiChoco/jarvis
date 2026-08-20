@@ -51,6 +51,7 @@ from ciel.config import SAMPLE_RATE, AudioConfig, Config
 from ciel.confirm import VoiceConfirmBroker
 from ciel.messages import MessagesClient, MessagesUnavailable
 from ciel.proactive.calendar import CalendarWatcher
+from ciel.proactive.gcal import GoogleCalendarWatcher
 from ciel.proactive.events import EventQueue, ProactiveEvent
 from ciel.proactive.policy import Decision, InterruptionPolicy
 from ciel.proactive.presence import PresenceProbe
@@ -375,7 +376,7 @@ class Pipeline:
         just as visible. In-flight speech and user-requested timers are
         untouched — the brake stops new starts, never running work."""
         self._hold_engaged = False  # log the engagement once, not per poll
-        self._calendar: CalendarWatcher | None = None
+        self._calendar: CalendarWatcher | GoogleCalendarWatcher | None = None
         self._owner_messages: MessagesClient | None = None
         if config.proactive.enabled:
             self._events = EventQueue(
@@ -385,7 +386,14 @@ class Pipeline:
             self._policy = InterruptionPolicy(config.proactive)
             self._presence = PresenceProbe(config.proactive)
             if config.proactive.calendar_enabled:
-                self._calendar = CalendarWatcher(config.proactive, self._events)
+                # Same contract, different source of truth: EventKit for
+                # calendars macOS syncs, Google's API for calendars that
+                # never touch this machine.
+                self._calendar = (
+                    GoogleCalendarWatcher(config.proactive, self._events)
+                    if config.proactive.calendar_source == "google"
+                    else CalendarWatcher(config.proactive, self._events)
+                )
                 self._vigil_watchers.append(self._calendar)
             if config.proactive.brief_time:
                 self._vigil_watchers.append(

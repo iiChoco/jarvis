@@ -2,6 +2,25 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-08-19 — nudges read Google Calendar at the source
+
+**Why.** This Mac syncs no calendars into Calendar.app, so the EventKit
+watcher was watching an empty store — nudges would never have fired. The
+real calendar lives in Google.
+
+**What.** `[proactive] calendar_source = "google"` routes the calendar
+watcher to Google's API directly, piggybacking the auth the [mcp.gcal]
+connector already established: same OAuth client keys, same saved refresh
+token, nothing new to authorize and no Calendars permission dialog. Access
+tokens live in memory only — the connector's token file is never written,
+because two writers of one token file is how refresh races start. Same
+watcher contract as EventKit (nudges, agenda for the brief, kick on wake,
+health streaks), stdlib urllib on worker threads, read-only endpoints
+only. Verified live: token refresh, a real scan, and tomorrow's lectures
+in the agenda. Adding a fourth watcher also tipped the deferred cleanup:
+the poll heartbeat (tick, sleep-or-kick, clear-after-wait) now lives once
+in watchers.poll_loop, used by all four.
+
 ## 2026-08-18 — the night review: ten findings, ten fixes
 
 **Why.** A day that shipped three Vigil phases deserved an adversarial

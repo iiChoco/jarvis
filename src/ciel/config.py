@@ -954,8 +954,34 @@ class ProactiveConfig:
 
     calendars: tuple[str, ...] = ()
     """Calendar names to watch, matched against calendar titles. Empty means
-    all of them — right until the first shared calendar full of other
-    people's reminders, which is what this filter is for."""
+    all of them (the "google" source reads just the primary calendar when
+    empty) — right until the first shared calendar full of other people's
+    reminders, which is what this filter is for."""
+
+    calendar_source: Literal["eventkit", "google"] = "eventkit"
+    """Where nudges read the calendar. "eventkit" reads whatever macOS
+    Calendar syncs — right when calendars live there. "google" goes to
+    Google Calendar directly, piggybacking the [mcp.gcal] connector's OAuth
+    (same client keys, same saved refresh token; nothing new to authorize) —
+    right on a machine where Google is the calendar and no macOS account
+    mirrors it, where EventKit would watch an empty store forever. A
+    Literal so a typo warns at load."""
+
+    google_oauth_keys: Path = field(
+        default_factory=lambda: Path.home() / ".gmail-mcp" / "gcp-oauth.keys.json"
+    )
+    """OAuth client for the "google" source — the same Desktop-app JSON the
+    Google connectors use (see the connector notes in config.toml)."""
+
+    google_token_file: Path = field(
+        default_factory=lambda: Path.home()
+        / ".config" / "google-calendar-mcp" / "tokens.json"
+    )
+    """Where @cocal/google-calendar-mcp saves the tokens its OAuth flow
+    produced. Read-only here: the watcher borrows the refresh token and
+    keeps access tokens in memory, never writing back — two writers of one
+    token file is how refresh races start. If the connector re-authorizes,
+    the next refresh picks the new token up."""
 
     owner_handle: str = ""
     """Where "text me if I'm away" goes — one phone number or iMessage email,

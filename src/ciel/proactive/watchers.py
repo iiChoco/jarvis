@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Awaitable, Callable, Protocol, runtime_checkable
 
 from ciel.proactive.events import EventQueue, ProactiveEvent
 from ciel.proactive.policy import parse_hhmm
@@ -27,6 +27,34 @@ if TYPE_CHECKING:
     from ciel.config import ProactiveConfig
 
 log = logging.getLogger(__name__)
+
+
+async def poll_loop(
+    kick: asyncio.Event,
+    interval_s: float,
+    tick: Callable[[], Awaitable[None]],
+) -> None:
+    """The shared watcher heartbeat: tick, then sleep or be kicked awake.
+
+    One copy of the subtle part (the review found it hand-rolled in three
+    watchers, inviting drift): the kick is cleared *after* the wait, so a
+    kick landing mid-tick still hurries the next round instead of being
+    lost; a tick that raises is logged and the loop survives — a broken
+    source must never take the heartbeat down with it; cancellation
+    propagates, because close() relies on it.
+    """
+    while True:
+        try:
+            await tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - the heartbeat must not die
+            log.exception("watcher tick failed")
+        try:
+            await asyncio.wait_for(kick.wait(), timeout=interval_s)
+        except asyncio.TimeoutError:
+            pass
+        kick.clear()
 
 
 @runtime_checkable
@@ -154,16 +182,10 @@ class ScheduleWatcher:
         self._task = None
 
     async def _poll(self) -> None:
-        while True:
-            try:
-                self.check(time.time())
-            except Exception:  # noqa: BLE001 - the heartbeat must not die
-                log.exception("schedule check failed")
-            try:
-                await asyncio.wait_for(self._kick.wait(), timeout=60.0)
-            except asyncio.TimeoutError:
-                pass
-            self._kick.clear()
+        async def tick() -> None:
+            self.check(time.time())
+
+        await poll_loop(self._kick, 60.0, tick)
 
     def check(self, now: float) -> None:
         """Push the brief event if its time has come today and is still

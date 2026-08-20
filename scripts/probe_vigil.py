@@ -399,6 +399,66 @@ async def run_checks(tmp: Path) -> None:
     check("no extra scan without another kick", len(scans) == 2)
     await watcher.close()
 
+    # ── the google calendar parser ───────────────────────────────────────────
+    print("google calendar parsing:")
+    from ciel.proactive.gcal import nudges_from_items
+
+    ids = iter(f"g{n}" for n in range(100))
+    base = 1_000_000.0
+
+    def gitem(offset_s=300.0, **over):
+        item = {
+            "id": "evt1",
+            "summary": "Standup",
+            "status": "confirmed",
+            "start": {"dateTime": datetime_iso(base + offset_s)},
+        }
+        item.update(over)
+        return item
+
+    import datetime as _dt
+
+    def datetime_iso(ts):
+        return _dt.datetime.fromtimestamp(ts, tz=_dt.timezone.utc).isoformat()
+
+    inside = nudges_from_items([gitem()], base, 600.0, lambda: next(ids))
+    check(
+        "a timed event inside the lead window nudges",
+        len(inside) == 1 and inside[0].expires_at == base + 300.0
+        and "Standup" in inside[0].summary,
+    )
+    check(
+        "the dedupe key carries id and start",
+        inside[0].dedupe_key == f"gcal:evt1:{int(base + 300.0)}",
+    )
+    check(
+        "an event beyond the lead window waits",
+        nudges_from_items([gitem(offset_s=1200.0)], base, 600.0, lambda: next(ids)) == [],
+    )
+    check(
+        "an already-started event never nudges",
+        nudges_from_items([gitem(offset_s=-60.0)], base, 600.0, lambda: next(ids)) == [],
+    )
+    check(
+        "all-day events are skipped",
+        nudges_from_items(
+            [gitem(start={"date": "2026-08-19"})], base, 600.0, lambda: next(ids)
+        ) == [],
+    )
+    check(
+        "cancelled events are skipped",
+        nudges_from_items([gitem(status="cancelled")], base, 600.0, lambda: next(ids)) == [],
+    )
+    check(
+        "an unrecognized shape is skipped, not a crash",
+        nudges_from_items([{"start": {}}, {"start": None}], base, 600.0, lambda: next(ids)) == [],
+    )
+    check(
+        "an untitled event still gets a sentence",
+        "A calendar event starts"
+        in nudges_from_items([gitem(summary="")], base, 600.0, lambda: next(ids))[0].summary,
+    )
+
     # ── the morning brief's clock ────────────────────────────────────────────
     print("schedule watcher:")
     from ciel.proactive.watchers import ScheduleWatcher
@@ -831,6 +891,7 @@ unattended = ["list-events"]
     check("max_spoken_per_day loads", loaded.proactive.max_spoken_per_day == 3)
     check("presence_mode loads", loaded.proactive.presence_mode == "conversation")
     check("calendars load as a tuple", loaded.proactive.calendars == ("Work", "Home"))
+    check("calendar_source defaults to eventkit", ProactiveConfig().calendar_source == "eventkit")
     check("defaults survive a partial table", loaded.proactive.calendar_lead_minutes == 10.0)
     check(
         "mcp unattended loads as a tuple",

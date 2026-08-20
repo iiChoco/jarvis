@@ -30,7 +30,7 @@ import time
 from typing import TYPE_CHECKING
 
 from ciel.proactive.events import EventQueue, ProactiveEvent
-from ciel.proactive.watchers import WatcherHealth
+from ciel.proactive.watchers import WatcherHealth, poll_loop
 from ciel.timers import spoken_clock, spoken_duration
 
 if TYPE_CHECKING:
@@ -81,7 +81,7 @@ class CalendarWatcher:
         self._task = None
 
     async def _poll(self) -> None:
-        while True:
+        async def tick() -> None:
             try:
                 found = await asyncio.to_thread(self._scan_sync)
                 for event in found:
@@ -93,15 +93,8 @@ class CalendarWatcher:
             except Exception:  # noqa: BLE001 - a failed scan must not kill the watcher
                 log.exception("calendar scan failed")
                 self._health.failed(time.time())
-            # An interruptible sleep: kick() ends it early. Cleared after the
-            # wait so a kick that lands mid-scan still hurries the next one.
-            try:
-                await asyncio.wait_for(
-                    self._kick.wait(), timeout=self._config.calendar_poll_s
-                )
-            except asyncio.TimeoutError:
-                pass
-            self._kick.clear()
+
+        await poll_loop(self._kick, self._config.calendar_poll_s, tick)
 
     # ── EventKit, on a worker thread ─────────────────────────────────────────
 
