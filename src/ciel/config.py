@@ -48,6 +48,16 @@ class AudioConfig:
     """webrtcvad mode, 0-3. Higher filters more non-speech but clips soft
     speech. 2 is a reasonable desk-microphone default."""
 
+    vad_floor_ratio: float = 1.5
+    """The endpointer's energy gate: a frame counts as speech only when VAD
+    says so AND its loudness clears the ambient noise floor by this factor —
+    the same floor-times-ratio shape barge-in uses. Exists because webrtcvad
+    calls steady broadband noise (fans, white noise) speech, which kept
+    utterances from ever endpointing in a noisy room. In a quiet room the
+    floor is near zero and the gate changes nothing. Raise it if noise still
+    reads as speech; lower toward 1.0 if soft speech from across the room is
+    being clipped."""
+
     silence_ms: int = 500
     """How long the user must stop talking before the turn is considered over.
 

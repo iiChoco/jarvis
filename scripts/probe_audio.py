@@ -86,6 +86,39 @@ def probe_vad() -> int:
             print(f"\nFAIL: utterance #{i} is silent — preroll/trim is misaligned")
             ok = False
 
+    # ── the noise gate: steady broadband noise must not read as speech ──────
+    rng = np.random.default_rng(7)
+    hiss = (rng.standard_normal(SAMPLE_RATE * 3) * 0.03).astype(np.float32)
+    hiss_pcm = float_to_pcm(hiss)
+    hiss_rms = float(np.sqrt(np.mean(hiss * hiss)))
+
+    ungated = Endpointer(cfg.audio)
+    ungated_spoke = any(
+        ungated.push(f) is not None for f in _frames(hiss_pcm)
+    ) or ungated.speaking
+    print(f"\nnoise gate: 3s of hiss (rms {hiss_rms:.3f}); "
+          f"ungated VAD {'reads it as speech' if ungated_spoke else 'ignores it'}")
+
+    gated = Endpointer(cfg.audio, noise_floor=lambda: hiss_rms)
+    gated_spoke = any(
+        gated.push(f) is not None for f in _frames(hiss_pcm)
+    ) or gated.speaking
+    if gated_spoke:
+        print("FAIL: the energy gate still lets steady noise start an utterance")
+        ok = False
+    else:
+        print("gated:      hiss never starts an utterance")
+
+    # ...while speech that clears the floor still segments normally.
+    over_floor = Endpointer(cfg.audio, noise_floor=lambda: hiss_rms)
+    stream = gap + _synthesize(phrases[0]) + gap
+    heard = [u for f in _frames(stream) if (u := over_floor.push(f)) is not None]
+    if len(heard) != 1:
+        print(f"FAIL: speech over the floor segmented into {len(heard)} utterances, not 1")
+        ok = False
+    else:
+        print("gated:      speech over the floor still segments")
+
     print("\nPASS: endpointer segments speech correctly" if ok else "")
     return 0 if ok else 1
 

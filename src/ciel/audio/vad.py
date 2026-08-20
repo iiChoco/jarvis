@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
+from collections.abc import Callable
 from enum import Enum, auto
 
 import numpy as np
@@ -40,9 +41,25 @@ class Endpointer:
     for the next one.
     """
 
-    def __init__(self, config: AudioConfig) -> None:
+    def __init__(
+        self,
+        config: AudioConfig,
+        noise_floor: Callable[[], float | None] | None = None,
+    ) -> None:
         self._config = config
         self._vad = webrtcvad.Vad(config.vad_aggressiveness)
+        self._noise_floor = noise_floor
+        """The adaptive energy gate's input — the pipeline's running estimate
+        of ambient loudness, the same one barge-in thresholds against.
+        webrtcvad classifies steady broadband noise (a fan, an air purifier,
+        white noise) as speech, and on VAD alone that meant utterances in a
+        noisy room never endpointed: the silence run never accumulated, turns
+        ran to the max-length cap, and Whisper got seconds of noise to
+        hallucinate over. With the gate, a frame counts as speech only if it
+        is also meaningfully louder than the room. In a quiet room the floor
+        is near zero and the gate passes everything — behavior unchanged;
+        in a noisy one, speech must clear the noise to count, which is also
+        the bar it must clear to be transcribable at all."""
 
         preroll_frames = max(1, config.preroll_ms // FRAME_MS)
         self._preroll: deque[bytes] = deque(maxlen=preroll_frames)
@@ -74,7 +91,7 @@ class Endpointer:
             # blocksize and FRAME_SAMPLES have drifted apart.
             return None
 
-        is_speech = self._vad.is_speech(frame, SAMPLE_RATE)
+        is_speech = self._vad.is_speech(frame, SAMPLE_RATE) and self._clears_floor(frame)
 
         if self._state is _State.WAITING:
             if is_speech:
@@ -102,6 +119,21 @@ class Endpointer:
             return self._finish()
 
         return None
+
+    def _clears_floor(self, frame: bytes) -> bool:
+        """Whether the frame is loud enough over ambient to be the user.
+
+        No provider or no estimate yet reads as yes — the gate only ever
+        *narrows* what VAD already accepted, and never on missing data.
+        """
+        if self._noise_floor is None:
+            return True
+        floor = self._noise_floor()
+        if floor is None or floor <= 0.0:
+            return True
+        samples = np.frombuffer(frame, dtype=np.int16).astype(np.float32) / 32768.0
+        rms = float(np.sqrt(np.mean(samples * samples)))
+        return rms >= floor * self._config.vad_floor_ratio
 
     def _finish(self) -> np.ndarray | None:
         frames, self._frames = self._frames, []

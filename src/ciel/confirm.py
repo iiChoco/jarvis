@@ -100,7 +100,14 @@ class VoiceConfirmBroker:
         # Its own endpointer, never the pipeline's — that one's state belongs
         # to LISTENING. Injectable so tests can script utterances instead of
         # synthesizing webrtcvad-passing PCM.
-        self._endpointer = endpointer if endpointer is not None else Endpointer(config.audio)
+        self._endpointer = (
+            endpointer
+            if endpointer is not None
+            # The floor callable is rebound at bind() time; routing through
+            # self keeps the answer window's endpointing noise-gated with
+            # whatever estimate the pipeline currently holds.
+            else Endpointer(config.audio, noise_floor=lambda: self._noise_floor())
+        )
         self._lock = asyncio.Lock()
         self._cancelled = asyncio.Event()
         self._phase = _Phase.IDLE

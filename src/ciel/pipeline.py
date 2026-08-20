@@ -260,7 +260,12 @@ class Pipeline:
         self._stt: SpeechToText = build_stt(config.stt)
         self._tts: TextToSpeech = build_tts(config)
         self._wake: WakeDetector = build_wake_detector(config.wake)
-        self._endpointer = Endpointer(config.audio)
+        # The lambda defers to the running noise-floor estimate (tracked in
+        # the frame loop) so endpointing in a noisy room demands speech
+        # louder than the room — see Endpointer._clears_floor.
+        self._endpointer = Endpointer(
+            config.audio, noise_floor=lambda: self._noise_floor
+        )
         self._speaker = build_speaker_gate(config.voice)
 
         # Custom tools (memory today, whatever lands in the registry later) are
