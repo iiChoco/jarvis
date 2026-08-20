@@ -134,8 +134,13 @@ class CalendarWatcher:
             if item.isAllDay():
                 continue
             start = float(item.startDate().timeIntervalSince1970())
-            if not (0 < start - now <= lead_s):
+            if start <= now:
                 continue
+            # Seen early, said on time: the queue holds the nudge until its
+            # deliver_after moment, so timing is exact rather than quantized
+            # to the scan cadence (same shape as the Google watcher).
+            deliver_after = max(now, start - lead_s)
+            remaining = start - deliver_after
             title = str(item.title() or "").strip() or "A calendar event"
             nudges.append(ProactiveEvent(
                 id=self._queue.next_id(),
@@ -146,9 +151,10 @@ class CalendarWatcher:
                 expires_at=start,
                 summary=(
                     f"{title} starts at {spoken_clock(start)}, about "
-                    f"{spoken_duration(start - now, plural=True)} from now."
+                    f"{spoken_duration(remaining, plural=True)} from now."
                 ),
                 dedupe_key=f"cal:{item.eventIdentifier()}:{int(start)}",
+                deliver_after=deliver_after,
             ))
         return nudges
 

@@ -173,6 +173,29 @@ async def run_checks(tmp: Path) -> None:
     )
     check("count_source counts pending and held", q4.count_source("calendar") == 1)
 
+    # deliver_after: seen early, said on time.
+    q5 = EventQueue(tmp / "timed.json", held_max_age_s=3600.0)
+    q5.push(ProactiveEvent(
+        id="t1", source="calendar", importance=2, created_at=100.0,
+        expires_at=1000.0, summary="Later.", dedupe_key="t:later",
+        deliver_after=500.0,
+    ))
+    check("a held-to-its-moment event is not yet peekable", q5.peek_next(400.0) is None)
+    check("...but stays pending", q5.pending)
+    q5.push(event("t:now", created=100.0))
+    ready = q5.peek_next(400.0)
+    check(
+        "a ready event is served past a waiting one",
+        ready is not None and ready.dedupe_key == "t:now",
+    )
+    q5.begin(ready)
+    q5.drop(ready, 401.0)
+    due = q5.peek_next(500.0)
+    check(
+        "the waiting event surfaces exactly at its moment",
+        due is not None and due.dedupe_key == "t:later",
+    )
+
     # ── quiet hours and the policy table ─────────────────────────────────────
     print("interruption policy:")
     check("parse_hhmm reads a clock time", parse_hhmm("22:00") == 1320)
@@ -428,12 +451,21 @@ async def run_checks(tmp: Path) -> None:
         and "Standup" in inside[0].summary,
     )
     check(
+        "inside the lead, delivery is immediate",
+        inside[0].deliver_after == base,
+    )
+    check(
         "the dedupe key carries id and start",
         inside[0].dedupe_key == f"gcal:evt1:{int(base + 300.0)}",
     )
+    ahead = nudges_from_items([gitem(offset_s=1200.0)], base, 600.0, lambda: next(ids))
     check(
-        "an event beyond the lead window waits",
-        nudges_from_items([gitem(offset_s=1200.0)], base, 600.0, lambda: next(ids)) == [],
+        "an event beyond the lead is pushed early, held to its moment",
+        len(ahead) == 1 and ahead[0].deliver_after == base + 600.0,
+    )
+    check(
+        "the early push phrases for its delivery moment",
+        "10 minutes from now" in ahead[0].summary,
     )
     check(
         "an already-started event never nudges",

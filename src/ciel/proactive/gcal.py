@@ -83,8 +83,14 @@ def nudges_from_items(
             start_ts, all_day = _parse_start(item.get("start") or {})
         except (KeyError, ValueError, TypeError):
             continue  # a shape we don't recognize is not worth a crash
-        if all_day or not (0 < start_ts - now <= lead_s):
+        if all_day or start_ts <= now:
             continue
+        # Push everything the scan can see that starts in the future; the
+        # queue holds each nudge until its moment (start minus the lead),
+        # so delivery lands at "ten minutes before" exactly rather than
+        # quantized to whenever a scan happened to run.
+        deliver_after = max(now, start_ts - lead_s)
+        remaining = start_ts - deliver_after
         title = (item.get("summary") or "").strip() or "A calendar event"
         nudges.append(ProactiveEvent(
             id=next_id(),
@@ -94,9 +100,10 @@ def nudges_from_items(
             expires_at=start_ts,
             summary=(
                 f"{title} starts at {spoken_clock(start_ts)}, about "
-                f"{spoken_duration(start_ts - now, plural=True)} from now."
+                f"{spoken_duration(remaining, plural=True)} from now."
             ),
             dedupe_key=f"gcal:{item.get('id', 'unknown')}:{int(start_ts)}",
+            deliver_after=deliver_after,
         ))
     return nudges
 

@@ -72,6 +72,15 @@ class ProactiveEvent:
     """Source-specific extras (a journal id to verify against, a handle).
     Strings only, so the JSON round-trip is exact."""
 
+    deliver_after: float | None = None
+    """Not before this moment (wall clock). Decouples seeing from saying: a
+    polling watcher spots an event whole minutes before its nudge is due,
+    and without this the nudge fired whenever the *scan* happened to land —
+    "ten minutes before" quantized to the poll interval (a real nudge
+    measured T−9). Pushed early with deliver_after = the right moment, the
+    queue holds it and delivery precision becomes the policy poll (~5 s),
+    not the scan cadence. None means deliverable immediately."""
+
 
 class EventQueue:
     """Pending events, held notes, dedupe record, and the daily budget —
@@ -140,14 +149,18 @@ class EventQueue:
         keep: list[ProactiveEvent] = []
         head: ProactiveEvent | None = None
         for event in self._pending:
-            if head is None and event.expires_at is not None and event.expires_at <= now:
+            if event.expires_at is not None and event.expires_at <= now:
                 log.info("event expired undelivered: %s", event.summary)
                 self._delivered[event.dedupe_key] = now
                 pruned = True
                 continue
-            if head is None:
-                head = event
             keep.append(event)
+            # An event waiting on its deliver_after moment stays queued but
+            # never blocks a later event that is ready now.
+            if head is None and (
+                event.deliver_after is None or event.deliver_after <= now
+            ):
+                head = event
         if pruned:
             self._pending = keep
             self._save()

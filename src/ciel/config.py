@@ -958,9 +958,11 @@ class ProactiveConfig:
     expires at the event's start: better silent than late."""
 
     calendar_poll_s: float = 180.0
-    """How often EventKit is rescanned. Comfortably under the lead horizon,
-    so an event can't slip from "too far out" to "already started" between
-    scans."""
+    """How often the calendar is rescanned. Scan timing no longer sets nudge
+    timing — nudges are pushed as soon as a scan sees the event and held to
+    their deliver_after moment, so "ten minutes before" lands on the policy
+    poll (~5 s), not somewhere inside a scan interval. The cadence only has
+    to catch events created or moved on short notice."""
 
     calendars: tuple[str, ...] = ()
     """Calendar names to watch, matched against calendar titles. Empty means
