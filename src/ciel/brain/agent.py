@@ -289,6 +289,15 @@ class Brain:
                 else None,
                 screen=self._config.screen.enabled,
                 deep_thought=self._brain_config.deep_effort is not None,
+                # Self-knowledge of the proactive layer: without it Ciel
+                # promises to "keep an eye on things" with no watcher armed,
+                # or denies being able to do what the watch tool exists for.
+                vigil=self._config.proactive.enabled,
+                vigil_away=bool(
+                    self._config.proactive.owner_handle
+                    and self._config.messages.enabled
+                    and self._config.messages.allow_send
+                ),
             ),
             # Explicit allowlist. The Agent SDK ships the full Claude Code
             # toolset — Bash, Write, Edit — and a voice assistant that can

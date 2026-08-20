@@ -436,6 +436,22 @@ async def run_checks(tmp: Path) -> None:
         "the message outlet prompt names the phone",
         "iMessage" in proactive_prompt("X.", outlet="message"),
     )
+    from ciel.brain.prompt import build_system_prompt
+
+    with_vigil = build_system_prompt(vigil=True, vigil_away=True)
+    check(
+        "the system prompt teaches Ciel about the watchers",
+        "watch_for_completion" in with_vigil and "# Watching things" in with_vigil,
+    )
+    check(
+        "the away outlet is described only when wired",
+        "text it to the user" in with_vigil
+        and "text it to the user" not in build_system_prompt(vigil=True),
+    )
+    check(
+        "no vigil section when vigil is off",
+        "# Watching things" not in build_system_prompt(),
+    )
     check(
         "extra material lands in the prompt",
         "Today's calendar" in proactive_prompt("X.", extra="Today's calendar:\n- 9:00 AM — Standup"),
