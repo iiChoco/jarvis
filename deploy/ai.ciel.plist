@@ -39,6 +39,12 @@
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <!-- Belt to the code's braces: __main__ line-buffers stdout itself,
+         but unbuffered output also covers interpreter-level messages
+         printed before main() runs. Without one of the two, prints sit in
+         an 8KB block buffer and the log lags reality by minutes. -->
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
   </dict>
 
   <key>RunAtLoad</key>

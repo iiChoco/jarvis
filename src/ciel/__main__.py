@@ -105,6 +105,17 @@ def _check_auth() -> None:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
+    # Line-buffer stdout even when it isn't a terminal. Under launchd (or
+    # any pipe), Python block-buffers prints — the conversation feed would
+    # sit in an 8 KB buffer and reach ciel.out.log in bursts, so a tail -f
+    # lags by minutes and a crash eats whatever was buffered. The terminal
+    # was always line-buffered; the log file deserves the same truth.
+    # Guarded: stdout may be closed entirely in exotic spawns.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError, OSError):
+        pass
+
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s" if args.verbose else "%(message)s",
