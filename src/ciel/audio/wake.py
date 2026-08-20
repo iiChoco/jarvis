@@ -137,6 +137,14 @@ class OpenWakeWord:
         self._vad_threshold = vad_threshold
         self._model = None
         self._cooldown = 0
+        self._near_peak = 0.0
+        self._near_quiet = 0
+        """Near-miss tracking. A failed wake attempt used to leave no trace —
+        only threshold-crossing scores were logged — so "it takes three
+        tries" produced zero data to tune with. A burst of frames above half
+        the threshold that never crosses it is an attempt; its *peak* is
+        logged once the burst goes quiet, and that number is exactly what to
+        set the threshold just under."""
 
     async def start(self) -> None:
         import numpy as np  # noqa: F401 - imported for the side effect of failing early
@@ -175,13 +183,31 @@ class OpenWakeWord:
                 log.info("wake: %s (%.2f)", name, score)
                 # ~1s of frames; the phrase keeps scoring high after the peak.
                 self._cooldown = 33
+                self._near_peak = 0.0
                 return True
+            if score >= self._threshold / 2:
+                # Inside a possible failed attempt: track its peak.
+                self._near_peak = max(self._near_peak, float(score))
+                self._near_quiet = 0
+        if self._near_peak > 0.0:
+            self._near_quiet += 1
+            if self._near_quiet > 33:  # ~1s of quiet: the attempt is over
+                log.info(
+                    "wake near miss: peaked at %.2f (threshold %.2f) — if "
+                    "that was a real attempt, the threshold wants to sit "
+                    "just under these peaks",
+                    self._near_peak, self._threshold,
+                )
+                self._near_peak = 0.0
+                self._near_quiet = 0
         return False
 
     def reset(self) -> None:
         if self._model is not None:
             self._model.reset()
         self._cooldown = 0
+        self._near_peak = 0.0
+        self._near_quiet = 0
 
     async def close(self) -> None:
         self._model = None
