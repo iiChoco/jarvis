@@ -1,0 +1,702 @@
+<!doctype html>
+<!-- The Chart: Ciel's local GUI. Served by ciel/remote/web.py, which also
+     documents the WebSocket protocol this page speaks. Deliberately one
+     self-contained file with zero external assets: it must render in a
+     library basement with no network beyond the loopback.
+
+     The look is "Instrument" (design 2a): a holographic HUD where cyan is
+     structure and gold is voice — cut-corner chips, mono meta, scanlines,
+     corner brackets around the viewport; Ciel answers in a serif, you in
+     cut-corner glass. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ciel</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Ccircle cx='64' cy='64' r='58' fill='none' stroke='%23e8c98a' stroke-opacity='.5' stroke-width='7' stroke-dasharray='4 12'/%3E%3Ccircle cx='64' cy='64' r='34' fill='none' stroke='%23a0f0ff' stroke-opacity='.7' stroke-width='7'/%3E%3Ccircle cx='64' cy='64' r='12' fill='%23e8c98a'/%3E%3C/svg%3E">
+<style>
+  :root {
+    /* cyan is structure */
+    --line: rgba(140, 240, 255, .14);
+    --line-strong: rgba(140, 240, 255, .22);
+    --glass-border: rgba(160, 240, 255, .28);
+    --text: #dfe6e6;
+    --text-dim: rgba(223, 230, 230, .65);
+    --text-faint: rgba(223, 230, 230, .34);
+    /* gold is voice and anything that wants you */
+    --gold: #e8c98a;
+    --gold-dim: rgba(232, 201, 138, .45);
+    --gold-line: rgba(232, 201, 138, .16);
+    --serif: Georgia, "Times New Roman", serif;
+    --mono: ui-monospace, Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+    /* the HUD's state vocabulary */
+    --st-idle: #8fa8b3;
+    --st-listening: #7adea8;
+    --st-thinking: #e8c98a;
+    --st-reasoning: #b89be8;
+    --st-speaking: #a0f0ff;
+    --st-error: #e88a8a;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    background: radial-gradient(120% 85% at 50% -10%, #0b1922 0%, #050c11 55%, #030608 100%) #030608;
+    color: var(--text);
+    font: 14.5px/1.55 var(--sans);
+    display: flex;
+    flex-direction: column;
+  }
+  button { font: inherit; background: none; border: none; color: inherit; cursor: pointer; padding: 0; }
+  :focus-visible { outline: 1px solid rgba(160, 240, 255, .55); outline-offset: 2px; }
+
+  @keyframes br { 0%, 100% { opacity: .45; transform: scale(.88); } 50% { opacity: 1; transform: scale(1.08); } }
+  @keyframes ha { 0%, 100% { opacity: .5; } 50% { opacity: .95; } }
+
+  /* the projection: scanlines over everything, brackets at the corners */
+  #scan {
+    position: fixed; inset: 0; z-index: 50;
+    pointer-events: none; opacity: .3;
+    background: repeating-linear-gradient(180deg, rgba(160, 240, 255, .05) 0 1px, transparent 1px 3px);
+  }
+  .corner { position: fixed; z-index: 51; width: 13px; height: 13px; pointer-events: none; }
+  .corner.tl { top: 10px; left: 10px;  border-left: 1px solid rgba(232, 201, 138, .6);  border-top: 1px solid rgba(232, 201, 138, .6); }
+  .corner.tr { top: 10px; right: 10px; border-right: 1px solid rgba(232, 201, 138, .6); border-top: 1px solid rgba(232, 201, 138, .6); }
+  .corner.bl { bottom: 10px; left: 10px;  border-left: 1px solid rgba(232, 201, 138, .35);  border-bottom: 1px solid rgba(232, 201, 138, .35); }
+  .corner.br { bottom: 10px; right: 10px; border-right: 1px solid rgba(232, 201, 138, .35); border-bottom: 1px solid rgba(232, 201, 138, .35); }
+
+  /* cut-corner chips — the one shape the whole instrument is made of */
+  .chip {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 12px;
+    border: 1px solid var(--line-strong);
+    clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
+    font: 600 10px/1 var(--mono);
+    letter-spacing: .2em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--st-idle); flex: none; }
+
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 28px;
+    border-bottom: 1px solid var(--line);
+    flex: none;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .wordmark { font: 400 18px/1 var(--serif); letter-spacing: .24em; color: #f3efe6; }
+  .aperture .c-outer { stroke: rgba(232, 201, 138, .35); }
+  .aperture .c-mid   { stroke: rgba(160, 240, 255, .5); }
+  .aperture .c-core  { fill: rgba(232, 201, 138, .85); }
+  body[data-state="thinking"] .aperture,
+  body[data-state="reasoning"] .aperture { animation: ha 4s ease-in-out infinite; }
+  body[data-state="thinking"] .aperture .c-outer,
+  body[data-state="reasoning"] .aperture .c-outer { stroke: rgba(232, 201, 138, .5); }
+  body[data-state="thinking"] .aperture .c-mid,
+  body[data-state="reasoning"] .aperture .c-mid { stroke: rgba(232, 201, 138, .6); }
+  body[data-state="thinking"] .aperture .c-core,
+  body[data-state="reasoning"] .aperture .c-core { fill: var(--gold); }
+  .spacer { flex: 1; }
+
+  /* the state pill: six values, color is the message */
+  #state { padding: 6px 13px 6px 10px; letter-spacing: .22em; background: rgba(143, 168, 179, .1); border-color: rgba(143, 168, 179, .42); color: #b6c6cd; }
+  #state .dot { background: var(--st-idle); }
+  body[data-state="listening"] #state { background: rgba(122, 222, 168, .1); border-color: rgba(122, 222, 168, .5); color: #a6ecc7; }
+  body[data-state="listening"] #state .dot { background: var(--st-listening); box-shadow: 0 0 9px var(--st-listening); animation: br 3.4s ease-in-out infinite; }
+  body[data-state="thinking"] #state { background: rgba(232, 201, 138, .12); border-color: rgba(232, 201, 138, .55); color: #f0dbaf; }
+  body[data-state="thinking"] #state .dot { background: var(--st-thinking); box-shadow: 0 0 9px var(--st-thinking); animation: br 3.4s ease-in-out infinite; }
+  body[data-state="reasoning"] #state { background: rgba(184, 155, 232, .12); border-color: rgba(184, 155, 232, .55); color: #d2bef4; }
+  body[data-state="reasoning"] #state .dot { background: var(--st-reasoning); box-shadow: 0 0 9px var(--st-reasoning); animation: br 3.4s ease-in-out infinite; }
+  body[data-state="speaking"] #state { background: rgba(160, 240, 255, .12); border-color: rgba(160, 240, 255, .6); color: #c7f4fd; }
+  body[data-state="speaking"] #state .dot { background: var(--st-speaking); box-shadow: 0 0 9px var(--st-speaking); animation: br 1.6s ease-in-out infinite; }
+  body[data-state="error"] #state { background: rgba(232, 138, 138, .12); border-color: rgba(232, 138, 138, .6); color: #f3b7b7; }
+  body[data-state="error"] #state .dot { background: var(--st-error); box-shadow: 0 0 9px var(--st-error); }
+
+  /* the active-agent roster: a chip that counts, a panel that lists */
+  #agentsbtn { border-color: rgba(232, 201, 138, .4); color: var(--gold); }
+  #agentsbtn:hover { border-color: rgba(232, 201, 138, .7); }
+  #agentsbtn[hidden] { display: none; }
+  #agentsbtn .arr { opacity: .6; letter-spacing: 0; }
+  #agentsbtn.deep { background: rgba(184, 155, 232, .12); border-color: rgba(184, 155, 232, .55); color: #d2bef4; }
+
+  #mute:hover { border-color: rgba(140, 240, 255, .45); color: var(--text); }
+  body.muted #mute { background: rgba(143, 168, 179, .12); border-color: rgba(143, 168, 179, .45); color: #b6c6cd; }
+
+  #agentsbar {
+    display: none;
+    border-bottom: 1px solid rgba(184, 155, 232, .22);
+    background: linear-gradient(180deg, rgba(26, 22, 40, .55), rgba(5, 12, 17, .2));
+    flex: none;
+  }
+  body.agentsopen #agentsbar { display: block; }
+  #agentsbar .caption {
+    display: flex; align-items: center; gap: 12px;
+    padding: 13px 28px 6px;
+    font: 500 9.5px/1 var(--mono);
+    letter-spacing: .26em; text-transform: uppercase;
+    color: rgba(210, 190, 244, .6);
+  }
+  #agentsbar .caption::after { content: ""; flex: 1; height: 1px; background: rgba(184, 155, 232, .18); }
+  #agentrows { display: flex; flex-direction: column; padding: 0 28px 14px; }
+  .agent { display: flex; align-items: center; gap: 16px; padding: 11px 0; border-bottom: 1px solid rgba(255, 255, 255, .05); }
+  .agent:last-child { border-bottom: none; }
+  .agent .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: rgba(143, 168, 179, .9); }
+  .agent .kind {
+    width: 112px; flex: none;
+    font: 600 9.5px/1.3 var(--mono);
+    letter-spacing: .2em; text-transform: uppercase;
+    color: rgba(182, 198, 205, .8);
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .agent .main { flex: 1; min-width: 0; }
+  .agent .label { font: 400 15px/1.4 var(--serif); color: #eef4f1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agent .detail { margin-top: 3px; font: 400 10.5px/1.4 var(--mono); color: rgba(223, 230, 230, .35); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agent .meta { flex: none; font: 400 12px/1 var(--mono); color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .agent.deep .dot { background: var(--st-reasoning); box-shadow: 0 0 10px var(--st-reasoning); animation: br 3.4s ease-in-out infinite; }
+  .agent.deep .kind { color: #c8b2f0; }
+  .agent.deep .meta { color: rgba(210, 190, 244, .8); }
+  .agent.watch .dot { background: var(--st-listening); box-shadow: 0 0 9px var(--st-listening); }
+  .agent.watch .kind { color: #a6ecc7; }
+  .agent.watch .meta { color: rgba(166, 236, 199, .8); }
+  .agent.timer .dot { background: var(--st-speaking); box-shadow: 0 0 9px var(--st-speaking); }
+  .agent.timer .kind { color: #c7f4fd; }
+  .agent.timer .meta { font-size: 15px; color: #c7f4fd; }
+  .agent.alarm .meta { color: rgba(182, 198, 205, .6); }
+
+  /* banners: the machine's own condition, in mono */
+  #conn {
+    display: none;
+    align-items: center; gap: 12px;
+    padding: 10px 28px;
+    border-bottom: 1px solid rgba(232, 201, 138, .3);
+    background: rgba(232, 201, 138, .07);
+    font: 500 10.5px/1.4 var(--mono);
+    letter-spacing: .16em; text-transform: uppercase;
+    color: #f0dbaf;
+    flex: none;
+  }
+  body.disconnected #conn { display: flex; }
+  #conn .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gold); animation: br 2.2s ease-in-out infinite; flex: none; }
+
+  #mutebanner {
+    display: none;
+    align-items: center; gap: 12px;
+    padding: 10px 28px;
+    border-bottom: 1px solid rgba(143, 168, 179, .22);
+    background: rgba(143, 168, 179, .08);
+    font: 500 10.5px/1.4 var(--mono);
+    letter-spacing: .16em; text-transform: uppercase;
+    color: #a9bfc8;
+    flex: none;
+  }
+  body.muted #mutebanner { display: flex; }
+  #mutebanner .spacer { flex: 1; }
+  #unmute { color: var(--gold); border-bottom: 1px solid rgba(232, 201, 138, .5); padding-bottom: 2px; font: inherit; letter-spacing: inherit; }
+
+  #log { flex: 1; overflow-y: auto; padding: 26px 0 20px; scrollbar-width: thin; scrollbar-color: rgba(140, 240, 255, .2) transparent; }
+  .inner { max-width: 760px; margin: 0 auto; padding: 0 20px; }
+  #rows { display: flex; flex-direction: column; gap: 22px; }
+
+  .row .body { white-space: pre-wrap; overflow-wrap: break-word; }
+
+  /* you: cut-corner glass, cyan */
+  .row.you { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+  .row.you .body {
+    max-width: 66%;
+    padding: 11px 16px;
+    background: linear-gradient(180deg, rgba(160, 240, 255, .13), rgba(160, 240, 255, .04));
+    border: 1px solid var(--glass-border);
+    clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+    color: #eaf9fb;
+    text-wrap: pretty;
+  }
+  .row.you .cap {
+    font: 500 9.5px/1 var(--mono);
+    letter-spacing: .18em; text-transform: uppercase;
+    color: rgba(160, 214, 235, .42);
+  }
+
+  /* ciel: typeset speech — a serif against a gold hairline */
+  .row.ciel .body {
+    max-width: 82%;
+    padding-left: 18px;
+    border-left: 1px solid rgba(232, 201, 138, .5);
+    font: 400 18px/1.62 var(--serif);
+    color: #f7f2e7;
+    text-wrap: pretty;
+  }
+
+  /* ciel, under its breath: the working notes */
+  .row.thinking { display: flex; align-items: baseline; gap: 9px; }
+  .row.thinking::before { content: ""; width: 14px; height: 1px; background: rgba(223, 230, 230, .25); flex: none; align-self: center; }
+  .row.thinking .body { font: 400 12px/1.5 var(--mono); color: var(--text-faint); }
+
+  /* the historical record of a question that wanted you */
+  .row.confirmrow .body {
+    max-width: 82%;
+    padding-left: 18px;
+    border-left: 1px solid rgba(232, 201, 138, .5);
+  }
+  .row.confirmrow .cap {
+    font: 500 9.5px/1 var(--mono);
+    letter-spacing: .22em; text-transform: uppercase;
+    color: var(--gold);
+    margin-bottom: 7px;
+  }
+  .row.confirmrow .q { font: 400 17px/1.5 var(--serif); color: #fbf4e4; text-wrap: pretty; }
+
+  /* events: a labelled hairline across the projection */
+  .row.event { display: flex; align-items: center; gap: 14px; }
+  .row.event::before, .row.event::after { content: ""; flex: 1; height: 1px; background: var(--gold-line); }
+  .row.event .body {
+    font: 500 9.5px/1.5 var(--mono);
+    letter-spacing: .26em; text-transform: uppercase;
+    color: var(--gold-dim);
+    text-align: center;
+    max-width: 70%;
+  }
+
+  /* the live question: gold, glowing, waiting on you */
+  #ask {
+    display: none;
+    padding: 18px 28px;
+    border-top: 1px solid rgba(232, 201, 138, .6);
+    background: linear-gradient(180deg, rgba(232, 201, 138, .12), rgba(232, 201, 138, .03));
+    box-shadow: 0 -14px 50px rgba(232, 201, 138, .1);
+    flex: none;
+  }
+  body.asking #ask { display: block; }
+  #ask .arrange { display: flex; align-items: center; gap: 22px; max-width: 1000px; margin: 0 auto; }
+  #ask .bar { width: 3px; align-self: stretch; background: var(--gold); box-shadow: 0 0 14px var(--gold); flex: none; }
+  #ask .qwrap { flex: 1; min-width: 0; }
+  #ask .cap {
+    font: 500 9.5px/1 var(--mono);
+    letter-spacing: .24em; text-transform: uppercase;
+    color: var(--gold);
+    margin-bottom: 8px;
+  }
+  #ask .q { font: 400 19px/1.45 var(--serif); color: #fdf5e5; text-wrap: pretty; overflow-wrap: break-word; }
+  #ask .btns { display: flex; gap: 11px; flex: none; }
+  #ask .btns button {
+    padding: 14px 32px;
+    clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
+    font: 700 11px/1 var(--mono);
+    letter-spacing: .22em;
+  }
+  #ask button.yes { background: rgba(232, 201, 138, .92); color: #231b0c; }
+  #ask button.yes:hover { background: var(--gold); }
+  #ask button.no { border: 1px solid rgba(223, 230, 230, .3); color: rgba(223, 230, 230, .78); }
+  #ask button.no:hover { border-color: rgba(223, 230, 230, .55); color: var(--text); }
+
+  footer {
+    display: flex; align-items: flex-end; gap: 12px;
+    padding: 14px 28px calc(14px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--line);
+    background: rgba(6, 18, 24, .55);
+    flex: none;
+  }
+  #text {
+    flex: 1;
+    resize: none;
+    max-height: 160px;
+    padding: 11px 15px;
+    background: rgba(160, 240, 255, .03);
+    border: 1px solid rgba(140, 240, 255, .2);
+    clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
+    color: var(--text);
+    font: 400 14px/1.4 var(--sans);
+    outline: none;
+  }
+  #text::placeholder { color: rgba(223, 230, 230, .32); }
+  #text:focus { border-color: rgba(140, 240, 255, .45); }
+  #send {
+    padding: 12px 22px;
+    border: 1px solid rgba(232, 201, 138, .55);
+    clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
+    font: 600 10px/1 var(--mono);
+    letter-spacing: .22em;
+    color: var(--gold);
+  }
+  #send:hover:not(:disabled) { background: rgba(232, 201, 138, .12); }
+  #send:disabled { opacity: .35; cursor: default; }
+
+  @media (max-width: 640px) {
+    .corner { display: none; }
+    header { gap: 9px; padding: 13px 15px; }
+    .brand { gap: 9px; }
+    .aperture { width: 22px; height: 22px; }
+    .wordmark { font-size: 15px; letter-spacing: .2em; }
+    .chip { padding: 5px 10px; font-size: 8.5px; letter-spacing: .16em; gap: 6px; }
+    .chip .dot { width: 5px; height: 5px; }
+    .long { display: none; }
+    #agentsbar .caption, #agentrows { padding-left: 15px; padding-right: 15px; }
+    .agent .kind { width: 84px; letter-spacing: .14em; }
+    .agent .label { white-space: normal; font-size: 14px; }
+    #conn, #mutebanner { padding: 9px 15px; font-size: 9px; letter-spacing: .14em; }
+    #log { padding: 20px 0 16px; }
+    .inner { padding: 0 16px; }
+    #rows { gap: 18px; }
+    .row.you .body { max-width: 90%; padding: 10px 14px; font-size: 14px; }
+    .row.ciel .body { max-width: 100%; padding-left: 14px; font-size: 17px; line-height: 1.6; }
+    .row.thinking .body { font-size: 11.5px; }
+    #ask { padding: 16px; }
+    #ask .arrange { flex-direction: column; align-items: stretch; gap: 14px; }
+    #ask .bar { display: none; }
+    #ask .q { font-size: 16px; }
+    #ask .btns button { flex: 1; padding: 14px; }
+    footer { gap: 10px; padding: 12px 15px calc(12px + env(safe-area-inset-bottom)); }
+    #send { padding: 13px 17px; font-size: 9.5px; }
+  }
+</style>
+</head>
+<body data-state="idle">
+
+<div id="scan"></div>
+<div class="corner tl"></div><div class="corner tr"></div>
+<div class="corner bl"></div><div class="corner br"></div>
+
+<header>
+  <div class="brand">
+    <svg class="aperture" width="26" height="26" viewBox="0 0 128 128" aria-hidden="true">
+      <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="5" stroke-dasharray="4 12"/>
+      <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="5"/>
+      <circle class="c-core" cx="64" cy="64" r="10"/>
+    </svg>
+    <span class="wordmark">Ciel</span>
+  </div>
+  <span class="chip" id="state"><span class="dot"></span><span id="statelabel">idle</span></span>
+  <span class="spacer"></span>
+  <button class="chip" id="agentsbtn" hidden title="Everything working on your behalf right now">
+    <span id="agentscount"></span><span class="arr" id="agentsarr">▾</span>
+  </button>
+  <button class="chip" id="mute" title="While muted, Ciel neither speaks nor listens for its name">
+    <span>MIC</span><span class="long" id="mutelabel"> · ON</span>
+  </button>
+</header>
+
+<div id="conn"><span class="dot"></span><span id="connlabel">reconnecting to Ciel</span></div>
+
+<div id="agentsbar">
+  <div class="caption">working on your behalf</div>
+  <div id="agentrows"></div>
+</div>
+
+<div id="mutebanner">
+  <span>mic muted — Ciel can't hear you</span>
+  <span class="spacer"></span>
+  <button id="unmute">unmute</button>
+</div>
+
+<div id="log"><div class="inner" id="rows"></div></div>
+
+<div id="ask"><div class="arrange">
+  <div class="bar"></div>
+  <div class="qwrap">
+    <div class="cap">Ciel is asking · waiting on you</div>
+    <div class="q" id="askq"></div>
+  </div>
+  <div class="btns">
+    <button class="yes" onclick="answer('yes')">YES</button>
+    <button class="no" onclick="answer('no')">NO</button>
+  </div>
+</div></div>
+
+<footer>
+  <textarea id="text" rows="1" placeholder="Type to Ciel — or just speak"></textarea>
+  <button id="send" disabled>SEND</button>
+</footer>
+
+<script>
+"use strict";
+
+const rows = document.getElementById("rows");
+const logEl = document.getElementById("log");
+const statelabel = document.getElementById("statelabel");
+const muteBtn = document.getElementById("mute");
+const muteLabel = document.getElementById("mutelabel");
+const unmuteBtn = document.getElementById("unmute");
+const connLabel = document.getElementById("connlabel");
+const askQ = document.getElementById("askq");
+const text = document.getElementById("text");
+const sendBtn = document.getElementById("send");
+const agentsBtn = document.getElementById("agentsbtn");
+const agentsArr = document.getElementById("agentsarr");
+const agentsCount = document.getElementById("agentscount");
+const agentRows = document.getElementById("agentrows");
+
+const KNOWN_STATES = new Set([
+  "idle", "listening", "thinking", "reasoning", "speaking", "error",
+]);
+
+function clock(t) {
+  const d = new Date(t * 1000);
+  return String(d.getHours()).padStart(2, "0") + ":" +
+         String(d.getMinutes()).padStart(2, "0");
+}
+
+// The transcript's speaker labels, mapped to a shape and a mono caption.
+// Labels not listed render as events — new lanes add new labels, and an
+// unknown row shown small beats an unknown row lost.
+const ROLES = {
+  "user":               { cls: "you", cap: (t) => t ? "spoken · " + clock(t) : "spoken" },
+  "user-web":           { cls: "you", cap: () => "typed" },
+  "user-remote":        { cls: "you", cap: () => "from discord" },
+  "you-confirm":        { cls: "you", cap: () => "confirmation" },
+  "you-confirm-remote": { cls: "you", cap: () => "confirmation · remote" },
+  "ciel":               { cls: "ciel" },
+  "ciel-thinking":      { cls: "thinking" },
+  "ciel-confirm":       { cls: "confirmrow" },
+};
+
+let ws = null;
+let muted = false;
+let retryMs = 500;
+let attempts = 0;
+
+function nearBottom() {
+  return logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 80;
+}
+
+function addRow(role, body, t) {
+  const stick = nearBottom();
+  const spec = ROLES[role] || { cls: "event" };
+  const row = document.createElement("div");
+  row.className = "row " + spec.cls;
+  if (spec.cls === "confirmrow") {
+    const wrap = document.createElement("div");
+    wrap.className = "body";
+    const cap = document.createElement("div");
+    cap.className = "cap";
+    cap.textContent = "Ciel is asking";
+    wrap.appendChild(cap);
+    const q = document.createElement("div");
+    q.className = "q";
+    q.textContent = body;
+    wrap.appendChild(q);
+    row.appendChild(wrap);
+  } else {
+    const div = document.createElement("div");
+    div.className = "body";
+    div.textContent = body;
+    row.appendChild(div);
+    if (spec.cap) {
+      const cap = document.createElement("div");
+      cap.className = "cap";
+      cap.textContent = spec.cap(t);
+      row.appendChild(cap);
+    }
+  }
+  rows.appendChild(row);
+  if (stick) logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setState(s) {
+  statelabel.textContent = s;
+  document.body.dataset.state = KNOWN_STATES.has(s) ? s : "idle";
+}
+
+function setMuted(m) {
+  muted = m;
+  document.body.classList.toggle("muted", m);
+  muteLabel.textContent = m ? " · MUTED" : " · ON";
+  text.placeholder = m ? "Mic is muted — type instead" : "Type to Ciel — or just speak";
+}
+
+// The active-agent roster: everything working on Ciel's side right now.
+// Kinds not listed render as plain rows — new agent sources add new
+// kinds, the same rule as unknown transcript labels.
+const AGENT_KINDS = {
+  deep:  { name: "deep thought" },
+  watch: { name: "watch" },
+  timer: { name: "timer" },
+  alarm: { name: "alarm" },
+};
+
+let agents = [];
+
+function fmtSpan(s) {
+  s = Math.max(0, Math.round(s));
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m";
+  return Math.floor(m / 60) + "h " + (m % 60) + "m";
+}
+
+function fmtClock(s) {
+  s = Math.max(0, Math.round(s));
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+}
+
+function setAgents(list) {
+  agents = Array.isArray(list) ? list : [];
+  renderAgents();
+}
+
+function renderAgents() {
+  if (!agents.length) {
+    agentsBtn.hidden = true;
+    document.body.classList.remove("agentsopen");
+    agentRows.textContent = "";
+    return;
+  }
+  agentsBtn.hidden = false;
+  agentsCount.textContent = agents.length + " WORKING";
+  // The chip runs deep-thought purple while a reasoning pass is in
+  // flight — that is the one agent someone is sitting in silence for.
+  agentsBtn.classList.toggle("deep", agents.some((a) => a.kind === "deep"));
+  agentsArr.textContent =
+    document.body.classList.contains("agentsopen") ? "▴" : "▾";
+  if (!document.body.classList.contains("agentsopen")) return;
+
+  const now = Date.now() / 1000;
+  agentRows.textContent = "";
+  for (const a of agents) {
+    const spec = AGENT_KINDS[a.kind] || { name: a.kind || "agent" };
+    const row = document.createElement("div");
+    row.className = "agent" + (AGENT_KINDS[a.kind] ? " " + a.kind : "");
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    row.appendChild(dot);
+    const kind = document.createElement("span");
+    kind.className = "kind";
+    kind.textContent = spec.name;
+    row.appendChild(kind);
+    const main = document.createElement("div");
+    main.className = "main";
+    const label = document.createElement("div");
+    label.className = "label";
+    label.textContent = a.label || spec.name;
+    main.appendChild(label);
+    if (a.detail) {
+      const detail = document.createElement("div");
+      detail.className = "detail";
+      detail.textContent = a.detail;
+      main.appendChild(detail);
+    }
+    row.appendChild(main);
+    const parts = [];
+    if (a.since != null) parts.push(fmtSpan(now - a.since) + " in");
+    if (a.until != null) {
+      if (now >= a.until) parts.push("due");
+      else if (a.kind === "timer" && a.until - now < 3600)
+        parts.push(fmtClock(a.until - now));
+      else parts.push(fmtSpan(a.until - now) + " left");
+    }
+    if (parts.length) {
+      const meta = document.createElement("span");
+      meta.className = "meta";
+      meta.textContent = parts.join(" · ");
+      row.appendChild(meta);
+    }
+    agentRows.appendChild(row);
+  }
+}
+
+agentsBtn.addEventListener("click", () => {
+  document.body.classList.toggle("agentsopen");
+  renderAgents();
+});
+// Tick the countdowns while the list is showing; the chip alone needs no
+// clock, and the server re-sends the roster whenever it actually changes.
+setInterval(() => {
+  if (agents.length && document.body.classList.contains("agentsopen"))
+    renderAgents();
+}, 1000);
+
+function clearAsk() { document.body.classList.remove("asking"); }
+
+function sendFrame(obj) {
+  // Refuses rather than drops: the caller keeps what it was trying to
+  // send. A frame written to a CONNECTING or CLOSING socket is a message
+  // the user watched themselves send that never existed.
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  ws.send(JSON.stringify(obj));
+  return true;
+}
+
+function say(t) {
+  if (!sendFrame({ type: "say", text: t })) return false;
+  clearAsk(); // whatever was pending, this line is the user's word on it
+  return true;
+}
+
+function answer(word) { say(word); }
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+
+  ws.onopen = () => {
+    retryMs = 500;
+    attempts = 0;
+    document.body.classList.remove("disconnected");
+    sendBtn.disabled = false;
+  };
+
+  ws.onmessage = (ev) => {
+    let f;
+    try { f = JSON.parse(ev.data); } catch { return; }
+    if (f.type === "hello") {
+      rows.textContent = "";               // a reconnect replays history
+      for (const r of f.history || []) addRow(r.role, r.text, r.t);
+      logEl.scrollTop = logEl.scrollHeight;
+      setState(f.state || "idle");
+      setMuted(!!f.muted);
+      setAgents(f.agents);
+    } else if (f.type === "row") {
+      addRow(f.role, f.text, f.t);
+      if (f.role && f.role.startsWith("you-confirm")) clearAsk();
+    } else if (f.type === "state") {
+      setState(f.state);
+      if (f.state === "idle") clearAsk(); // the question expired with its turn
+    } else if (f.type === "muted") {
+      setMuted(!!f.muted);
+    } else if (f.type === "agents") {
+      setAgents(f.agents);
+    } else if (f.type === "confirm") {
+      askQ.textContent = f.text;
+      document.body.classList.add("asking");
+      const stick = nearBottom();
+      if (stick) logEl.scrollTop = logEl.scrollHeight;
+    }
+  };
+
+  ws.onclose = () => {
+    attempts += 1;
+    connLabel.textContent = attempts > 1
+      ? "reconnecting to Ciel · attempt " + attempts
+      : "reconnecting to Ciel";
+    document.body.classList.add("disconnected");
+    sendBtn.disabled = true;
+    clearAsk();
+    setTimeout(connect, retryMs);
+    retryMs = Math.min(retryMs * 2, 8000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+function submit() {
+  const t = text.value.trim();
+  if (!t) return;
+  if (!say(t)) return; // not connected — keep the draft; the banner says why
+  text.value = "";
+  text.style.height = "auto";
+  text.focus();
+}
+
+sendBtn.addEventListener("click", submit);
+text.addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); submit(); }
+});
+text.addEventListener("input", () => {
+  text.style.height = "auto";
+  text.style.height = Math.min(text.scrollHeight, 160) + "px";
+});
+muteBtn.addEventListener("click", () => sendFrame({ type: "mute", muted: !muted }));
+unmuteBtn.addEventListener("click", () => sendFrame({ type: "mute", muted: false }));
+
+connect();
+</script>
+</body>
+</html>

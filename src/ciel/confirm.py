@@ -33,6 +33,21 @@ A typed line is as good as a spoken one: the pipeline routes keyboard input to
 chatbox can be confirmed without switching to voice. Same classifier, same
 one-re-prompt-then-deny contract — the modality changes, the obligation
 doesn't.
+
+The obligation also follows the user out the door. A turn that arrived over
+a text lane — the Discord link, or the local web GUI — runs inside
+:meth:`remote`, and a question asked there is *shown*, not spoken: the
+person who asked is at their phone or behind a keyboard in a quiet room,
+and a question voiced into an empty room discharges nothing. The answer
+comes back over a text lane (the pipeline routes owner messages to
+:meth:`answer` exactly as it routes typed lines), against a
+notification-time deadline rather than a conversation-time one. Remote
+answers are only ever accepted for remote-origin questions — a question
+asked *aloud at home* must not be answerable by someone who never heard it
+— and lane-matched besides: a Discord text answers only a Discord-origin
+question, because a question shown on the loopback page was never shown to
+the phone. (The page may answer either origin; every question is mirrored
+to it as a ciel-confirm row.)
 """
 
 from __future__ import annotations
@@ -42,7 +57,7 @@ import logging
 import time
 from contextlib import contextmanager
 from enum import Enum, auto
-from typing import Callable, Iterator
+from typing import Awaitable, Callable, Iterator
 
 import numpy as np
 
@@ -116,6 +131,14 @@ class VoiceConfirmBroker:
         self._typed_answer: str | None = None
         self._asked_at: float | None = None
         self._barge_run = 0
+        self._remote_send: Callable[[str], Awaitable[None]] | None = None
+        """The text lane's reply sink while a remote turn is in flight
+        (see :meth:`remote`); None for every attended turn. Its presence is
+        what routes :meth:`ask` through the texted choreography."""
+        self._remote_origin: str | None = None
+        """Which lane installed the sink — "discord" or "web" — so an
+        answer is only ever accepted from a lane that showed the question
+        (see :attr:`remote_origin`)."""
 
         self._player: Player | None = None
         self._mic: MicStream | None = None
@@ -181,6 +204,10 @@ class VoiceConfirmBroker:
         if self._phase is _Phase.PROMPT:
             self._check_early_answer(frame)
         elif self._phase is _Phase.LISTEN:
+            if self._utterance is None:
+                # A remote question: listening to the link, not the room.
+                # No future was created, so there is no one to endpoint for.
+                return
             utterance = self._endpointer.push(frame)
             if (
                 utterance is not None
@@ -211,6 +238,47 @@ class VoiceConfirmBroker:
         if self._phase is _Phase.PROMPT and self._player is not None:
             self._player.stop()
         return True
+
+    @contextmanager
+    def remote(
+        self, send: Callable[[str], Awaitable[None]], origin: str = "discord"
+    ) -> "Iterator[None]":
+        """Route confirmations through a remote text channel for the block.
+
+        Engaged around a whole remote turn, the way :meth:`suppress` wraps
+        an unattended one: any confirm-tier tool call inside texts its
+        question via ``send`` and waits for the owner's reply instead of
+        speaking to a room the user is not in. ``origin`` names the lane
+        ("discord" or "web") so the pipeline can accept an answer only from
+        a lane that actually showed the question. Not a counter — remote
+        turns never nest (one turn slot) — but exception-safe the same
+        way."""
+        self._remote_send = send
+        self._remote_origin = origin
+        try:
+            yield
+        finally:
+            self._remote_send = None
+            self._remote_origin = None
+
+    @property
+    def remote_active(self) -> bool:
+        """Whether a *remote-origin* question is awaiting an answer — the
+        pipeline's cue to route text-lane messages to :meth:`answer`. False
+        for a pending spoken question on purpose: a remote yes to a
+        question voiced at home would approve an action its approver
+        never heard."""
+        return self._remote_send is not None and self.active
+
+    @property
+    def remote_origin(self) -> str | None:
+        """Which lane asked the pending remote question, or None outside a
+        remote turn. The pipeline routes a Discord answer only when this is
+        "discord": a web-origin question is visible only on the loopback
+        page, and a text from a phone that never showed it is not an
+        answer. (The web page may answer *any* origin — every question is
+        mirrored to it as a ciel-confirm row, so its reader has seen it.)"""
+        return self._remote_origin
 
     @contextmanager
     def suppress(self) -> "Iterator[None]":
@@ -251,11 +319,16 @@ class VoiceConfirmBroker:
         if self._suppressed:
             log.info("confirmation suppressed (nobody listening): %s", question)
             return False
-        if self._player is None or self._mic is None or self._stt is None or self._tts is None:
-            return False
         if self._lock.locked():
             # A second question while one is pending. Deny rather than queue:
             # stacked spoken questions are unanswerable ("yes" to which?).
+            return False
+        if self._remote_send is not None:
+            # A remote turn's question goes where the asker is. Dispatched
+            # before the binding check below: the texted choreography needs
+            # no player or microphone, and must survive their absence.
+            return await self._ask_remote(question)
+        if self._player is None or self._mic is None or self._stt is None or self._tts is None:
             return False
 
         async with self._lock:
@@ -314,6 +387,92 @@ class VoiceConfirmBroker:
                 self._phase = _Phase.IDLE
                 self._asked_at = None
                 self._endpointer.reset()
+
+    async def _ask_remote(self, question: str) -> bool:
+        """Text the question, await a texted (or locally typed) yes or no.
+
+        The spoken choreography's away image, with the audio parties
+        deleted: no WAIT_IDLE (nothing is playing for the asker), no
+        prompt playback, no endpointer. The phase sits in LISTEN for the
+        whole wait so :attr:`active` holds — which is what keeps the frame
+        loop routing answers here — while :meth:`feed` stays inert
+        (``_utterance`` is never created, so mic frames fall through).
+        Same one-re-prompt-then-deny contract, same cancel-means-deny;
+        the deadline runs on notification time (``discord.confirm_timeout_s``),
+        not the spoken gate's eight seconds. A question that cannot even
+        be sent resolves to deny — a gate that cannot ask must still
+        resolve, and silently-no is its safe shape.
+        """
+        send = self._remote_send
+        assert send is not None
+        async with self._lock:
+            self._cancelled.clear()
+            self._typed_answer = None  # a cancel can leave a stale one behind
+            self._phase = _Phase.LISTEN
+            self._asked_at = time.monotonic()
+            try:
+                if not await self._send_remote(send, question):
+                    return False
+                attempts = 2
+                for attempt in range(attempts):
+                    heard = await self._await_remote_answer()
+                    if self._cancelled.is_set():
+                        return False
+                    if heard is None:
+                        await self._send_remote(send, "No answer — skipping it.")
+                        return False
+                    print(f"  you (confirm, remote): {heard}", flush=True)
+                    if self._record is not None:
+                        # Not "you-confirm": that row is a presence signal
+                        # (the user demonstrably *here*), and a remote
+                        # answer is evidence of exactly the opposite.
+                        self._record("you-confirm-remote", heard)
+                    verdict = yes_no(heard)
+                    if verdict is True:
+                        return True
+                    if verdict is False:
+                        await self._send_remote(send, "Okay, skipping it.")
+                        return False
+                    if attempt < attempts - 1:
+                        if not await self._send_remote(send, "Yes or no?"):
+                            return False
+                await self._send_remote(send, "I'll take that as a no.")
+                return False
+            finally:
+                self._phase = _Phase.IDLE
+                self._asked_at = None
+
+    async def _send_remote(
+        self, send: Callable[[str], Awaitable[None]], text: str
+    ) -> bool:
+        """One line over the link, echoed and recorded like every spoken
+        prompt. Returns whether it plausibly reached the user — the
+        caller treats a failed *question* as unanswerable (deny) and a
+        failed closing line as cosmetic."""
+        print(f"\n  ciel (confirm, remote): {text}", flush=True)
+        if self._record is not None:
+            self._record("ciel-confirm", text)
+        try:
+            await send(text)
+            return True
+        except Exception:  # noqa: BLE001 - a dead link means an unaskable question
+            log.warning("could not text the confirmation prompt", exc_info=True)
+            return False
+
+    async def _await_remote_answer(self) -> str | None:
+        """Wait for a text answer, a cancellation, or the remote deadline.
+
+        Polled like :meth:`_await_utterance`, but with nothing speech-shaped
+        to extend the deadline for — a text either arrived or it didn't.
+        """
+        deadline = time.monotonic() + self._config.discord.confirm_timeout_s
+        while True:
+            if self._typed_answer is not None:
+                answer, self._typed_answer = self._typed_answer, None
+                return answer.strip()
+            if self._cancelled.is_set() or time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(0.05)
 
     # ── internals ────────────────────────────────────────────────────────────
 

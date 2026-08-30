@@ -17,7 +17,7 @@ import threading
 import time
 from contextlib import aclosing
 from types import TracebackType
-from typing import AsyncIterator, Self
+from typing import AsyncIterator, Callable, Self
 
 import sounddevice as sd
 
@@ -34,9 +34,21 @@ CHUNK_MS = 50
 class Player:
     """Plays PCM through the speakers, interruptibly."""
 
-    def __init__(self, config: AudioConfig, sample_rate: int) -> None:
+    def __init__(
+        self,
+        config: AudioConfig,
+        sample_rate: int,
+        muted: Callable[[], bool] | None = None,
+    ) -> None:
         self._config = config
         self._sample_rate = sample_rate
+        self._muted = muted
+        """Consulted at the top of every play(). This is the mute switch's
+        one choke point on purpose: greeting, wake ack, timer ring,
+        sentences, apologies — every sound in the system funnels through
+        play(), so gating here silences all of it without any call site
+        knowing mute exists. A callable, not a flag, because the state
+        lives in the pipeline and changes while this object lives."""
         self._stream: sd.RawOutputStream | None = None
         self._stop = threading.Event()
         self._playing = threading.Event()
@@ -124,7 +136,20 @@ class Player:
         something else, so queued sentences behind it are stale; a device
         failure means nothing was heard, and reporting completion would leave
         Ciel believing it spoke into a mute device.
+
+        While muted, the stream is closed unconsumed and the play reports
+        *completion*: the caller's turn must proceed exactly as if the
+        sentence had been spoken — the text already went to the console,
+        the transcript, and the GUI, which are where a muted room reads
+        it. Reporting False instead would make every muted sentence look
+        like a barge-in and abandon the turn mid-answer.
         """
+        if self._muted is not None and self._muted():
+            # aclosing for the same reason as below: a Piper stream wraps
+            # a subprocess, and silence must not leak one.
+            async with aclosing(chunks):
+                pass
+            return True
         requested_at = time.monotonic()
         async with self._play_lock:
             self._device_lost = False

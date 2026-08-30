@@ -83,8 +83,9 @@ _DISMISS = re.compile(
 )
 
 # Leading address words the wake path lets through when spoken in one breath
-# — including "seal", Whisper's favourite mishearing of the name.
-_ADDRESS = frozenset({"hey", "okay", "ok", "ciel", "seal"})
+# — "jarvis" for the default wake phrase, and "seal", Whisper's favourite
+# mishearing of the name.
+_ADDRESS = frozenset({"hey", "okay", "ok", "ciel", "seal", "jarvis"})
 
 
 @dataclass(frozen=True, slots=True)

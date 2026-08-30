@@ -139,6 +139,11 @@ class Brain:
         self._last_connect_s = 0.0
         self._last_reconnect_s = 0.0
         self._needs_drain = False
+        self._deep_thought_since: float | None = None
+        """Wall-clock start of the deep-thought escalation in flight, None
+        when there isn't one. The pipeline's agent roster reads this
+        (polled, not evented) so the GUI can show the pass while the room
+        sits in silence."""
         # One lock serializes everything that touches the client's message
         # stream — user turns, reflection turns, rotation. Two concurrent
         # receive_response() readers interleave and both corrupt.
@@ -149,7 +154,15 @@ class Brain:
         self._guard: WorkspaceGuard | None = None
         if config.files.enabled:
             self._guard = WorkspaceGuard(
-                config.files.workspace, config.files.read_only_outside
+                config.files.workspace,
+                config.files.read_only_outside,
+                # The undo carve-out: snapshots live outside any workspace,
+                # and restoring one is an ordinary Read the guard must allow.
+                snapshot_dir=(
+                    config.journal.dir.expanduser() / "snapshots"
+                    if config.journal.enabled
+                    else None
+                ),
             )
             self._guard.ensure_workspace()
             log.info("file access enabled, confined to %s", self._guard.workspace)
@@ -181,6 +194,17 @@ class Brain:
         # rather than letting it run silently on the tool description's say-so.
         if config.messages.enabled and config.messages.allow_send:
             gated.add("mcp__ciel__send_message")
+        # The capability grant is the escalation channel itself, so it gets
+        # the gate before anything else does: no config changes on a bare
+        # tool call, only on the user's spoken or texted yes. The revoke
+        # stays ungated on purpose — de-escalation with friction teaches
+        # people to leave things on — but is journaled below like the rest.
+        grant_tools: frozenset[str] = frozenset()
+        if config.grants.enabled:
+            grant_tools = frozenset(
+                {"mcp__ciel__grant_capability", "mcp__ciel__revoke_capability"}
+            )
+            gated.add("mcp__ciel__grant_capability")
         self._gated_tools = frozenset(gated)
         if self._gated_tools and confirmer is not None:
             self._tool_guard = ConfirmToolGuard(self._gated_tools, confirmer)
@@ -204,8 +228,27 @@ class Brain:
         self._recorder: ActionRecorder | None = None
         if journal is not None:
             self._recorder = ActionRecorder(
-                journal, self._gated_tools, verify_emitter=verify_emitter
+                journal,
+                # Both grant directions are journaled — "why did shell turn
+                # off?" deserves a record — but neither files a read-back
+                # event: the grant parse-verifies its own config edit, and
+                # an unattended re-check would add a turn to observe what
+                # the tool already proved.
+                self._gated_tools | grant_tools,
+                verify_emitter=verify_emitter,
+                verify_for=self._gated_tools - grant_tools,
             )
+
+    @property
+    def _remote_armed(self) -> bool:
+        """Whether the Discord lane is configured to exist — the config
+        claim, not the connection state: the system prompt is built at
+        connect time, before (and regardless of) the gateway coming up."""
+        return bool(
+            self._config.discord.enabled
+            and self._config.discord.resolved_token()
+            and self._config.discord.owner_id
+        )
 
     @property
     def session_id(self) -> str | None:
@@ -227,6 +270,12 @@ class Brain:
     def last_turn_cost_usd(self) -> float:
         """Cost of the most recent turn alone."""
         return self._last_turn_cost
+
+    @property
+    def deep_thought_since(self) -> float | None:
+        """When the deep-thought pass in flight began (epoch seconds), or
+        None when no escalation is running."""
+        return self._deep_thought_since
 
     @property
     def last_reconnect_s(self) -> float:
@@ -281,6 +330,7 @@ class Brain:
                 self._memory_index_provider() if self._memory_index_provider else None,
                 personality=self._brain_config.personality,
                 workspace=str(self._guard.workspace) if self._guard else None,
+                read_only_outside=self._config.files.read_only_outside,
                 shell=self._shell_guard is not None,
                 confirmed_actions=self._tool_guard is not None,
                 undo=self._recorder is not None,
@@ -297,7 +347,19 @@ class Brain:
                     self._config.proactive.owner_handle
                     and self._config.messages.enabled
                     and self._config.messages.allow_send
+                )
+                or bool(
+                    self._remote_armed and self._config.discord.proactive
                 ),
+                # Self-knowledge of the Discord lane, so "how do I reach
+                # you while I'm out?" gets an honest answer instead of a
+                # denial of the lane's existence.
+                remote=self._remote_armed,
+                grants=self._config.grants.enabled,
+                # Armed, not merely enabled: the registry withholds the
+                # tool without a token, and the prompt must not promise it.
+                oura=self._config.oura.armed,
+                location=self._config.location.enabled,
             ),
             # Explicit allowlist. The Agent SDK ships the full Claude Code
             # toolset — Bash, Write, Edit — and a voice assistant that can
@@ -588,11 +650,18 @@ class Brain:
                                 spoken_any = True
                                 yield _label(last_kind), buffer.strip()
                                 buffer = ""
+                            self._deep_thought_since = time.time()
                             yield "escalation", str(block.get("name"))
                             continue
                     kind, delta = _delta(message)
                     if not delta:
                         continue
+                    # Parent-level text after a spawn means the subagent
+                    # returned and this is the relay: the subagent's own
+                    # streaming was filtered out above, and the tool call's
+                    # input rode input_json_deltas that _delta ignores — so
+                    # the first delta to land here ends the pass.
+                    self._deep_thought_since = None
                     if kind == "thinking" and not (
                         self._brain_config.speak_thinking
                         or self._brain_config.show_thinking
@@ -635,6 +704,10 @@ class Brain:
             if tail:
                 yield _label(last_kind), tail
         finally:
+            # However the turn ends — completion, barge-in, transport death —
+            # no deep-thought pass survives it: the roster must never show
+            # one running against an idle room.
+            self._deep_thought_since = None
             exc = sys.exc_info()[1]
             if isinstance(exc, _TRANSPORT_ERRORS):
                 # The SDK subprocess died (mid-query or mid-stream). Evict the

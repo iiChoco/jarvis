@@ -17,7 +17,7 @@ from ciel.memory.store import VALID_KINDS, MemoryStore
 
 log = logging.getLogger(__name__)
 
-# Set once at startup by :func:`build_memory_tools`. The SDK's @tool decorator
+# Set once at startup by :func:`bind_store`. The SDK's @tool decorator
 # wants plain module-level functions, so the store is bound here rather than
 # threaded through every call.
 _store: MemoryStore | None = None
@@ -66,7 +66,7 @@ def _text(message: str) -> dict[str, Any]:
 )
 async def remember(args: dict[str, Any]) -> dict[str, Any]:
     """description: a short summary line. content: the full fact. kind: one of
-    identity, preference, project, fact, reference."""
+    identity, preference, project, fact, reference, procedure."""
     if _store is None:
         return _text("Memory is not available right now.")
 

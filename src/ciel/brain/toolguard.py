@@ -12,11 +12,13 @@ to happen, and only a spoken yes lets the call through.
 
 Unlike the shell gate there is no classifier here: the config already did the
 classifying. ``tools`` is the quiet tier, ``confirm`` is the confirm tier, and
-anything on neither list was never allowed at all. What this guard adds is the
-*question* — a tool call is a name and a dict of arguments, and "mcp underscore
-gmail underscore send email" read aloud is not a question anyone can answer.
-The formatters below turn the calls we expect into something a listener can
-actually judge ("Send an email to sam at gmail dot com, subject Lunch"), with
+anything on neither list was never allowed at all — unless the entry omits
+``tools`` entirely, which deliberately puts the whole server in the quiet
+tier. What this guard adds is the *question* — a tool call is a name and a
+dict of arguments, and "mcp underscore gmail underscore send email" read
+aloud is not a question anyone can answer. The formatters below turn the
+calls we expect into something a listener can actually judge ("Send an email
+to sam@example.com with the subject Lunch"), with
 a plain fallback for tools nobody wrote a formatter for. Formatters are
 best-effort by design: a missing field degrades the sentence, never the gate —
 the deciding voice is the user's, not the formatter's.
@@ -72,6 +74,14 @@ def _describe_respond(args: dict[str, Any]) -> str:
     return f"Respond {_shorten(response)} to a calendar invitation"
 
 
+def _describe_grant(args: dict[str, Any]) -> str:
+    # Lazy import: the catalog lives with the grant tools, and this module
+    # must not drag the whole tool package in at import time.
+    from ciel.brain.tools.grants import describe_grant
+
+    return describe_grant(args)
+
+
 def _describe_send_message(args: dict[str, Any]) -> str:
     to = args.get("to")
     body = args.get("text")
@@ -89,6 +99,7 @@ def _describe_send_message(args: dict[str, Any]) -> str:
 _FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "send_email": _describe_send_email,
     "send_message": _describe_send_message,
+    "grant_capability": _describe_grant,
     "create-event": _describe_event("Create"),
     "update-event": _describe_event("Update"),
     "delete-event": _describe_event("Delete"),
@@ -152,9 +163,13 @@ class ConfirmToolGuard:
 
         No ``matcher`` because one guard covers tools across servers, and the
         same generous timeout as the shell gate: a confirmation legitimately
-        blocks for the question plus the answer window plus one retry.
+        blocks for the question plus the answer window plus one retry — and
+        the *remote* gate waits on notification time, two 120-second texted
+        windows back to back, so the ceiling sits well above that worst
+        case. A hook that times out mid-question is a gate whose verdict
+        nobody controls.
         """
-        return {"PreToolUse": [HookMatcher(hooks=[self], timeout=120)]}
+        return {"PreToolUse": [HookMatcher(hooks=[self], timeout=600)]}
 
 
 __all__ = ["ConfirmToolGuard", "describe_call"]

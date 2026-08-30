@@ -50,7 +50,11 @@ _NANOSECOND_FLOOR = 1e11
 
 
 class MessagesUnavailable(RuntimeError):
-    """The Messages database can't be read — missing, or no Full Disk Access."""
+    """Anything this module refuses to do, with the reason as the message:
+    the Messages database is unreadable (missing, or no Full Disk Access),
+    Contacts is unavailable or denied, or a send was rejected (disabled,
+    empty, a group chat, an unresolved name, over-length, or osascript
+    failed)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +87,7 @@ class Message:
 # ── text extraction ──────────────────────────────────────────────────────────
 
 # Printable runs inside the archived blob: ASCII, or a UTF-8 lead byte followed
-# by continuation bytes. Four characters minimum, to skip the class names and
+# by continuation bytes. Four bytes minimum, to skip the class names and
 # short type markers the archiver interleaves with the actual string.
 _TEXT_RUN = re.compile(rb"[\x20-\x7e\xc2-\xf4][\x20-\x7e\x80-\xbf]{3,}")
 

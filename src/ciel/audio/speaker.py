@@ -341,8 +341,15 @@ class SpeakerGate:
 
         if similarity >= threshold:
             self._last_pass = time.monotonic()
-            log.info("voice recognized (%.2f, take %d)",
-                     similarity, int(np.argmax(scores)) + 1)
+            # The last reference row is the centroid, not a take — logging
+            # it as "take N+1" would send a pruning session hunting for a
+            # take that does not exist.
+            best = int(np.argmax(scores))
+            which = (
+                "centroid" if best == len(self._references) - 1
+                else f"take {best + 1}"
+            )
+            log.info("voice recognized (%.2f, %s)", similarity, which)
             return True, similarity
 
         await asyncio.to_thread(self._keep_rejected, utterance, similarity)

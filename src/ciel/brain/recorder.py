@@ -65,6 +65,7 @@ class ActionRecorder:
         journal: ActionJournal,
         watched: frozenset[str],
         verify_emitter: "Callable[[str, dict[str, Any]], None] | None" = None,
+        verify_for: frozenset[str] | None = None,
     ) -> None:
         self._journal = journal
         self._watched = frozenset(watched) | set(_FILE_MUTATORS) | {"Bash"}
@@ -75,7 +76,12 @@ class ActionRecorder:
         # "returned without error" is the weaker claim the wishlist called
         # out. The emitter observes like everything else here: it can note
         # that an action deserves checking, never affect the action.
-        self._verify_for = frozenset(watched)
+        # ``verify_for`` narrows the set when a watched tool verifies itself
+        # in-band (the capability grants parse-verify their own edit) —
+        # journaled like everything, but no read-back event filed.
+        self._verify_for = (
+            frozenset(verify_for) if verify_for is not None else frozenset(watched)
+        )
         self._verify_emitter = verify_emitter
         # Snapshots taken in the pre-hook, claimed by the post-hook, keyed by
         # tool_use_id. Bounded: a call denied by a guard never reaches the

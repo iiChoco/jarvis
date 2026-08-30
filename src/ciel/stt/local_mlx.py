@@ -21,7 +21,7 @@ import time
 import numpy as np
 
 from ciel.config import SAMPLE_RATE, STTConfig
-from ciel.stt.hallucinations import looks_hallucinated, normalize
+from ciel.stt.hallucinations import collapse_repetition, looks_hallucinated, normalize
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +81,10 @@ class MlxWhisperSTT:
         if looks_hallucinated(text, self._echoes):
             log.debug("discarding likely hallucination: %r", text)
             return ""
-        return text
+        # After the hallucination check on purpose: a transcript that is
+        # nothing but a repetition wall was just dropped whole; this
+        # salvages the one with real speech in front of the wall.
+        return collapse_repetition(text)
 
     def _transcribe_sync(self, pcm: np.ndarray) -> str:
         import mlx_whisper

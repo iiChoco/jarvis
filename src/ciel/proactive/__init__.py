@@ -3,7 +3,8 @@ right to interrupt.
 
 Everything else Ciel says was asked for. Vigil is the machinery for the one
 exception: events the world produces on its own — a meeting drawing near, a
-job finishing, mail arriving — flowing through a single queue, judged by a
+job finishing, a rough night on the ring — flowing through a single queue,
+judged by a
 deterministic interruption policy, and delivered by an *unattended* brain
 turn bound by the Witness rule (see ``ciel.brain.witness``).
 

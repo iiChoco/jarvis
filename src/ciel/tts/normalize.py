@@ -54,9 +54,10 @@ _EXTRA_SPACE = re.compile(r"\s{2,}")
 def speakable(text: str) -> str:
     """Strip what a speech engine would mangle, and tidy up after itself.
 
-    Returns "" if nothing but interjections remain — callers already treat an
-    empty string as "nothing to say", so a sentence that was only "Hmm." is
-    silently skipped rather than spelled out.
+    Returns "" if nothing but stripped interjections remain — callers already
+    treat an empty string as "nothing to say", so a sentence that was only
+    "Shh." is silently skipped rather than spelled out. (A lone "Hmm." is
+    *respelled* and hummed, not skipped — see the module docstring.)
     """
     respelled = text
     for pattern, canonical in _RESPELL:

@@ -40,6 +40,10 @@ dependencies = [
     # launches the app, and the store's SQLite schema churns across macOS
     # releases. Needs the one-time Calendars permission on first use.
     "pyobjc-framework-EventKit>=10.1",
+    # Where this machine is (Vigil's location watcher, the where_am_i tool):
+    # CoreLocation's Wi-Fi positioning, in-process. Needs the one-time
+    # Location Services permission for the Python that runs Ciel.
+    "pyobjc-framework-CoreLocation>=10.1",
 ]
 
 [project.optional-dependencies]
@@ -52,6 +56,14 @@ piper = ["piper-tts>=1.7.0"]
 # libonnxruntime.dylib and fail at import (verified 1.11.5-1.13.5 broken,
 # 1.10.46 fine).
 voice = ["sherpa-onnx>=1.10,<1.11"]
+# The Discord lane (Parallel Transport): texting Ciel from anywhere.
+# Optional like the others — without it the lane logs one warning and
+# stays off.
+discord = ["discord.py>=2.4"]
+# The web GUI (Chart): a local chat page onto the running assistant, with
+# the mute switch for rooms that must stay quiet. Optional for the same
+# reason — without it the lane logs one warning and stays off.
+web = ["aiohttp>=3.10"]
 
 [project.scripts]
 ciel = "ciel.__main__:main"

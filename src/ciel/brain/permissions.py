@@ -52,8 +52,9 @@ log = logging.getLogger(__name__)
 FILE_TOOLS: tuple[str, ...] = ("Read", "Write", "Edit", "Glob", "Grep")
 
 # Which input field carries the path, per tool. Anything absent from this map
-# is denied rather than waved through: a tool we do not know how to inspect is
-# a tool we cannot confine.
+# passes through untouched — every tool that can name a filesystem path is
+# listed here, and it is the tool allowlist, not this map, that keeps
+# unknown tools out.
 _PATH_FIELDS: dict[str, tuple[str, ...]] = {
     "Read": ("file_path",),
     "Write": ("file_path",),
@@ -83,6 +84,13 @@ FORBIDDEN_NAMES = frozenset({
     ".ssh", ".aws", ".gnupg", ".gpg", ".netrc", ".env",
     ".npmrc", ".pypirc", ".docker", ".kube", ".terraform.d",
     "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "credentials.json",
+    # The Discord bot token — the away lane's whole identity. Lives in its
+    # own file precisely so this list can name it; config.toml itself stays
+    # readable.
+    "discord.token",
+    # The Oura authorization — client secret and a refresh token, same
+    # arrangement: its own file so this list can name it.
+    "oura.json",
     # Agent and CLI state. `.claude` is not just settings — it holds session
     # transcripts and history from every coding session, which is a broader
     # disclosure than any single credential file.
@@ -99,11 +107,26 @@ _FORBIDDEN_SUBTREES: tuple[str, ...] = ("Library",)
 
 
 class WorkspaceGuard:
-    """Confines file tools to a single directory tree."""
+    """Confines file tools to a single directory tree.
 
-    def __init__(self, workspace: Path, read_only_outside: bool = False) -> None:
+    One deliberate carve-out: reads (never writes) under the journal's
+    snapshots directory. The undo prompt sends the model there to restore a
+    file's previous contents, and the journal's design keeps undo inside the
+    ordinary tools and guards — which only works if the ordinary Read can
+    actually reach the snapshot when the workspace is narrow.
+    """
+
+    def __init__(
+        self,
+        workspace: Path,
+        read_only_outside: bool = False,
+        snapshot_dir: Path | None = None,
+    ) -> None:
         self._workspace = workspace.expanduser().resolve()
         self._read_only_outside = read_only_outside
+        self._snapshots = (
+            snapshot_dir.expanduser().resolve() if snapshot_dir is not None else None
+        )
 
     @property
     def workspace(self) -> Path:
@@ -181,6 +204,18 @@ class WorkspaceGuard:
                 "That path is inside the Library folder, which holds keychains, "
                 "browser data, and messages. It is off limits."
             )
+
+        if (
+            not is_write
+            and self._snapshots is not None
+            and self._snapshots in resolved.parents
+            # A snapshot's filename ends with the original file's name. A
+            # stray snapshot of a forbidden file should never exist (denied
+            # calls are not snapshotted), but if one ever does, reading it
+            # here would resurrect exactly what the names list buries.
+            and not any(resolved.name.endswith(f"-{bad}") for bad in FORBIDDEN_NAMES)
+        ):
+            return None
 
         inside = resolved == self._workspace or self._workspace in resolved.parents
         if inside:

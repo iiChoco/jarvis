@@ -60,8 +60,10 @@ def _capture_sync(max_edge: int) -> list[bytes]:
     with tempfile.TemporaryDirectory(prefix="ciel-screen-") as td:
         paths = [Path(td) / f"display{i}.jpg" for i in range(displays)]
         # -x: no camera-shutter sound in the user's speakers mid-conversation.
+        # Absolute paths: under launchd the PATH is minimal and doesn't
+        # include /usr/sbin, where screencapture lives.
         subprocess.run(
-            ["screencapture", "-x", "-t", "jpg", *map(str, paths)],
+            ["/usr/sbin/screencapture", "-x", "-t", "jpg", *map(str, paths)],
             check=True,
             capture_output=True,
             timeout=15,
@@ -71,7 +73,7 @@ def _capture_sync(max_edge: int) -> list[bytes]:
             if not path.exists():
                 continue  # fewer displays than NSScreen reported — fine
             subprocess.run(
-                ["sips", "--resampleHeightWidthMax", str(max_edge), str(path)],
+                ["/usr/bin/sips", "--resampleHeightWidthMax", str(max_edge), str(path)],
                 check=True,
                 capture_output=True,
                 timeout=15,

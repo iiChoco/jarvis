@@ -11,22 +11,47 @@ uv run ciel
 
 Say **"hey jarvis"**, then talk.
 
-> Ciel is *named* Ciel but answers to "hey jarvis" for now. openWakeWord ships a
-> pretrained model for that phrase and none for "Ciel", so v1 borrows it rather
-> than blocking on training. See [Personalizing the wake word](#personalizing-the-wake-word).
+> Out of the box Ciel answers to "hey jarvis": openWakeWord ships a pretrained
+> model for that phrase and none for "Ciel". Training your own "hey ciel"
+> model is a supported, well-trodden path — free, offline, and it works — see
+> [Personalizing the wake word](#personalizing-the-wake-word). The default
+> *persona* is a butler named Jarvis too (`[brain] personality = "ciel"`
+> switches her back).
 
 ## What it does
 
 - **Hears you** — `openWakeWord` for the wake phrase, WebRTC VAD for knowing when
-  you've stopped talking, `faster-whisper` for transcription. All on-device.
-- **Thinks** — Claude Opus 5 via the Claude Agent SDK, with web search.
+  you've stopped talking, `mlx-whisper` (Metal GPU) for transcription with
+  `faster-whisper` as the CPU fallback. All on-device.
+- **Thinks** — Claude Opus 5 via the Claude Agent SDK, with web search — and a
+  deep-thought escalation agent for the questions that deserve more than a
+  conversational answer. Mechanical requests ("ten minute timer") never reach
+  the model at all: a conservative local grammar (`commands.py`) handles them
+  in milliseconds.
 - **Answers out loud** — Piper, a local neural voice.
 - **Remembers you** — durable memory that survives restarts, written unprompted.
+- **Acts, behind gates** — optional file access confined to a workspace, shell
+  commands behind a spoken three-tier gate, iMessage read/send, a look at your
+  screen when you point at it — every side effect confirmed out loud and
+  journaled so it can be undone.
+- **Watches on its own** — Vigil, the proactive layer: calendar lead-ins, a
+  morning brief, background completion watches, ring and location nudges —
+  budgeted, quiet-hour-aware, and held for the next conversation rather than
+  blurted.
+- **Knows how you slept** — reads an Oura ring: "how did I sleep" gets hours
+  and scores, and a rough morning or a still day can be raised before you ask.
+- **Knows where you are** — the Mac's Wi-Fi, or the phone via Find My where
+  macOS allows it, turned into a place name; moves between places are noted.
+- **Answers texts from anywhere** — DM it on Discord when you're out: same
+  brain, same conversation, same memory, and anything needing a yes is asked
+  over the same channel.
 - **Judges its sources** — web answers distinguish primary sources from
   aggregators, flag conflicts of interest, and state confidence rather than
   delivering everything in the same certain tone.
 - **Shows what it's doing** — a floating pill in the corner of the screen,
-  visible from any app.
+  visible from any app, and a local web page (the Chart) that mirrors the whole
+  conversation live, takes typed turns, and holds the mute switch for rooms
+  that must stay quiet.
 
 ## The protocols
 
@@ -36,9 +61,11 @@ the docs — and you — get to use.
 
 | Codename | System |
 |---|---|
-| **Proof Obligation** | The voice-confirmation gate (`confirm.py`, `shellguard.py`, `toolguard.py`) — nothing side-effectful proceeds without a spoken proof |
-| **Trichotomy** | The shell's three tiers — deny / quiet / confirm, every command in exactly one |
-| **Compact Support** | The workspace guard and `FORBIDDEN_NAMES` — file access vanishes outside a bounded region |
+| **Proof Obligation** | The voice-confirmation gate (`confirm.py`, `brain/toolguard.py`) — nothing side-effectful proceeds without a spoken proof |
+| **Trichotomy** | The shell's three tiers (`brain/shellguard.py`) — deny / quiet / confirm, every command in exactly one |
+| **Compact Support** | The workspace guard — file access vanishes outside a bounded region |
+| **Singularities** | `FORBIDDEN_NAMES` — the points inside the region where access is still undefined: credentials, shell startup files, agent state |
+| **Tower Clearance** | The confirmation answer window — a yes to a live question inherits the turn's trust instead of re-fighting the speaker gate |
 | **Inverse** | The action journal and snapshots (`journal.py`, `recorder.py`) — kept so operations can be run backwards |
 | **Trace** | Conversation transcripts — the record of the path actually taken |
 | **Barn Door** | Speaker verification — turns away the TV and the guests, and everyone knows a barn door only half-latches |
@@ -48,6 +75,10 @@ the docs — and you — get to use.
 | **Analytic Continuation** | Autoreload — the process is replaced, the conversation extends through it |
 | **Neighborhood** | The follow-up window — an open ball around the last turn, no wake word inside |
 | **Isomorphism** | The typed lane — a line on stdin maps structure-preservingly onto a spoken turn: same brain, same session, same transcript, no audio either way |
+| **Parallel Transport** | The Discord lane (`remote/discord.py`) — the same map carried along the path away from home: a DM from the pinned owner account is a turn, the reply rides back as a text, and confirmations travel the same road |
+| **Chart** | The web GUI (`remote/web.py`) — a local coordinate window onto the same manifold: the conversation drawn live, typed turns in, the mute switch |
+| **Vigil** | The proactive layer (`proactive/`) — watchers, one event queue, and the earned right to interrupt |
+| **Witness** | The unattended-turn rule (`brain/witness.py`) — reflection and Vigil turns may observe and write Ciel's own notebook, never act outward |
 | **Invariant** | Long-term memory — what survives every session transformation |
 | **Closure** | End-of-conversation reflection — capturing the limit points before the session is discarded |
 | **Atlas** | Projects — durable charts of ongoing work, with an index that says which chart to open |
@@ -63,8 +94,9 @@ uv sync --extra piper
 uv run ciel
 ```
 
-First run downloads a Whisper model (~500 MB), a Piper voice (~60 MB), and the
-wake-word models (~5 MB). After that it's offline except for Claude.
+First run downloads a Whisper model (`mlx-community/whisper-small.en-mlx`), a
+Piper voice (~60 MB), and the wake-word models (~5 MB); enabling `[voice]`
+later adds a ~28 MB speaker model. After that it's offline except for Claude.
 
 **Do not set `ANTHROPIC_API_KEY`.** The Agent SDK inherits Claude Code's
 subscription login. Setting that variable silently overrides it and bills you
@@ -80,33 +112,43 @@ uv run ciel --wake hotkey    # press Enter to talk — reliable in a noisy room
 uv run ciel --wake always    # respond to any speech (quiet rooms only)
 uv run ciel --new            # ignore the previous conversation, start fresh
 uv run ciel --tts say        # macOS built-in voice instead of Piper
+uv run ciel --model claude-sonnet-5   # override the brain model for this run
+uv run ciel --voice Daniel   # a macOS voice name, for --tts say
 uv run ciel -v               # debug logging
 ```
 
 ## Configuration
 
 Everything lives in `~/.ciel/config.toml`, or as `CIEL_<SECTION>_<FIELD>`
-environment variables for one-off runs.
+environment variables for one-off runs. (Two carve-outs: `[mcp.<name>]`
+connector tables are TOML-only, and `state_dir`/`log_level` sit at the top
+level, outside any section.)
 
 ```toml
 [brain]
 model = "claude-opus-5"      # "claude-sonnet-5" is ~3x cheaper and faster
+personality = "jarvis"       # the butler; "ciel" is the reserve persona
+effort = "low"               # reasoning effort for ordinary turns
+deep_effort = "high"         # ...and for the deep-thought escalation agent
 resume_window_minutes = 10.0  # silence beyond this rotates to a fresh session
 
 [stt]
-model = "small.en"           # base.en is 3x faster and noticeably worse
+engine = "mlx-whisper"       # Metal GPU; "faster-whisper" is the CPU fallback
+mlx_model = "mlx-community/whisper-small.en-mlx"
+# model/compute_type/device apply to faster-whisper only
 initial_prompt = "A spoken conversation with an assistant named Ciel."
 
 [tts]
 engine = "piper"
 piper_voice = "en_US-lessac-medium"
+effect = "none"              # "jarvis" adds the installed-speaker treatment
 
 [wake]
 mode = "wakeword"
 threshold = 0.5              # raise if the TV sets it off, lower if it ignores you
 
 [audio]
-silence_ms = 700             # how long a pause ends your turn
+silence_ms = 500             # how long a pause ends your turn (toward 700 if she interrupts)
 barge_in = false             # see below
 ```
 
@@ -124,6 +166,7 @@ Ciel is doing without your having to find the terminal.
 | Idle | Dim grey, "Ciel" — running, waiting for the wake word |
 | Listening | Green, pulsing — capturing your speech |
 | Thinking | Amber, pulsing — transcribing, or Claude is working |
+| Reasoning | Purple, pulsing — the deep pass, reasoning read aloud before the answer |
 | Speaking | Blue, pulsing — talking |
 | Error | Red — the turn failed |
 
@@ -215,8 +258,12 @@ sentence never reaches Whisper, the brain, or a follow-up window.
 
 ```bash
 uv sync --extra voice
-uv run python scripts/enroll_voice.py          # record 4 phrases (Ciel stopped)
+uv run python scripts/enroll_voice.py          # record 10 short phrases, varied styles (Ciel stopped)
 uv run python scripts/enroll_voice.py --test   # score yourself live
+uv run python scripts/enroll_voice.py --add    # append takes to the existing profile
+uv run python scripts/enroll_voice.py --adopt  # review rejected clips, adopt the ones that are you
+uv run python scripts/enroll_voice.py --calibrate  # re-measure the threshold against impostor voices
+uv run python scripts/enroll_voice.py --prune  # inspect takes by name and drop bad ones
 ```
 
 ```toml
@@ -292,6 +339,295 @@ This also makes verification confusing: a shell without Desktop permission
 reports "Operation not permitted" for a file Ciel wrote perfectly well. Check
 with `stat` rather than `ls`, or just ask Ciel to read it back.
 
+## Texting Ciel from anywhere (Parallel Transport)
+
+Off by default. Turn it on and you can DM Ciel on Discord from wherever you
+are — the message becomes an ordinary turn in the same conversation, and the
+reply comes back as a text instead of through the speakers.
+
+```bash
+uv sync --extra discord
+```
+
+```toml
+[discord]
+enabled = true
+owner_id = 123456789012345678
+# token: put it in ~/.ciel/discord.token (preferred — that filename is on
+# the FORBIDDEN_NAMES blocklist, so the model can never read it), or as
+# `token = "..."` here, or CIEL_DISCORD_TOKEN in the environment.
+```
+
+**One-time setup, about five minutes:**
+
+1. [discord.com/developers/applications](https://discord.com/developers/applications)
+   → *New Application* → **Bot** tab → *Reset Token*, save it to
+   `~/.ciel/discord.token`. Untick *Public Bot* while you're there. No
+   privileged intents needed — DMs carry their content without any, and
+   guild messages that @mention the bot are exempt from the content
+   restriction.
+2. Discord only delivers DMs between accounts that share a server, so make a
+   private one (just you) and invite the bot into it: **OAuth2 → URL
+   Generator**, scope `bot`, zero permissions, open the generated URL.
+3. Your own user id: Settings → Advanced → *Developer Mode* on, then
+   right-click your name → *Copy User ID*. That's `owner_id`.
+
+Then DM the bot. `uv run scripts/probe_discord.py --live` echoes your DMs
+back without running the assistant, which is the fastest way to check the
+plumbing.
+
+**Identity is pinned, not inferred.** Only DMs from `owner_id` are read at
+all — strangers, other bots, and anything said in a server channel are
+dropped before the words reach anything that could act on them. The model
+never chooses who may speak here or where replies go; both are config. The
+flip side is honest too: this gate is exactly as strong as your Discord
+account. Anyone holding your Discord session, or the bot token, is you as
+far as this lane is concerned — treat the token like a password.
+
+**Confirmations follow you out the door.** A confirm-tier action mid-text
+— a shell command, a connector send — texts you its question over the same
+DM and waits about two minutes for a yes or no, instead of voicing it into
+an empty room. Silence, a "no", or two unclear answers refuse the action,
+exactly as they do out loud.
+
+**@ciel works in servers too.** In any channel of a server the bot has
+been invited to, `@ciel <question>` is a turn — same conversation, reply
+posted to that channel. Still only your pinned account: anyone else's
+mentions are dropped at the same gate as their DMs, and nobody else's
+channel chatter is read at all. The turn knows it's in public — it's told
+to keep private context out of channel replies and to offer DMs when a
+real answer would need it, and held Vigil notes are only ever delivered
+into your DMs. `mentions = false` restricts the lane to DMs. One honest
+limit: mentions missed while Ciel is down are not backfilled — missed DMs
+are (within ten minutes), because the DM history has one place to look.
+
+**When Vigil is on**, urgent watched things may reach you over this link
+too: iMessage keeps priority when fully configured, and the Discord DM is
+the fallback outlet (`discord.proactive = false` keeps the lane strictly
+two-way). Held notes ride into your first text from away the same way they
+ride into a spoken conversation.
+
+**The honest limits.** Ciel lives on this machine: a closed lid means no
+answers until it wakes. Short network naps are survived (the gateway
+replays what was missed), and DMs sent while Ciel was disconnected or
+restarting are picked up on reconnect — the last message seen is persisted,
+so the sweep spans restarts — but only up to ten minutes back: a question
+from ten minutes ago is still being waited on; an instruction from six
+hours ago should be asked again, not executed stale. Replies compose under
+the speech rules, so they read like Ciel talking — short, plain, no
+markdown — which happens to be exactly how texts should read.
+
+## The GUI (Chart)
+
+Off by default. Turn it on and Ciel serves a small chat page on loopback —
+a live window onto the whole conversation, and a place to type when the
+room must stay quiet: a lecture, a library, a call. Every lane's turns
+appear as they happen (spoken ones included — you see what Ciel heard),
+the status pill mirrors the HUD, confirm-tier questions become Yes/No
+buttons, and the mute switch lives in the header. Next to the status
+pill, an agents chip counts everything working on your behalf right now
+— a deep-thought pass mid-flight, background watches, running timers —
+and expands into a list with live countdowns; it disappears when
+nothing is running.
+
+```bash
+uv sync --extra web
+```
+
+```toml
+[web]
+enabled = true
+# port = 8765        # the page lives at http://127.0.0.1:8765
+```
+
+**Mute** is the reason this exists. While muted, Ciel holds its tongue
+*and* its name: nothing leaves the speakers (greeting, timer rings, and
+replies included) and the wake word is not watched for — a false wake in
+a lecture hall costs exactly the attention mute was bought to avoid. The
+typed and web lanes keep working, and Vigil nudges that would have been
+spoken become held notes that ride into your next turn. Timers that come
+due while muted appear as text on the page instead of ringing. The state
+survives restarts (the autoreloader re-execs constantly) as
+`~/.ciel/mute` — a sentinel like Vigil's `hold`, so `touch ~/.ciel/mute`
+from a hotkey or another shell flips it without the page open, and it is
+announced on the page, in the terminal, and in the transcript either way.
+
+**Trust model.** The server binds `127.0.0.1` only: reaching the port
+means being at the machine, the same trust the keyboard gets — so web
+turns count as presence, unlike Discord ones. The one browser-shaped hole
+(any web page may try `ws://127.0.0.1`) is closed by an Origin check:
+pages from other origins are refused before a frame is read. Think hard
+before widening `host`; there is no account id here to gate on.
+
+**A native app later** is already provided for: the page speaks a small
+JSON protocol over one WebSocket, documented at the top of
+`src/ciel/remote/web.py` — a SwiftUI client connects to the same `/ws`
+and the server never knows the difference.
+
+## Watching things (Vigil)
+
+Off by default. Everything else Ciel says was asked for; Vigil is the
+machinery for the one exception — events the world produces on its own,
+flowing through a single queue, judged by a deterministic policy, and
+delivered by an unattended turn that the Witness rule keeps read-only
+(observe and take notes, never act outward).
+
+```toml
+[proactive]
+enabled = true
+brief_time = "08:30"         # arms the morning brief; empty keeps it off
+quiet_hours_start = "22:00"  # nothing crosses a quiet window — not even a text
+quiet_hours_end = "08:00"
+```
+
+**The watchers.** The calendar (EventKit or Google Calendar via
+`calendar_source`, ~10 minutes of lead time), the morning brief (today's
+agenda plus anything held overnight), the work watcher (everything
+registered with `watch_for_completion` — a file appearing, a process
+ending — polled every 15 s), the ring, and location moves. Each produces
+plain events; none decides anything.
+
+**The policy** is a fixed order, and the order is the point: an expired
+event drops; a read-back verification becomes a silent note; quiet hours
+hold everything (a 2am buzz violates them exactly as speech does); then
+the importance floor, presence, and two daily budgets — spoken nudges
+(`max_spoken_per_day`, 6) and texts (`max_messaged_per_day`, 3). When
+you're away, an important event may be texted — iMessage when configured,
+the Discord DM as fallback. Everything that clears no bar is *held* and
+rides into the start of your next conversation, aging out after 18 hours.
+
+**The brake.** `touch ~/.ciel/hold` silences the whole layer — nudges
+become held notes — until the file is removed; the mute switch does the
+same for anything that would have been spoken. `scripts/probe_vigil.py`
+drives every branch of "when may Ciel speak unprompted" with fakes.
+
+## The ring (Oura)
+
+Off by default. With a ring, "how did I sleep", "what's my readiness", "how
+active was I yesterday", and "how has my sleep been this week" are answered
+from the source — hours asleep, bed and wake times, the scores, and the
+contributor dragging readiness down, when one does.
+
+Oura stopped issuing personal access tokens in December 2025 (and will shut
+the issued ones off), so the way in is an OAuth application of your own.
+**One-time setup, about five minutes:**
+
+1. [developer.ouraring.com/applications](https://developer.ouraring.com/applications)
+   → *New Application*. Any name; the website, privacy-policy, and
+   terms fields just need URLs that resolve (a GitHub profile and a gist
+   will do for a single-user app); set the redirect URI to exactly
+   `http://localhost:8791/callback` (or another port, matched in config).
+   Copy the client id and secret. No review needed — an unreviewed
+   application may connect ten accounts, and this needs one.
+2. Put the credentials where the authorize step can see them:
+
+   ```toml
+   [oura]
+   enabled = true
+   client_id = "..."
+   low_readiness = 60   # 0 keeps the tool and drops the nudge
+   # client_secret: pass it as CIEL_OURA_CLIENT_SECRET to the authorize
+   # step (preferred — after that it lives in ~/.ciel/oura.json, owner-only
+   # and on the FORBIDDEN_NAMES blocklist, so the model can never read it),
+   # or as `client_secret = "..."` here.
+   ```
+
+3. Approve once:
+
+   ```bash
+   CIEL_OURA_CLIENT_SECRET=... uv run scripts/probe_oura.py --authorize
+   ```
+
+   It opens Oura's approval page asking for the `extapi:daily` scope only
+   (with PKCE), catches the redirect on localhost, and writes
+   `~/.ciel/oura.json`. From then on
+   Ciel keeps the tokens fresh itself — access tokens last about a month
+   and Oura's refresh tokens are single-use, so the file is rewritten on
+   every refresh. If it ever stops working (a revoked application, a
+   refresh that failed mid-write), the tool says so and the same command
+   repairs it. `uv run scripts/probe_oura.py --live` reads today from the
+   ring without running the assistant.
+
+A personal access token you already hold still works: `token = "..."` under
+`[oura]`. The OAuth file wins whenever it exists.
+
+**Read-only by construction.** The client only ever GETs the daily
+summaries and sleep sessions; nothing Ciel does can write to the ring or
+the account. That is also why the tool is on the Witness list: an
+unattended morning turn may check the ring before it says anything about
+the night.
+
+**When Vigil is on**, the ring's verdicts become at most two notes a day.
+In the morning, a readiness score at or under `low_readiness` or a sleep
+score at or under `low_sleep` queues one nudge — "rough night by the ring:
+sleep score 52, 5 hours 40 minutes asleep; readiness 55" with the weakest
+contributor named — which the policy voices or holds like any other event.
+From `activity_check_after` (18:00), an activity score still at or under
+`low_activity` files a note for the next conversation ("a still day — a
+walk would fix it"). A fine day produces nothing. Scores appear once the
+ring syncs through the phone; the watcher rescans every half hour and on
+wake from sleep. Any threshold set to 0 switches that check off.
+
+## Where you are (location)
+
+Off by default. On, "where am I" — and anything that depends on place —
+is answered from what this machine can actually see, turned into a name
+you chose:
+
+```toml
+[location]
+enabled = true
+# findmy_device = "iPhone"   # the phone's position, where macOS allows it (see below)
+
+[location.places]
+home = "attinternet"                  # a Wi-Fi network name…
+office = ["OfficeNet", "OfficeNet-5G"]  # …or several
+cabin = [44.0, -121.0]                # …or coordinates (with findmy_device)
+```
+
+`uv run scripts/probe_location.py --live` reads the sources once and tells
+you the network name to put under `[location.places]`.
+
+**Two sources, honestly labelled.** The Wi-Fi network the Mac is on needs
+no permission and locates the laptop — which is you whenever the laptop is
+with you. Find My's cache locates the *phone*, and is used when two gates
+allow: the app running Ciel (your terminal) must have Full Disk Access
+(System Settings → Privacy & Security), and macOS must still write the
+cache as JSON — 14.4 and later don't, in which case the watcher says so
+once in the log and carries on with the network. CoreLocation is not an
+option at all: macOS never shows a Python process the permission dialog.
+The answer always names which device it came from and how old the reading
+is. Read-only throughout, and the tool is on the Witness list.
+
+**When Vigil is on**, moves between named places become importance-1
+notes — "you arrived at office around 9:12" — mentioned at the start of
+the next conversation, never announced. The first reading after startup is
+a silent baseline; hopping between two unnamed networks is not a move.
+
+
+## Granting powers by text
+
+Off by default. With `[grants] enabled = true`, Ciel can change its own
+capability switches — but only when you ask, and never quietly:
+
+- *"Enable your shell access"* (spoken or texted) → Ciel asks **"Enable
+  shell access — okay?"** through the enforced gate — voiced at home,
+  texted over the Discord lane — and only a yes edits the config. The
+  change lands surgically in `config.toml` (your comments survive, the
+  result is parse-verified, a bad write rolls back), gets journaled like
+  every confirmed action, and takes effect after the reload it triggers.
+- *"Kill your shell"* → immediate, no question. De-escalation never has
+  friction; it's the one-way valve's philosophy applied to permissions.
+- The catalog in `brain/tools/grants.py` is the boundary: files, shell,
+  screen, iMessage read/send, Vigil, barge-in, the morning brief, Discord
+  away texts. What's *not* in it is the point — the pinned Discord
+  account and token, the voice gate, connector tool tiers, and the
+  workspace path cannot be reached by any phrasing, from anywhere.
+- Unattended turns (reflection, Vigil) are denied both tools outright by
+  the Witness rule, and the model is instructed to grant only on your
+  explicit request — never because something it read suggested it. The
+  instruction is manners; the gate is the enforcement.
+
 ## Memory
 
 Ciel saves things it learns, without being asked, as one Markdown file per fact
@@ -345,14 +681,19 @@ through an in-process MCP server and auto-allowed.
 so they're a connection entry in config and need no code at all.
 
 **A different speech engine** — implement the `SpeechToText` or `TextToSpeech`
-protocol and change one line in `config.py`. The protocols exist precisely so
-`faster-whisper` → `mlx-whisper`, or Piper → ElevenLabs, isn't a rewrite.
+protocol and add it to the factory that names the engines (`build_stt` in
+`stt/__init__.py`, `build_tts` in `pipeline.py`) — from there it's a config
+value. The `faster-whisper` → `mlx-whisper` swap already happened exactly this
+way, and Piper → anything else wouldn't be a rewrite either.
 
 ## Personalizing the wake word
 
 To make it answer to "Ciel", train a custom openWakeWord model — free and
 offline; their notebook generates synthetic clips with Piper and outputs
-`.onnx`. Point `wake.model` at the file.
+`.onnx`. Qualify the candidate with `scripts/probe_wake_model.py <model.onnx>`
+(it streams synthesized speech through the real detector and reports trigger
+rates for the phrase, near-misses, and negatives), then point `wake.model` at
+the file — the ready line takes the phrase from the path's stem.
 
 Train **"hey ciel"**, not bare "Ciel". One-syllable wake words have much higher
 false-trigger rates; the two-syllable prefix gives the detector enough to work
@@ -365,11 +706,31 @@ blame:
 
 ```bash
 uv run scripts/probe_audio.py vad     # endpointing, synthetic speech, no mic
+uv run scripts/probe_audio.py hold    # the Cauchy mid-thought judgement
 uv run scripts/probe_audio.py mic     # live capture -> /tmp/ciel_capture.wav
 uv run scripts/probe_voice.py speak   # TTS + playback only
 uv run scripts/probe_voice.py barge   # interrupt path
 uv run scripts/probe_voice.py echo    # mic -> STT -> TTS, no model in the loop
+uv run scripts/probe_shellguard.py    # the shell gate's full confirmation choreography
+uv run scripts/probe_closure.py       # Closure + Atlas: rotation, turn lock, atomic writes
+uv run scripts/probe_vigil.py         # Vigil: queue, policy, presence, the Witness guard
+uv run scripts/probe_discord.py       # the Discord lane's scripted checks
+uv run scripts/probe_discord.py --live  # connect for real and echo your DMs
+uv run scripts/probe_discord.py --send hi  # send one DM and exit
+uv run scripts/probe_web.py           # the GUI lane: queue, origin gate, mute relay, roster
+uv run scripts/probe_web.py --live    # serve the real page and echo, no mic or model
+uv run scripts/probe_grants.py        # capability granting: catalog + surgery
+uv run scripts/probe_stt.py           # transcript filters: hallucinations, loops
+uv run scripts/probe_oura.py          # the ring: summaries, the nudge, tokens
+uv run scripts/probe_oura.py --authorize  # connect the ring (one browser approval)
+uv run scripts/probe_oura.py --live   # read today from the ring for real
+uv run scripts/probe_location.py      # places, both sources, move notes
+uv run scripts/probe_location.py --live  # read where this Mac is right now
+uv run scripts/probe_wake_model.py ~/.ciel/models/hey_ciel.onnx  # qualify a custom wake model
 ```
+
+`enroll_voice.py` (Barn Door's enrollment and tuning) is documented in the
+voice-identity section above.
 
 ## Cost
 
@@ -382,7 +743,9 @@ Web-search turns are much more expensive — around **$0.21** — because search
 results land in the context.
 
 Switching `brain.model` to `claude-sonnet-5` cuts this substantially at some
-cost in research judgment.
+cost in research judgment. Reasoning effort is a second dial: ordinary turns
+run at `effort = "low"` and only the deep-thought agent pays for
+`deep_effort = "high"`, which is what keeps the per-turn figure where it is.
 
 > A monthly Agent SDK credit (Pro $20 / Max 5x $100 / Max 20x $200) has been
 > announced but isn't live on all accounts yet. Until it is, this usage draws on
@@ -405,8 +768,20 @@ as soon as the first complete thought exists rather than after the whole answer.
 |---|---|
 | `pipeline.py` | The loop and the state machine |
 | `config.py` | Every swappable choice, in one place |
-| `audio/` | Capture, endpointing, playback, wake |
-| `stt/`, `tts/` | Engine protocols and implementations |
-| `brain/` | Claude client, system prompt, sessions, tools |
-| `memory/` | The durable file-backed store |
-| `ui/` | The status pill (`hud.py` is its own process) |
+| `commands.py` | The no-brain fast path — mechanical requests matched locally |
+| `confirm.py` | Proof Obligation — the spoken/texted yes-or-no broker |
+| `audio/` | Capture, endpointing, playback, wake, speaker identity |
+| `stt/`, `tts/` | Engine protocols and implementations (plus the voice effect) |
+| `brain/` | Claude client, system prompt, sessions, guards, tools |
+| `memory/` | The durable file-backed store (Invariant) |
+| `proactive/` | Vigil — watchers, the event queue, the interruption policy |
+| `remote/` | The lanes away from the mic — Discord DMs (`discord.py`) and the loopback GUI (`web.py`) |
+| `messages/` | iMessage — reading the database, sending through Messages |
+| `journal.py` | Inverse — the action journal and snapshots, so actions can be undone |
+| `timers.py` | Timers and alarms, ringing or held while muted |
+| `projects.py` | Atlas — durable working state per project |
+| `transcript.py` | Trace — the record of the path actually taken |
+| `reload.py` | Analytic Continuation — watch the source, re-exec, resume |
+| `oura.py` | The Oura client — sleep, readiness, activity; read-only |
+| `location.py` | Where the user is — Find My's cache, the Mac's Wi-Fi, named places |
+| `ui/` | The status pill (`hud.py` is its own process) and the indicator tee that feeds every view |

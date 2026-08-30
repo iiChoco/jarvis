@@ -1,8 +1,8 @@
 """The speech-to-text boundary.
 
 One method. Any engine that can turn 16 kHz mono PCM into a string fits here —
-faster-whisper today, mlx-whisper or a cloud API later — without the pipeline
-knowing which one it's talking to.
+mlx-whisper today, faster-whisper as the CPU fallback, a cloud API someday —
+without the pipeline knowing which one it's talking to.
 """
 
 from __future__ import annotations

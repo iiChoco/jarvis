@@ -10,6 +10,7 @@ overridden by ``CIEL_*`` environment variables.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import tomllib
@@ -130,15 +131,16 @@ class AudioConfig:
 
     Off by default, and that default is measured rather than cautious. There is
     no acoustic echo cancellation here, so on open speakers the microphone
-    hears Ciel's own voice. On this hardware, a silent room measured ~0.085 RMS
-    and Ciel speaking measured ~0.18 — barely a two-to-one separation, and well
-    inside the range ordinary speech occupies. Any threshold sensitive enough
-    to catch you interrupting also catches Ciel interrupting itself, which is a
+    hears Ciel's own voice. On this hardware the room measured ~0.015 RMS
+    quiet (~0.085 with background noise) and Ciel speaking reached ~0.18 —
+    with the background up, barely a two-to-one separation, and well inside
+    the range ordinary speech occupies. Any threshold sensitive enough to
+    catch you interrupting also catches Ciel interrupting itself, which is a
     far worse failure than not being interruptible.
 
     **On headphones there is no echo path and this works properly — turn it
     on.** On speakers, leave it off unless you have tuned the values below
-    against your own room using `scripts/probe_bargein.py`."""
+    against your own room using `scripts/probe_voice.py barge`."""
 
     barge_in_ratio: float = 2.5
     """How far above the ambient noise floor a sound must be to count.
@@ -168,8 +170,10 @@ class WakeConfig:
 
     model: str = "hey_jarvis"
     """An openWakeWord pretrained name, or a path to a custom ``.onnx``.
-    Ciel is *named* Ciel but answers to "hey jarvis" until a custom model is
-    trained — see the plan's wake-word section."""
+    The pretrained default answers to "hey jarvis"; a trained "hey ciel"
+    model dropped in as a path answers to the name — see the README's
+    wake-word section, and qualify a candidate model with
+    ``scripts/probe_wake_model.py`` before pointing this at it."""
 
     threshold: float = 0.5
     """0-1. Raise it if the TV sets Ciel off; lower it if it ignores you."""
@@ -366,6 +370,15 @@ class TTSConfig:
 
     Past about 1.3 the neural voice starts to slur; below 0.8 it drags."""
 
+    effect: Literal["none", "jarvis"] = "none"
+    """Post-processing on the synthesized voice, engine-agnostic.
+
+    ``jarvis`` is the installed-speaker treatment (``tts/effect.py``): low
+    end rolled off, a presence lift, a breath of early reflections — the
+    voice reads as coming from the room's architecture rather than from a
+    file. Pure numpy, ~6 ms of added latency. ``none`` is the untouched
+    voice."""
+
 
 @dataclass(frozen=True, slots=True)
 class FilesConfig:
@@ -373,9 +386,10 @@ class FilesConfig:
 
     enabled: bool = False
     """Off by default. Ciel acts on transcribed speech, reads web pages into
-    its context, and file tools run without a confirmation step (only shell
-    commands get one) — so file access is a real decision, not a default.
-    Turn it on deliberately."""
+    its context, and file tools run without a confirmation step (shell
+    commands, confirm-tier connector tools, message sends, and capability
+    grants get one; file writes do not) — so file access is a real decision,
+    not a default. Turn it on deliberately."""
 
     workspace: Path = field(
         default_factory=lambda: Path.home() / ".ciel" / "workspace"
@@ -547,8 +561,10 @@ class JournalConfig:
     file that size is usually generated, not precious."""
 
     dir: Path = field(default_factory=lambda: Path.home() / ".ciel" / "undo")
-    """Where the journal and its snapshots live. Inside the state dir, so
-    Ciel can read its own snapshots back when restoring one."""
+    """Where the journal and its snapshots live. The workspace guard carves
+    out read-only access to the ``snapshots`` folder under here, so restoring
+    a file stays the model's ordinary Read + Write even when the workspace is
+    narrow."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -714,6 +730,290 @@ class MessagesConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class OuraConfig:
+    """The Oura Ring — readiness, sleep, and activity (``oura.py``).
+
+    Oura Cloud API v2 over OAuth2: an application of your own (client id
+    and secret from developer.ouraring.com/applications), one browser
+    approval via ``probe_oura.py --authorize``, and a token file Ciel keeps
+    fresh from then on. Read-only by construction — the client only ever
+    GETs the daily summaries and sleep sessions. Two consumers: the
+    ``oura_summary`` brain tool ("how did I sleep"), and a Vigil watcher
+    that flags a low readiness or sleep score in the morning and a still
+    day's low activity score in the evening."""
+
+    enabled: bool = False
+    """Off by default: without an authorization there is nothing to fetch,
+    and an always-failing tool wastes turns. Turn on after authorizing."""
+
+    client_id: str = ""
+    """Your Oura application's client id, from
+    developer.ouraring.com/applications. Not a secret — it appears in the
+    approval URL — but specific to you: each application connects to one
+    developer's ring(s), and an unreviewed one is limited to ten accounts,
+    which is nine more than this needs. Needed for the authorize step; the
+    step copies it into ``token_file`` so the runtime needs only that."""
+
+    client_secret: str = ""
+    """The application secret. A credential: prefer ``CIEL_OURA_CLIENT_SECRET``
+    in the environment of the authorize step over a value here — after
+    that step it lives in ``token_file`` (owner-only, on the blocklist) and
+    this field can stay empty. Revocable from the Oura application page."""
+
+    token_file: Path = field(
+        default_factory=lambda: Path.home() / ".ciel" / "oura.json"
+    )
+    """Where the authorization lives — client credentials, access and
+    refresh tokens — written by the authorize step and rewritten by Ciel
+    on every refresh, because Oura's refresh tokens are single-use and the
+    file must follow them. Named in ``FORBIDDEN_NAMES``, so the model's
+    file tools and the shell gate both refuse to read it."""
+
+    redirect_port: int = 8791
+    """The localhost port the one-time authorize step listens on; register
+    ``http://localhost:<port>/callback`` as the application's redirect URI
+    (it must match exactly). Bound only for the duration of that step —
+    nothing in the running assistant ever listens."""
+
+    token: str = ""
+    """A legacy personal access token. Oura stopped issuing these in
+    December 2025 and has said the issued ones will be shut off; kept so
+    one already in hand keeps working until then. The OAuth tokens in
+    ``token_file`` win whenever they exist."""
+
+    poll_s: float = 1800.0
+    """How often the Vigil watcher rescans, in seconds. Half an hour: the
+    ring syncs opportunistically over the phone, so anything tighter just
+    re-reads the same numbers."""
+
+    low_readiness: int = 60
+    """Readiness score at or below which the morning nudge fires — Oura's
+    own "pay attention" band starts under 70; 60 keeps the nudge for
+    genuinely rough mornings. 0 disables this check while keeping the
+    tool. One nudge per morning covers readiness and sleep together."""
+
+    low_sleep: int = 60
+    """Sleep score at or below which the morning nudge fires (with hours
+    asleep, when the session has synced). 0 disables this check."""
+
+    low_activity: int = 40
+    """Activity score at or below which an evening note is filed — a still
+    day, mentioned at the next conversation rather than announced. 0
+    disables this check."""
+
+    activity_check_after: str = "18:00"
+    """HH:MM local time from which the activity check runs. Earlier in the
+    day a low score is just the day not having happened yet."""
+
+    def authorized(self) -> bool:
+        """Whether ``token_file`` holds a complete OAuth authorization — a
+        refresh token plus the credentials to use it. A JSON peek rather
+        than an import of ``oura.py``: config stays dependency-free."""
+        try:
+            data = json.loads(self.token_file.read_text())
+        except (OSError, ValueError):
+            return False
+        if not isinstance(data, dict) or not data.get("refresh_token"):
+            return False
+        return bool(
+            (data.get("client_id") or self.client_id)
+            and (data.get("client_secret") or self.client_secret)
+        )
+
+    @property
+    def armed(self) -> bool:
+        """Enabled *and* holding a way in — the one test the tool registry,
+        the system prompt, and the watcher all make, so they agree."""
+        return self.enabled and (self.authorized() or bool(self.token))
+
+@dataclass(frozen=True, slots=True)
+class LocationConfig:
+    """Where the user is (``location.py``) — from what this machine can see.
+
+    Two sources, used in order: the phone's position from Find My's cache
+    (needs Full Disk Access for the app running Ciel, and a macOS that
+    still writes the cache as JSON — 14.4 and later don't), then the Wi-Fi
+    network this Mac is on (``system_profiler``, no permission needed).
+    Places below turn either into a name. Two consumers: the ``where_am_i``
+    brain tool, and a Vigil watcher that notes moves between places.
+    CoreLocation is not an option: macOS never shows a Python process the
+    location permission dialog."""
+
+    enabled: bool = False
+    """Off by default: knowing where the laptop is, even read-only, is a
+    standing fact about the person, opted into deliberately."""
+
+    places: dict[str, Any] = field(default_factory=dict)
+    """``[location.places]`` — name → a Wi-Fi network name, a list of them,
+    a ``[lat, lon]`` pair, or a table with ``network``/``networks`` and
+    ``lat``/``lon``. A fix resolves to the first place it matches, so the
+    spoken answer is "at home", not a pair of numbers."""
+
+    place_radius_m: float = 200.0
+    """How close a coordinate fix must be to a place's coordinates to count
+    as there. Two hundred metres covers a Find My reading's usual error
+    and a large building; tighten it for places that are neighbours."""
+
+    poll_s: float = 300.0
+    """How often the watcher re-reads the sources. Five minutes: a move
+    takes longer than that, and ``system_profiler`` costs a few seconds
+    of CPU each time."""
+
+    findmy_device: str = ""
+    """A fragment of the device name in Find My ("iPhone") whose position
+    counts as the user's. Empty leaves the Find My source off entirely and
+    the answer is the Mac's network only."""
+
+    findmy_cache: Path = field(
+        default_factory=lambda: Path.home() / "Library" / "Caches"
+        / "com.apple.findmy.fmipcore" / "Devices.data"
+    )
+    """Find My.app's device cache. Read-only here, and inside ``~/Library``
+    — the subtree the model's file tools can never reach; this reader is
+    deterministic code, not a tool."""
+
+    findmy_max_age_s: float = 1800.0
+    """A phone position older than this no longer says where the person is
+    — the Mac's network is used instead."""
+
+    wifi: bool = True
+    """Whether the Wi-Fi network counts as a source. Off on a machine that
+    never moves and whose network is not worth a place name."""
+
+
+@dataclass(frozen=True, slots=True)
+class DiscordConfig:
+    """The Discord lane — texting Ciel from wherever you are.
+
+    Codename Parallel Transport (see ``remote/discord.py``). A DM from the
+    pinned owner account becomes an ordinary turn — same brain, same
+    session, same transcript — and the reply comes back as a text. A
+    confirm-tier tool call mid-remote-turn texts its question over the
+    same channel and waits for a yes or no, so the Proof Obligation
+    follows the user out the door instead of being voiced into an empty
+    room.
+
+    Setup lives in the README: a bot application, its token, a mutual
+    server (Discord only delivers DMs between accounts that share one),
+    and your user id."""
+
+    enabled: bool = False
+    """Off by default, like every switch that opens a path into the brain
+    from outside the room. Turning it on without ``token`` and
+    ``owner_id`` warns at startup and arms nothing."""
+
+    token: str = ""
+    """The bot token from the Discord developer portal. A credential:
+    prefer ``CIEL_DISCORD_TOKEN`` in the launch environment if you'd
+    rather it not live in the config file. Anyone holding this token can
+    read what Ciel texts you and impersonate the bot — treat it like a
+    password, and regenerate it in the portal if it leaks."""
+
+    owner_id: int = 0
+    """Your Discord user id — the identity gate. Only DMs from this
+    account are read at all; everything else is dropped before it reaches
+    anything that could act on it. Pinned in config for the
+    ``owner_handle`` reason: the model never chooses who may speak here
+    or where replies go. (Discord Settings → Advanced → Developer Mode,
+    then right-click your own name → Copy User ID.)"""
+
+    proactive: bool = True
+    """Whether Vigil's away texts may ride this link when iMessage isn't
+    configured. The link being armed at all is already the deliberate
+    opt-in — this exists to keep the lane strictly two-way-conversational
+    for anyone who wants that. iMessage, when fully configured, keeps
+    priority; this is the fallback outlet, not a second one."""
+
+    confirm_timeout_s: float = 120.0
+    """How long a texted confirmation question waits for a yes or no
+    before counting as no. Far longer than the spoken gate's eight
+    seconds on purpose: a phone in a pocket answers on notification time,
+    not conversation time — but not unbounded, because the turn holds
+    the brain's lock while it waits. Also the deadline for questions
+    asked on the web GUI — every text-lane confirmation shares this
+    clock, Discord enabled or not."""
+
+    max_inbound_chars: int = 4000
+    """Longest inbound message accepted, truncated beyond. Twice
+    Discord's own per-message cap, so nothing a normal client sends ever
+    hits it — this bounds pastes-of-pastes, not conversation."""
+
+    mentions: bool = True
+    """Answer @mentions in server channels the bot has been invited to —
+    still only from ``owner_id``; everyone else's mentions are dropped at
+    the same gate as their DMs. Replies land in the channel, publicly,
+    and the turn is told so. Off restricts the lane to DMs. (No
+    privileged intent needed: Discord exempts messages that mention the
+    bot from the message-content restriction.)"""
+
+    token_file: Path = field(
+        default_factory=lambda: Path.home() / ".ciel" / "discord.token"
+    )
+    """Where the bot token lives when ``token`` above is empty — a file
+    named in ``FORBIDDEN_NAMES``, so the model's file tools and the shell
+    gate both refuse to read it. Prefer this over ``token``: config.toml
+    is model-readable (the workspace covers home), and a credential in a
+    readable file is a credential in every future context window."""
+
+    state_file: Path = field(
+        default_factory=lambda: Path.home() / ".ciel" / "discord.json"
+    )
+    """The lane's tiny persistent state — the last DM actually seen —
+    mirrored on every accepted message for the timers.json reason: the
+    autoreloader re-execs constantly (a remote capability grant does it
+    on purpose), and a text sent during the seconds of restart must be
+    picked up by the catch-up sweep, not silently lost."""
+
+    def resolved_token(self) -> str:
+        """The bot token: the inline value if set, else ``token_file``'s
+        contents. Empty when neither exists — the lane's unarmed state."""
+        if self.token:
+            return self.token
+        try:
+            return self.token_file.read_text().strip()
+        except OSError:
+            return ""
+
+
+@dataclass(frozen=True, slots=True)
+class WebConfig:
+    """The local GUI — a chat window onto the running assistant.
+
+    Codename Chart (see ``remote/web.py``). A small local web server: the
+    page it serves is a live view of the conversation — every lane's
+    turns, the state pill, a mute switch — and a place to type when the
+    room must stay quiet (a class, a library). The WebSocket protocol it
+    speaks is documented in the module, deliberately client-agnostic: a
+    native app later (SwiftUI, or anything else) connects to the same
+    socket and the server never knows the difference."""
+
+    enabled: bool = False
+    """Off by default, like every switch that opens a path into the brain
+    from outside the terminal — even one that only listens on loopback."""
+
+    host: str = "127.0.0.1"
+    """Loopback only by default, and think hard before widening it: this
+    socket feeds text straight into a brain with tools, and unlike the
+    Discord lane there is no account id here to gate on — being able to
+    reach the port *is* the identity check. Browser pages from other
+    origins are refused by the Origin check either way."""
+
+    port: int = 8765
+    """Where the GUI lives: http://127.0.0.1:8765 by default."""
+
+    max_inbound_chars: int = 4000
+    """Longest inbound message accepted, truncated beyond — the Discord
+    lane's bound, for the Discord lane's reason: this limits pastes, not
+    conversation."""
+
+    history_lines: int = 200
+    """How many recent transcript rows a connecting client is caught up
+    with. Session-scoped and in-memory: the GUI opening mid-conversation
+    should show the conversation, not a blank page — but it is a window,
+    not the archive; the CSVs in ``[transcripts]`` remain the record."""
+
+
+@dataclass(frozen=True, slots=True)
 class MCPServerConfig:
     """One external MCP server — a connector to an outside service.
 
@@ -780,6 +1080,30 @@ class MCPServerConfig:
     ``confirm`` tier (there is no one to say yes). These names must also be
     callable at all — on ``tools``, or on a server whose ``tools`` is None;
     this list never widens what the model may reach, only when."""
+
+
+@dataclass(frozen=True, slots=True)
+class GrantsConfig:
+    """Remote capability granting — changing what Ciel may do, by asking.
+
+    With this on, Ciel gets three tools over its own configuration:
+    ``list_capabilities`` (what exists, what's on), ``grant_capability``
+    (enable something, or set the morning brief), and
+    ``revoke_capability`` (disable something). The asymmetry is the
+    design: every grant passes the enforced confirmation gate — spoken at
+    home, texted over the Discord lane — before a byte of config changes,
+    while a revoke runs immediately, because de-escalation should never
+    have friction. The catalog of grantable keys is fixed in code
+    (``brain/tools/grants.py``); the security-critical ones — the Discord
+    pinning, the voice gate, the tool tiers — are simply not in it, so no
+    phrasing reaches them. Changes are edited into config.toml surgically
+    (comments preserved, parse-verified, rolled back on failure),
+    journaled like every confirmed action, and take effect on the reload
+    the grant itself triggers."""
+
+    enabled: bool = False
+    """Off by default: a channel that widens Ciel's own permissions is
+    itself a permission, and the biggest one here."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1063,6 +1387,11 @@ class Config:
     shell: ShellConfig = field(default_factory=ShellConfig)
     journal: JournalConfig = field(default_factory=JournalConfig)
     messages: MessagesConfig = field(default_factory=MessagesConfig)
+    discord: DiscordConfig = field(default_factory=DiscordConfig)
+    web: WebConfig = field(default_factory=WebConfig)
+    oura: OuraConfig = field(default_factory=OuraConfig)
+    location: LocationConfig = field(default_factory=LocationConfig)
+    grants: GrantsConfig = field(default_factory=GrantsConfig)
     commands: CommandsConfig = field(default_factory=CommandsConfig)
     screen: ScreenConfig = field(default_factory=ScreenConfig)
     timers: TimersConfig = field(default_factory=TimersConfig)
@@ -1097,6 +1426,11 @@ _SECTIONS = {
     "shell": ShellConfig,
     "journal": JournalConfig,
     "messages": MessagesConfig,
+    "discord": DiscordConfig,
+    "web": WebConfig,
+    "oura": OuraConfig,
+    "location": LocationConfig,
+    "grants": GrantsConfig,
     "commands": CommandsConfig,
     "screen": ScreenConfig,
     "timers": TimersConfig,

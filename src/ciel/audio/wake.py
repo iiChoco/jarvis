@@ -121,9 +121,12 @@ class OpenWakeWord:
     Runs under onnxruntime rather than tflite: the tflite runtime has no wheels
     for current Python on macOS, and is unreliable on Apple Silicon besides.
 
-    v1 uses the pretrained ``hey_jarvis`` model — Ciel is *named* Ciel but
-    answers to "hey jarvis" until a custom model is trained, because no
-    pretrained model for "Ciel" exists and training one is a separate job.
+    Defaults to the pretrained ``hey_jarvis`` model — openWakeWord ships no
+    "Ciel" model. A custom one is a first-class citizen, not future work:
+    point ``model`` at a trained ``.onnx`` path and the registry download is
+    skipped, ``scripts/probe_wake_model.py`` qualifies the model before it
+    goes live, and the spoken ready line takes the wake phrase from the
+    path's stem.
     """
 
     def __init__(
@@ -163,7 +166,12 @@ class OpenWakeWord:
             inference_framework="onnx",
             vad_threshold=self._vad_threshold,
         )
-        log.info("wake word ready (%s, threshold %.2f)", self._model_name, self._threshold)
+        # A custom model arrives as a path; its stem is the phrase — same
+        # rule as the spoken ready line, because the log tells the truth in
+        # the same words.
+        shown = Path(self._model_name)
+        display = shown.stem if shown.suffix else self._model_name
+        log.info("wake word ready (%s, threshold %.2f)", display, self._threshold)
 
     def push(self, frame: bytes) -> bool:
         if self._model is None:

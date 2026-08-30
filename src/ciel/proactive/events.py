@@ -44,8 +44,9 @@ class ProactiveEvent:
 
     id: str
     source: str
-    """Which watcher produced it — "calendar", "brief", "work", "mail",
-    "verify". Free-form by design: a new watcher needs no registry edit."""
+    """Which watcher produced it — "calendar", "brief", "work", "oura",
+    "location", "verify", "vigil" (watcher-health self-reports). Free-form
+    by design: a new watcher needs no registry edit."""
 
     importance: int
     """1 routine (news, never interrupts), 2 timely, 3 urgent. The policy

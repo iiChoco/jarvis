@@ -182,6 +182,36 @@ class HudIndicator:
                 pass
 
 
+class TeeIndicator:
+    """Fans one state announcement out to several indicators.
+
+    Exists for the web GUI: its state pill wants the same transitions the
+    HUD gets, and teaching the pipeline to announce twice would spread
+    the fan-out across every call site. Each target keeps the protocol's
+    failure tolerance for itself; the tee adds none of its own beyond
+    guarding the synchronous set_state, which is called from the audio
+    frame loop and must survive any one target misbehaving.
+    """
+
+    def __init__(self, *targets: Indicator) -> None:
+        self._targets = targets
+
+    async def start(self) -> None:
+        await asyncio.gather(*(t.start() for t in self._targets))
+
+    def set_state(self, state: str) -> None:
+        for target in self._targets:
+            try:
+                target.set_state(state)
+            except Exception:  # noqa: BLE001 - one bad light must not dim the rest
+                log.debug("indicator set_state failed", exc_info=True)
+
+    async def close(self) -> None:
+        await asyncio.gather(
+            *(t.close() for t in self._targets), return_exceptions=True
+        )
+
+
 def build_indicator(config: UIConfig) -> Indicator:
     """Pick an indicator from config."""
     if config.indicator == "none":
@@ -201,6 +231,7 @@ __all__ = [
     "HudIndicator",
     "TerminalIndicator",
     "NullIndicator",
+    "TeeIndicator",
     "build_indicator",
     "STATES",
 ]

@@ -87,16 +87,19 @@ class InterruptionPolicy:
     ) -> Decision:
         """Route one event. Order matters and is the policy:
 
-        expiry first (a dead event needs no judgement), then quiet hours
-        (they outrank importance — the whole point of a quiet window is that
-        nothing crosses it, and a phone buzz at 2am violates it exactly as
-        speech does, so texts hold too), then the importance floor, then
-        presence, then the budgets. Away routes to "message" only when the
-        event clears the higher texting bar, the caller says messaging is
-        actually wired (``can_message``: owner handle pinned AND the
-        messages switches on), and the texting budget has room. Everything
-        that isn't "speak" or "message" is "hold": held notes are the safety
-        net that makes every other rule cheap to apply.
+        expiry first (a dead event needs no judgement — it drops), then the
+        verify short-circuit (a read-back check becomes a silent note, ahead
+        even of quiet hours), then quiet hours (they outrank importance —
+        the whole point of a quiet window is that nothing crosses it, and a
+        phone buzz at 2am violates it exactly as speech does, so texts hold
+        too), then the importance floor, then presence, then the budgets.
+        Away routes to "message" only when the event clears the higher
+        texting bar, the caller says messaging is actually wired
+        (``can_message``: the iMessage outlet — owner handle pinned and both
+        messages switches on — or a connected Discord link with
+        ``discord.proactive``), and the texting budget has room. Everything
+        else holds — except the expired event, which drops: held notes are
+        the safety net that makes every other rule cheap to apply.
         """
         if event.expires_at is not None and event.expires_at <= now:
             return Decision("drop", "expired")

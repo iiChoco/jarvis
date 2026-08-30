@@ -391,9 +391,11 @@ class ShellGuard:
         The generous timeout is deliberate: a confirmation legitimately blocks
         for the spoken prompt plus the answer window plus one retry, and the
         SDK killing the hook mid-question would approve-by-crash or
-        deny-by-crash on its own schedule rather than the user's.
+        deny-by-crash on its own schedule rather than the user's. Raised
+        past the *remote* gate's worst case — two 120-second texted answer
+        windows back to back — for exactly that reason.
         """
-        return {"PreToolUse": [HookMatcher(matcher="Bash", hooks=[self], timeout=120)]}
+        return {"PreToolUse": [HookMatcher(matcher="Bash", hooks=[self], timeout=600)]}
 
 
 __all__ = ["ShellGuard", "classify", "deny_decision", "Tier"]

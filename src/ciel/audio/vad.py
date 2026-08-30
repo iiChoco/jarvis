@@ -1,7 +1,7 @@
 """Utterance endpointing — deciding when the user started and stopped talking.
 
 webrtcvad classifies each 30 ms frame as speech or not. That per-frame verdict
-is noisy on its own, so this wraps it in the two pieces of state that make it
+is noisy on its own, so this wraps it in the three pieces of state that make it
 usable:
 
 * a **preroll** ring buffer, so the audio *before* the trigger is kept. VAD
@@ -9,7 +9,12 @@ usable:
   clipped — which is exactly the kind of error that makes Whisper drop or
   invent the opening word.
 * a **hangover** counter, so a natural pause mid-sentence doesn't end the turn.
-  A single silent frame means nothing; 700 ms of them means the user is done.
+  A single silent frame means nothing; 500 ms of them (``silence_ms``) means
+  the user is done.
+* an **adaptive noise-floor gate**, so a room's own hum never counts as
+  speech: a frame must also clear the measured ambient energy by
+  ``vad_floor_ratio`` before it can start or extend a turn. The floor is
+  learned from the room, not configured.
 """
 
 from __future__ import annotations

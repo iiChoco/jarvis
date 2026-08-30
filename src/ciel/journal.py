@@ -14,7 +14,10 @@ Undo itself is deliberately *not* automated here. The journal gives the model
 accurate ground truth (snapshot paths, the event id a create call returned)
 and the model performs the inverse with its ordinary tools — which means undo
 actions pass through the same guards and spoken confirmations as everything
-else, instead of becoming a side channel that skips them.
+else, instead of becoming a side channel that skips them. The one concession
+the guard makes in return: reads (never writes) under the snapshots
+directory are allowed even outside the workspace, or a narrow workspace
+would leave the model holding a snapshot path it cannot open.
 
 Entries live in one JSONL file, snapshots beside it, both pruned together:
 when an entry falls off the end of the journal, its snapshot goes with it.

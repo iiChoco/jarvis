@@ -1,9 +1,9 @@
 """Text-to-speech via the macOS ``say`` command.
 
-Chosen as the default because it needs no downloads, no model files, and no
-network — Ciel talks the moment you run it. It sounds like a 2010 GPS unit, and
-Piper is the upgrade path, but "works immediately" is worth a lot in a
-prototype.
+The fallback engine: no downloads, no model files, no network — always
+present on macOS, so Ciel can talk even when Piper isn't installed or its
+voice won't load. It sounds like a 2010 GPS unit, which is exactly why it is
+the fallback and not the default.
 
 ``say`` cannot write to a pipe (it fails with -54 on any non-seekable target),
 so each call synthesizes to a temporary WAV and streams it back. Since the

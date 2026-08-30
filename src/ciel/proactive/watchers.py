@@ -9,8 +9,10 @@ pipeline, nothing more. The protocol is transport-agnostic on purpose: a
 future *remote* watcher — a local adapter relaying events published by some
 other device — satisfies it exactly as a local poller does.
 
-Phase 1 ships one watcher (``ciel.proactive.calendar``); the schedule
-watcher for the morning brief lands here in Phase 2.
+Shipped watchers: the two calendar sources (``ciel.proactive.calendar``,
+``ciel.proactive.gcal``), the schedule watcher for the morning brief (in
+this module), the work watcher (``ciel.proactive.work``), the ring
+(``ciel.proactive.oura``), and location (``ciel.proactive.location``).
 """
 
 from __future__ import annotations

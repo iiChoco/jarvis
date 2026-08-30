@@ -30,7 +30,8 @@ POLL_S = 2.0
 
 
 class SourceWatcher:
-    """Polls a set of files/directories for changes to ``.py`` files.
+    """Polls a set of roots for changes: ``.py`` files under any directory
+    root, plus any file root as-is (that's the reload sentinel).
 
     Polling rather than FSEvents/watchdog: a scan of a few dozen files every
     couple of seconds is nothing, and it needs no extra dependency and no

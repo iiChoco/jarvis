@@ -12,9 +12,12 @@ This guard closes that gap. While unattended mode is engaged, a turn is a
 witness, not an agent: it may observe through read-only tools (which is what
 read-back verification stands on), and it may write Ciel's own notebook —
 memory and projects, the internal state reflection has always maintained,
-never confirm-gated — but nothing outside the notebook changes. Messages,
-timers, files, shell, searches, and unlisted connector tools deny with a
-reason the model can learn from mid-turn.
+never confirm-gated — but nothing outside the notebook changes. Sending
+messages, arming or cancelling timers, writing files, shell, searches, and
+unlisted connector tools deny with a reason the model can learn from
+mid-turn; the *observing* half of those surfaces (reading messages and
+files, listing timers) stays open, because read-back verification stands
+on it.
 
 Like confirmation suppression, the mode is ambient — a depth counter the
 pipeline holds around the turn, no turn-type plumbing in the Brain — and the
@@ -46,7 +49,7 @@ _BUILTIN_OBSERVERS = ("Read", "Glob", "Grep")
 # In-process tools that only look.
 _CIEL_OBSERVERS = (
     "recall", "recent_actions", "list_timers", "read_messages",
-    "find_contact", "open_project",
+    "find_contact", "open_project", "oura_summary", "where_am_i",
 )
 
 # The notebook: Ciel's own memory and project state. Internal, never

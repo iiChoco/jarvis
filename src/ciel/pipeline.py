@@ -9,14 +9,20 @@ frame means completely different things depending on where we are: before the
 wake word it's noise to be scored, during an utterance it's speech to be
 buffered, and while Ciel is talking it's a possible interruption.
 
-Four of this file's behaviors carry codenames: **Cauchy** (the mid-thought
+Six of this file's behaviors carry codenames: **Cauchy** (the mid-thought
 hold — a transcript that doesn't read as finished means the tail hasn't
 settled yet, so don't declare the sequence converged), **Discontinuity**
 (barge-in — a jump that ends the current segment), **Neighborhood** (the
 follow-up window — an open ball around the last turn, inside which no wake
-word is required), and **Isomorphism** (the typed lane — a line on stdin is
+word is required), **Isomorphism** (the typed lane — a line on stdin is
 a structure-preserving image of a spoken turn: same brain, same session,
-same transcript, no audio on either side).
+same transcript, no audio on either side), **Parallel Transport** (the
+Discord lane — the same map carried along the path away from home: a DM
+from the pinned owner account is a turn, the reply rides back as a text,
+and confirmations travel the same road), and **Chart** (the web GUI — a
+local coordinate window onto the whole conversation: a loopback page that
+shows every lane live, takes typed turns of its own, and holds the mute
+switch for rooms that must stay quiet).
 """
 
 from __future__ import annotations
@@ -50,21 +56,27 @@ from ciel.brain.tools.memory import bind_context as bind_memory_context
 from ciel.config import SAMPLE_RATE, AudioConfig, Config
 from ciel.confirm import VoiceConfirmBroker
 from ciel.messages import MessagesClient, MessagesUnavailable
+from ciel.remote.discord import DiscordLink, RemoteUnavailable
+from ciel.remote.web import WebIndicator, WebLink
 from ciel.proactive.calendar import CalendarWatcher
 from ciel.proactive.gcal import GoogleCalendarWatcher
+from ciel.proactive.location import LocationWatcher
+from ciel.proactive.oura import OuraWatcher
 from ciel.proactive.events import EventQueue, ProactiveEvent
 from ciel.proactive.policy import Decision, InterruptionPolicy
 from ciel.proactive.presence import PresenceProbe
 from ciel.proactive.watchers import ScheduleWatcher
 from ciel.proactive.work import WorkWatcher
+from ciel.brain.tools.location import bind_locator
 from ciel.brain.tools.watch import bind_watcher
+from ciel.location import Locator
 from ciel.reload import SourceWatcher, default_roots
 from ciel.commands import Command, match as match_command
 from ciel.stt import SpeechToText, build_stt
 from ciel.timers import Timer, announcement, spoken_clock, spoken_duration
 from ciel.transcript import Transcript
 from ciel.tts.base import TextToSpeech
-from ciel.ui.indicator import Indicator, build_indicator
+from ciel.ui.indicator import Indicator, TeeIndicator, build_indicator
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +88,56 @@ well above any legitimate scheduling hiccup and well below the shortest nap a
 lid-close produces. On macOS the monotonic clock largely pauses with the
 process, so every monotonic deadline in the loop silently stretched by the
 nap — the wake-up handler is where reality is reconciled."""
+
+
+_REMOTE_NOTE = (
+    "(System note — this message arrived over the Discord link: the user is "
+    "away from this machine, and nothing you write will be spoken aloud. "
+    "Your reply goes back to them as a text, so keep it text-shaped: short "
+    "and plain. Nothing at the machine reaches them where they are — a "
+    "timer or alarm armed now rings here, not on their phone, so arm one "
+    "only for when they'll be back to hear it, and say as much.)\n\n"
+)
+"""Prefixed to every remote turn — the model's only way to know the room is
+empty. Prefix, not transcript: the record keeps the user's raw words, the
+same contract as the held-notes note."""
+
+
+_REMOTE_PUBLIC_NOTE = (
+    "(System note — this arrived as an @mention in a Discord server channel: "
+    "the user is away from this machine, and your reply posts to that channel "
+    "where OTHERS CAN READ IT. Keep it text-shaped and discreet — volunteer "
+    "no personal details, memories, schedules, or private context beyond what "
+    "the user's own message already put in the open, and offer to continue "
+    "in DMs when a real answer would need them. Nothing you write is spoken "
+    "aloud, and nothing at the machine reaches the user where they are.)\n\n"
+)
+"""The mention lane's variant of the note above. The audience is the
+difference: a DM is the owner's eyes only, a channel is whoever is in it —
+so this one trades the timer caveat for a discretion rule."""
+
+
+_WEB_NOTE = (
+    "(System note — this message arrived through the local GUI: the user is "
+    "at this machine but typing because the room should stay quiet, and your "
+    "reply is shown on screen, never spoken. Keep it text-shaped: short and "
+    "plain.)\n\n"
+)
+"""Prefixed to every web turn, the remote note's contract: prefix, not
+transcript — the record keeps the user's raw words."""
+
+
+_WEB_MUTED_NOTE = (
+    "(System note — this message arrived through the local GUI, and the "
+    "speakers are muted: the user is somewhere that must stay silent (a "
+    "class, a library). Your reply is shown on screen, never spoken, and "
+    "nothing at this machine can make a sound right now — a timer or alarm "
+    "armed now appears only as text on the screen, so say as much if you arm "
+    "one. Keep it text-shaped: short and plain.)\n\n"
+)
+"""The web note while muted. The difference worth spelling out is the
+timers: unmuted, a timer still rings at the machine; muted, its
+announcement is text on a page the user may have stopped watching."""
 
 
 class State(Enum):
@@ -132,22 +194,39 @@ def proactive_valve(reply: str) -> str | None:
 def build_tts(config: Config) -> TextToSpeech:
     """Instantiate the configured speech engine.
 
-    The only place either engine is named. Swapping them is a config value,
-    which is the whole point of the protocol.
+    The only place an engine is *chosen* from config — swapping them is a
+    config value, which is the whole point of the protocol. (``_warm_up_tts``
+    names ``SayTTS`` once more, on the runtime fallback path.)
     """
     from ciel.tts.macos_say import SayTTS
 
+    engine: TextToSpeech | None = None
     if config.tts.engine == "piper":
         try:
             from ciel.tts.piper import PiperTTS
 
-            return PiperTTS(config.tts)
+            engine = PiperTTS(config.tts)
         except ImportError:
             # Piper is an optional extra. A missing install should cost voice
             # quality, not the whole assistant.
             log.warning("piper is not installed — falling back to `say`")
+    if engine is None:
+        engine = SayTTS(config.tts)
+    return _apply_effect(engine, config)
 
-    return SayTTS(config.tts)
+
+def _apply_effect(engine: TextToSpeech, config: Config) -> TextToSpeech:
+    """Wrap the engine in the configured voice treatment, if any.
+
+    Applied at build time rather than inside either engine so the effect
+    survives an engine swap — and the fallback path re-applies it for the
+    same reason: the treatment belongs to the voice's *character*, not to
+    whichever synthesizer happens to be producing it."""
+    if config.tts.effect == "jarvis":
+        from ciel.tts.effect import VoiceEffect
+
+        return VoiceEffect(engine)
+    return engine
 
 
 class IdleSchedule:
@@ -282,7 +361,45 @@ class Pipeline:
         if self._memory is not None and self._memory.all():
             log.info("loaded %d memories", len(self._memory.all()))
 
-        self._indicator: Indicator = build_indicator(config.ui)
+        # The web GUI (Chart): a user lane like the typed deque and the
+        # Discord link, plus a *view* — every transcript row and state
+        # change is teed into it. Created before the indicator so the tee
+        # below can include it.
+        self._web_link: WebLink | None = (
+            WebLink(config.web) if config.web.enabled else None
+        )
+        if self._web_link is not None:
+            self._web_link.on_mute = self._set_muted
+
+        self._mute_sentinel = config.state_dir / "mute"
+        """The quiet brake, the hold sentinel's sibling: while this file
+        exists, no sound leaves the speakers and the wake word is not
+        watched for. A file rather than memory because mute must survive
+        the autoreloader's constant re-execs — walking into a lecture
+        with Ciel muted and having a source change un-mute it is the
+        exact failure this prevents — and because `touch ~/.ciel/mute`
+        from a hotkey or a shell should work without the GUI open."""
+        self._muted = self._mute_sentinel.exists()
+        if self._web_link is not None:
+            # No clients yet — this just sets what the hello frame claims.
+            self._web_link.note_muted(self._muted)
+        self._next_mute_check = 0.0
+        self._next_agents_push = 0.0
+        """The active-agent roster's once-a-second poll deadline (the mute
+        sentinel's cadence). Polling beats wiring change hooks through
+        every source that can move the roster — brain escalations,
+        watches, timers — and the link dedupes, so an unchanged second
+        costs one list build and one compare."""
+        self._player: Player | None = None
+        """The run() player, held for exactly one cross-cutting need: the
+        mute switch stopping a sentence already in the air."""
+
+        indicator = build_indicator(config.ui)
+        self._indicator: Indicator = (
+            indicator
+            if self._web_link is None
+            else TeeIndicator(indicator, WebIndicator(self._web_link))
+        )
         # The broker exists even when the shell is disabled — it's inert until
         # someone calls ask(), and the brain only builds a ShellGuard around
         # it when config.shell.enabled says to.
@@ -372,6 +489,9 @@ class Pipeline:
         self._policy: InterruptionPolicy | None = None
         self._presence: PresenceProbe | None = None
         self._vigil_watchers: list = []
+        self._work_watcher: WorkWatcher | None = None
+        """Held by name (it also rides _vigil_watchers) because the agent
+        roster reads its active() list."""
         self._next_policy_check = 0.0
         self._hold_sentinel = config.state_dir / "hold"
         """The emergency brake: while this file exists, no proactive event is
@@ -383,6 +503,19 @@ class Pipeline:
         self._hold_engaged = False  # log the engagement once, not per poll
         self._calendar: CalendarWatcher | GoogleCalendarWatcher | None = None
         self._owner_messages: MessagesClient | None = None
+        # The Discord lane (Parallel Transport): a user lane like the typed
+        # deque, not a Vigil outlet — it exists whether or not the proactive
+        # layer does, because texting Ciel a question needs no watching.
+        self._remote_link: DiscordLink | None = (
+            DiscordLink(config.discord) if config.discord.enabled else None
+        )
+        # Where the user is: the tool works with or without Vigil (it reads
+        # on demand); the watcher below only exists with it.
+        self._locator: Locator | None = (
+            Locator(config.location) if config.location.enabled else None
+        )
+        if self._locator is not None:
+            bind_locator(self._locator)
         if config.proactive.enabled:
             self._events = EventQueue(
                 config.proactive.state_file,
@@ -407,6 +540,21 @@ class Pipeline:
             work = WorkWatcher(config.proactive.watches_file, self._events)
             bind_watcher(work)
             self._vigil_watchers.append(work)
+            self._work_watcher = work
+            if config.oura.armed and (
+                config.oura.low_readiness > 0
+                or config.oura.low_sleep > 0
+                or config.oura.low_activity > 0
+            ):
+                # The ring's verdicts — a rough morning, a still day — at
+                # most once each per day. Needs an authorization and at
+                # least one threshold: all zero keeps the tool and drops
+                # the nudges.
+                self._vigil_watchers.append(OuraWatcher(config.oura, self._events))
+            if self._locator is not None:
+                self._vigil_watchers.append(
+                    LocationWatcher(config.location, self._locator, self._events)
+                )
             # The away outlet: all three switches, or it doesn't exist. A
             # separate client from the tools' binding on purpose — this send
             # path is pipeline-owned and never reachable from a turn.
@@ -416,11 +564,16 @@ class Pipeline:
                 and config.messages.allow_send
             ):
                 self._owner_messages = MessagesClient(config.messages)
+            away_armed = self._owner_messages is not None or (
+                self._remote_link is not None
+                and self._remote_link.armed
+                and config.discord.proactive
+            )
             log.info(
                 "vigil enabled (%d watcher%s%s)",
                 len(self._vigil_watchers),
                 "" if len(self._vigil_watchers) == 1 else "s",
-                ", away texting armed" if self._owner_messages else "",
+                ", away texting armed" if away_armed else "",
             )
 
         self._watcher: SourceWatcher | None = (
@@ -438,7 +591,13 @@ class Pipeline:
     async def run(self) -> None:
         await self._startup()
 
-        player = Player(self._config.audio, self._tts.sample_rate)
+        # The mute gate rides inside the player: one choke point silences
+        # everything — greeting, acks, rings, sentences, apologies — with
+        # no call site knowing mute exists.
+        player = Player(
+            self._config.audio, self._tts.sample_rate, muted=lambda: self._muted
+        )
+        self._player = player
         turn: asyncio.Task[None] | None = None
 
         try:
@@ -491,6 +650,27 @@ class Pipeline:
                         self._on_wake_from_sleep(now_wall - self._last_wall)
                     self._last_wall = now_wall
 
+                    if now_wall >= self._next_mute_check:
+                        # The mute sentinel is polled, not only toggled from
+                        # the GUI, so `touch ~/.ciel/mute` from a hotkey or
+                        # another shell lands mid-run — the hold sentinel's
+                        # trick, at the same once-a-second price.
+                        self._next_mute_check = now_wall + 1.0
+                        on_disk = self._mute_sentinel.exists()
+                        if on_disk != self._muted:
+                            self._set_muted(on_disk)
+
+                    if (
+                        self._web_link is not None
+                        and now_wall >= self._next_agents_push
+                    ):
+                        # The GUI's agent roster, refreshed at the mute
+                        # sentinel's cadence. Above the confirm gate on
+                        # purpose: a deep-thought pass holding a turn open
+                        # is exactly when the page should say so.
+                        self._next_agents_push = now_wall + 1.0
+                        self._web_link.note_agents(self._active_agents())
+
                     # Checked above the state dispatch, not inside BUSY: a
                     # turn abandoned by barge-in leaves BUSY while its hook
                     # can still be pending, and a pending confirmation that
@@ -508,6 +688,39 @@ class Pipeline:
                             ts, line = self._typed[0]
                             if ts >= asked and self._confirm.answer(line):
                                 self._typed.popleft()
+                        if self._web_link is not None and asked is not None:
+                            # A GUI message answers like a typed line, not
+                            # like a Discord text: the chart binds loopback,
+                            # so its user is at the machine and heard — or
+                            # saw, as a ciel-confirm row — the question.
+                            # Same predating rule as the keyboard.
+                            item = self._web_link.peek()
+                            if (
+                                item is not None
+                                and item[0] >= asked
+                                and self._confirm.answer(item[1])
+                            ):
+                                self._web_link.pop()
+                        if (
+                            self._remote_link is not None
+                            and self._confirm.remote_active
+                            and self._confirm.remote_origin == "discord"
+                            and asked is not None
+                        ):
+                            # An owner text answers a *Discord-origin*
+                            # question, under the keyboard's predating rule.
+                            # Spoken-origin questions never accept remote
+                            # answers (see remote_active), and web-origin
+                            # ones don't either (see remote_origin): a yes
+                            # to a question the answerer never saw is not
+                            # an answer.
+                            item = self._remote_link.peek()
+                            if (
+                                item is not None
+                                and item[0] >= asked
+                                and self._confirm.answer(item[1])
+                            ):
+                                self._remote_link.pop()
                         self._confirm.feed(frame)
                         continue
 
@@ -564,6 +777,64 @@ class Pipeline:
                         continue
 
                     if (
+                        self._web_link is not None
+                        and self._web_link.pending
+                        and self._state is not State.BUSY
+                        and not self._endpointer.speaking
+                        and self._pending_text is None
+                    ):
+                        # The GUI claims the turn slot under the keyboard's
+                        # rules, not the phone's: a chart is the user *at*
+                        # the machine, so it may take a turn out of a
+                        # follow-up window — but never mid-utterance, and
+                        # never over a held partial thought. Queued bursts
+                        # coalesce into one turn, the texting-cadence
+                        # reasoning.
+                        if self._maintenance is not None and not self._maintenance.done():
+                            # Same hastening as the typed lane: the web turn
+                            # serializes on the brain's lock.
+                            self._unattended_hastened = True
+                            await self._brain.interrupt()
+                        self._state = State.BUSY
+                        self._barge_run = 0
+                        batch = self._web_link.pop_batch()
+                        assert batch is not None  # pending was just checked
+                        line, _channel = batch
+                        turn = asyncio.create_task(self._handle_web_turn(line))
+                        continue
+
+                    if (
+                        self._remote_link is not None
+                        and self._state is State.WAITING
+                        and self._remote_link.pending
+                    ):
+                        # The Discord lane claims the turn slot — a user
+                        # lane, so it outranks Vigil below, but only from
+                        # WAITING: whoever is in the room speaking or
+                        # mid-follow-up outranks the phone, and a text
+                        # tolerates the seconds that costs. Everything
+                        # queued right now coalesces into one turn (people
+                        # text in bursts; three turns for one thought
+                        # answers the greeting with a paragraph).
+                        if self._maintenance is not None and not self._maintenance.done():
+                            # Same hastening as the typed lane: the remote
+                            # turn serializes on the brain's lock.
+                            self._unattended_hastened = True
+                            await self._brain.interrupt()
+                        self._state = State.BUSY
+                        self._barge_run = 0
+                        # Coalesces the head run of same-channel messages;
+                        # a DM and a server mention never fuse into one
+                        # turn — different audiences, different replies.
+                        batch = self._remote_link.pop_batch()
+                        assert batch is not None  # pending was just checked
+                        line, channel = batch
+                        turn = asyncio.create_task(
+                            self._handle_remote_turn(line, channel)
+                        )
+                        continue
+
+                    if (
                         self._events is not None
                         and self._state is State.WAITING
                         and self._events.pending
@@ -602,7 +873,15 @@ class Pipeline:
                         # rotating to the back for being unlucky.
                         decision, event = self._decide_proactive()
                         if event is not None and decision is not None:
-                            if decision.action == "speak":
+                            if decision.action == "speak" and self._muted:
+                                # The nudge earned a voice the room must not
+                                # hear. Held instead of spoken-silently or
+                                # dropped: it rides into the next turn on
+                                # whichever lane that arrives — the
+                                # held-notes contract.
+                                self._events.begin(event)
+                                self._events.hold(event)
+                            elif decision.action == "speak":
                                 if self._maintenance is not None and not self._maintenance.done():
                                     # Same hastening as the typed lane: the
                                     # proactive turn serializes on the
@@ -685,7 +964,13 @@ class Pipeline:
                         # Only sampled here: while idle and silent, what the
                         # microphone hears is the room itself.
                         self._track_noise_floor(frame)
-                        if self._wake.push(frame):
+                        # Muted, Ciel holds its name as well as its tongue:
+                        # a false wake in a lecture hall costs exactly the
+                        # attention mute was bought to avoid, and a true one
+                        # could only start a conversation the speakers are
+                        # barred from finishing. The floor above still
+                        # tracks, so hearing is sharp the moment mute lifts.
+                        if not self._muted and self._wake.push(frame):
                             if self._maintenance is not None and not self._maintenance.done():
                                 # Hasten whatever holds the maintenance slot
                                 # (reflection, rotation, or a composing
@@ -751,6 +1036,7 @@ class Pipeline:
                 self._maintenance.cancel()
             if turn is not None and not turn.done():
                 turn.cancel()
+            self._player = None
             await self._shutdown()
 
     # ── one conversational turn ──────────────────────────────────────────────
@@ -967,6 +1253,317 @@ class Pipeline:
                     self._timers.commit_pending()
                 except Exception:  # noqa: BLE001 - a failed commit must not crash the loop
                     log.exception("could not start a pending timer")
+
+    async def _handle_remote_turn(self, text: str, channel=None) -> None:
+        """One turn that arrived over the Discord link (Parallel Transport).
+
+        The typed lane's remote image: same brain, same session, same
+        transcript. The differences are where the user is. The reply is
+        *buffered* and sent as one text rather than streamed — nobody is
+        in the room to hear sentences land, and ten notifications for one
+        answer is nagging. Confirmations go over the link too
+        (``confirm.remote``): the person who must say yes is wherever
+        their phone is. And the transcript rows carry a remote speaker
+        label, because ``user`` rows are presence evidence and a remote
+        turn is evidence of exactly the opposite — Vigil must keep
+        treating the room as empty, or it starts speaking nudges to
+        nobody instead of texting them.
+
+        ``channel`` is where the reply belongs — the owner's DM (None
+        falls back to it), or the server channel an @mention came from.
+        A guild channel makes the turn *public*: the system note switches
+        to the discretion variant, and the held Vigil notes stay held —
+        they are the owner's private catch-up, not channel content.
+        """
+        assert self._remote_link is not None
+        public = getattr(channel, "guild", None) is not None
+        origin = (
+            f"discord #{getattr(channel, 'name', '?')}" if public else "discord"
+        )
+
+        async def send_here(reply_text: str) -> None:
+            assert self._remote_link is not None
+            await self._remote_link.send(reply_text, channel)
+
+        self._indicator.set_state("thinking")
+        self._spoke = False
+        try:
+            print(f"\n  you ({origin}): {text}")
+            self._record("user-remote", text)
+
+            # Same brain bypass as the other lanes. The reply is texted;
+            # "reload" earns an acknowledgement because its usual answer —
+            # the spoken "Reloading." — happens in a room the user isn't in.
+            cmd = match_command(text) if self._config.commands.enabled else None
+            if cmd is not None and (
+                cmd.kind in ("reload", "dismiss") or self._timers is not None
+            ):
+                if cmd.kind != "dismiss":
+                    self._conversed = True
+                log.info("local command (remote): %s", cmd.kind)
+                reply = self._apply_local_command(cmd)
+                if reply is None and cmd.kind == "reload":
+                    reply = "Reloading."
+                if reply is not None:
+                    print(f"  ciel: {reply}")
+                    self._record("ciel", reply)
+                    await send_here(reply)
+                return
+
+            started = time.monotonic()
+            # Held Vigil notes ride along exactly as they do at home — a
+            # text from away is still the user starting a conversation,
+            # and the notes were held precisely to reach them. But only
+            # into a DM: notes are the owner's private catch-up, and a
+            # public channel must never be where "your 2pm moved" lands.
+            if public:
+                prompt = _REMOTE_PUBLIC_NOTE + text
+            else:
+                prompt = _REMOTE_NOTE + self._with_held_notes(text)
+            sentences: list[str] = []
+            with self._confirm.remote(send_here, origin="discord"):
+                async with self._remote_link.typing(channel):
+                    # Same aclosing obligation as every consumer: ask()
+                    # holds the brain's turn lock.
+                    async with aclosing(self._brain.ask(prompt)) as stream:
+                        async for kind, sentence in stream:
+                            if kind == "escalation":
+                                print("  [deep thought engaged]")
+                                self._record("event", "deep thought engaged")
+                                try:
+                                    # Cover the coming silence — a typing
+                                    # indicator alone reads as a hang after
+                                    # the first thirty seconds.
+                                    await send_here(
+                                        "Give me a moment — I want to think "
+                                        "this through properly."
+                                    )
+                                except RemoteUnavailable:
+                                    log.debug("could not text the escalation notice")
+                                continue
+                            if kind == "thinking":
+                                print(f"  ciel (thinking): {sentence}")
+                                self._record("ciel-thinking", sentence)
+                            else:
+                                print(f"  ciel: {sentence}")
+                                self._record("ciel", sentence)
+                                sentences.append(sentence)
+                            self._conversed = True
+                            self._brain_conversed = True
+            reply = " ".join(sentences).strip()
+            if reply:
+                await send_here(reply)
+            log.info(
+                "remote turn (%s): %.2fs total, $%.4f",
+                origin,
+                time.monotonic() - started,
+                self._brain.last_turn_cost_usd,
+            )
+        except RemoteUnavailable as exc:
+            # The turn ran; only delivery failed. Logged, not retried — the
+            # link reconnects on its own, and the user will ask again the
+            # moment they notice silence. The transcript already holds the
+            # undelivered reply.
+            log.warning("remote reply undeliverable (%s)", exc)
+            self._record("event", "remote reply undeliverable")
+        except Exception:
+            log.exception("remote turn failed")
+            self._indicator.set_state("error")
+            self._record("event", "remote turn failed")
+            try:
+                await send_here("Sorry — something went wrong with that one.")
+            except Exception:  # noqa: BLE001 - best-effort, like the spoken apology
+                log.debug("could not text the failure notice", exc_info=True)
+        finally:
+            # Same anchoring as the typed path: no audio to wait for, so a
+            # timer armed this turn starts as the turn ends. Guarded for
+            # the same reason — a failed persist must not crash the loop.
+            if self._timers is not None:
+                try:
+                    self._timers.commit_pending()
+                except Exception:  # noqa: BLE001 - a failed commit must not crash the loop
+                    log.exception("could not start a pending timer")
+
+    async def _handle_web_turn(self, text: str) -> None:
+        """One turn that arrived through the GUI (Chart).
+
+        The typed lane with the room's quietness made explicit: same
+        brain, same session, same transcript, no audio on either side.
+        Nothing here sends the reply — the transcript tap already streams
+        every row into the page, sentence by sentence, so delivery is a
+        side effect of recording. Confirmations route over the link
+        (``confirm.remote``): a voiced question would ask the room, and
+        the whole reason this lane is in use is that the room must not
+        hear one — the question lands on the page, and a GUI yes or no
+        (or a typed one) answers it.
+
+        ``_spoke`` stays False for the typed lane's reason: every chart
+        message is already a turn; there is no wake word to waive.
+        """
+        assert self._web_link is not None
+        self._indicator.set_state("thinking")
+        self._spoke = False
+        try:
+            print(f"\n  you (web): {text}")
+            self._record("user-web", text)
+
+            # Same brain bypass as the other lanes. "reload" earns an
+            # acknowledgement for the Discord lane's reason at shorter
+            # range: the spoken "Reloading." goes through speakers that
+            # may well be muted, and the page deserves to say why Ciel
+            # just went quiet for a few seconds.
+            cmd = match_command(text) if self._config.commands.enabled else None
+            if cmd is not None and (
+                cmd.kind in ("reload", "dismiss") or self._timers is not None
+            ):
+                if cmd.kind != "dismiss":
+                    self._conversed = True
+                log.info("local command (web): %s", cmd.kind)
+                reply = self._apply_local_command(cmd)
+                if reply is None and cmd.kind == "reload":
+                    reply = "Reloading."
+                if reply is not None:
+                    print(f"  ciel: {reply}")
+                    self._record("ciel", reply)
+                return
+
+            started = time.monotonic()
+            # Held Vigil notes ride along as they do for the typed lane —
+            # the chart is the owner's eyes, so private catch-up belongs.
+            note = _WEB_MUTED_NOTE if self._muted else _WEB_NOTE
+            prompt = note + self._with_held_notes(text)
+            with self._confirm.remote(self._web_link.send, origin="web"):
+                # Same aclosing obligation as every consumer: ask() holds
+                # the brain's turn lock.
+                async with aclosing(self._brain.ask(prompt)) as stream:
+                    async for kind, sentence in stream:
+                        if kind == "escalation":
+                            print("  [deep thought engaged]")
+                            self._record("event", "deep thought engaged")
+                            continue
+                        if kind == "thinking":
+                            print(f"  ciel (thinking): {sentence}")
+                            self._record("ciel-thinking", sentence)
+                        else:
+                            print(f"  ciel: {sentence}")
+                            self._record("ciel", sentence)
+                        self._conversed = True
+                        self._brain_conversed = True
+            log.info(
+                "web turn: %.2fs total, $%.4f",
+                time.monotonic() - started,
+                self._brain.last_turn_cost_usd,
+            )
+        except Exception:
+            log.exception("web turn failed")
+            self._indicator.set_state("error")
+            # An event row, so the page itself shows what happened — the
+            # web lane's version of the spoken apology.
+            self._record("event", "web turn failed — see the log")
+        finally:
+            # Same anchoring as the typed path: no audio to wait for, so a
+            # timer armed this turn starts as the turn ends. Guarded for
+            # the same reason — a failed persist must not crash the loop.
+            if self._timers is not None:
+                try:
+                    self._timers.commit_pending()
+                except Exception:  # noqa: BLE001 - a failed commit must not crash the loop
+                    log.exception("could not start a pending timer")
+
+    def _active_agents(self) -> list[dict]:
+        """The roster of everything working on the user's behalf right now,
+        in the web protocol's agent shape (see remote/web.py).
+
+        Three sources today: the deep-thought pass in flight (the brain
+        stamps it), background watches (the watch tool's registrations),
+        and timers. The Vigil watchers themselves are deliberately absent —
+        they are standing infrastructure, on from startup to shutdown, and
+        a roster that always says "calendar watcher" stops meaning
+        anything. This lists *work with an end*, most urgent first: the
+        pass someone is sitting in silence for, then watches, then timers.
+        """
+        agents: list[dict] = []
+        since = self._brain.deep_thought_since
+        if since is not None:
+            agents.append({
+                "id": "deep-thought",
+                "kind": "deep",
+                "label": "Deep thought",
+                "detail": "reasoning through the current question",
+                "since": since,
+                "until": None,
+            })
+        if self._work_watcher is not None:
+            for w in self._work_watcher.active():
+                agents.append({
+                    "id": w.id,
+                    "kind": "watch",
+                    # The label is the completion sentence ("The export has
+                    # finished.") — still the best human name for the watch,
+                    # so it rides as-is; the detail says what is literally
+                    # being polled.
+                    "label": w.label or f"Watching {w.target}",
+                    "detail": ("file " if w.kind == "file" else "process ")
+                    + w.target,
+                    "since": w.created_at,
+                    "until": w.expires_at,
+                })
+        if self._timers is not None:
+            for t in self._timers.active():
+                agents.append({
+                    "id": t.id,
+                    "kind": t.kind,  # "timer" | "alarm", the protocol's names
+                    "label": t.label
+                    or (
+                        "Alarm"
+                        if t.kind == "alarm"
+                        else f"{spoken_duration(t.duration_s)} timer"
+                    ),
+                    # A pending timer's due_at still anchors to the tool
+                    # call; the countdown re-syncs when commit_pending
+                    # re-stamps it at end of speech.
+                    "detail": "starts when the turn ends" if t.pending else None,
+                    "since": None,
+                    "until": t.due_at,
+                })
+        return agents
+
+    def _set_muted(self, muted: bool) -> None:
+        """Move the mute switch — from the GUI, or the sentinel poll.
+
+        Muted, the machine holds its tongue and its name: no sound leaves
+        the speakers (the Player's gate) and the wake word is not watched
+        for (the frame loop's gate). The typed and web lanes keep working
+        — that is what they are for — and Vigil's speak decisions become
+        held notes. The sentinel file carries the state across the
+        autoreloader's restarts and accepts toggles from outside the
+        process; see its docstring in ``__init__``.
+        """
+        if muted == self._muted:
+            return
+        self._muted = muted
+        try:
+            if muted:
+                self._mute_sentinel.touch()
+            else:
+                self._mute_sentinel.unlink(missing_ok=True)
+        except OSError:
+            log.debug("could not persist mute state", exc_info=True)
+        if muted and self._player is not None:
+            # Whatever is mid-sentence stops now: the switch was flipped
+            # because the room needs silence, not silence-after-this-line.
+            self._player.stop()
+        notice = (
+            "muted — Ciel will stay silent and not listen for its name"
+            if muted
+            else "unmuted"
+        )
+        print(f"\n  [{notice}]", flush=True)
+        # An event row: the transcript keeps why the assistant went quiet,
+        # and the tap shows the flip on every open chart.
+        self._record("event", notice)
+        if self._web_link is not None:
+            self._web_link.note_muted(muted)
 
     async def _read_stdin(self) -> None:
         """Feed typed lines into the turn queue — the tier-one chatbox.
@@ -1294,7 +1891,8 @@ class Pipeline:
             presence=self._presence.state(time.monotonic()),
             spoken_today=self._events.spoken_count(today),
             messaged_today=self._events.messaged_count(today),
-            can_message=self._owner_messages is not None,
+            can_message=self._owner_messages is not None
+            or self._remote_messaging(),
             now=now,
             local_minutes=local.tm_hour * 60 + local.tm_min,
         )
@@ -1493,26 +2091,47 @@ class Pipeline:
             )
         return "\n\n".join(parts)
 
+    def _remote_messaging(self) -> bool:
+        """Whether the Discord link can carry an away text *right now* —
+        opted in via ``discord.proactive`` and actually connected, so a
+        dropped gateway reads as no outlet rather than a text into the
+        void. Consulted at decision time on purpose: armed-in-config is a
+        startup claim, deliverable-now is a per-event fact."""
+        return (
+            self._remote_link is not None
+            and self._config.discord.proactive
+            and self._remote_link.can_send
+        )
+
     async def _run_proactive_message(self, event: ProactiveEvent) -> None:
-        """One unattended turn whose outlet is a text to the owner's phone.
+        """One unattended turn whose outlet is a text to the owner.
 
         Runs in the maintenance slot: no audio, failures swallowed, hastened
         by user turns. The Witness rule still governs the turn itself —
         ``mcp__ciel__send_message`` stays denied inside it — because the send
         below is pipeline-owned: the model composes words; deterministic
         code decided a message happens, and config decided to whom. The
+        recipient is pinned either way — the iMessage handle or the Discord
+        owner id — with iMessage keeping priority when both are armed. The
         texting budget is charged only after the send succeeds.
         """
-        assert self._events is not None and self._owner_messages is not None
+        assert self._events is not None and (
+            self._owner_messages is not None or self._remote_link is not None
+        )
         print(f"\n  [proactive → text: {event.summary}]", flush=True)
         self._record("event", f"proactive (text): {event.summary}")
         reply = await self._compose_unattended(event, outlet="message")
         if reply is None:
             return  # already routed (declined, held, timed out, hastened)
         try:
-            await self._owner_messages.send(
-                self._config.proactive.owner_handle, reply
-            )
+            if self._owner_messages is not None:
+                await self._owner_messages.send(
+                    self._config.proactive.owner_handle, reply
+                )
+            elif self._remote_link is not None:
+                await self._remote_link.send(reply)
+            else:  # unreachable behind the assert; kept for the type story
+                raise MessagesUnavailable("no away outlet armed")
             print(f"  ciel (texted): {reply}", flush=True)
             self._record("ciel", f"[proactive text] {reply}")
             self._events.mark_messaged(
@@ -1526,9 +2145,10 @@ class Pipeline:
             # means at-least-once, which beats silently never.
             self._events.hold(event)
             raise
-        except MessagesUnavailable as exc:
+        except (MessagesUnavailable, RemoteUnavailable) as exc:
             # The send path refused (switch off, handle malformed, osascript
-            # failure). The event is still owed: held for the next
+            # failure, a Discord link that dropped between decision and
+            # send). The event is still owed: held for the next
             # conversation, and the reason is in the log, not a guess.
             log.warning("away text failed (%s) — holding the event", exc)
             self._record("event", "proactive (text): send failed")
@@ -1784,13 +2404,23 @@ class Pipeline:
         """Append one row to this conversation's transcript, if one is kept.
 
         Also Vigil's presence tap: every ``user`` row (a spoken turn, a
-        typed line) and every ``you-confirm`` row (the broker's speaker for
-        confirmation answers) is evidence the user is here. Tapped here, not
-        in _enter_waiting, so Ciel's own proactive speech (which sets
-        _conversed) can never count as the user being around.
+        typed line), every ``you-confirm`` row (the broker's speaker for
+        confirmation answers), and every ``user-web`` row (the GUI binds
+        loopback, so its user is at this machine — unlike ``user-remote``,
+        which is evidence of the opposite) is evidence the user is here.
+        Tapped here, not in _enter_waiting, so Ciel's own proactive speech
+        (which sets _conversed) can never count as the user being around.
+
+        And the Chart's feed: every row, whatever its lane, is teed to any
+        open GUI — which is how web replies reach their reader at all.
         """
-        if speaker in ("user", "you-confirm") and self._presence is not None:
+        if (
+            speaker in ("user", "you-confirm", "user-web")
+            and self._presence is not None
+        ):
             self._presence.note_conversation(time.monotonic())
+        if self._web_link is not None:
+            self._web_link.note_row(speaker, text)
         if self._transcript is not None:
             self._transcript.record(speaker, text)
 
@@ -2016,6 +2646,13 @@ class Pipeline:
         elif mode == "always":
             print("\nReady. Just talk.")
         # hotkey prints its own prompt via reset()/start()
+        if self._web_link is not None and self._web_link.serving:
+            print(
+                f"GUI: http://{self._config.web.host}:{self._config.web.port}"
+            )
+        if self._muted:
+            # A silenced greeting must not read as a broken speaker.
+            print("  [muted — Ciel will stay silent and not listen for its name]")
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -2035,6 +2672,14 @@ class Pipeline:
             startup.append(self._speaker.warm_up())
         if self._watcher is not None:
             startup.append(self._watcher.start())
+        if self._remote_link is not None:
+            # Spawns the gateway task and returns; a bad token or missing
+            # dependency is one warning, never a blocked greeting.
+            startup.append(self._remote_link.start())
+        if self._web_link is not None:
+            # Binds loopback and returns; a taken port or missing
+            # dependency is one warning, never a blocked greeting.
+            startup.append(self._web_link.start())
         # Vigil watchers start here but never block here: start() only
         # spawns their poll tasks — a permission dialog stalls a watcher,
         # not the greeting.
@@ -2083,7 +2728,7 @@ class Pipeline:
 
         from ciel.tts.macos_say import SayTTS
 
-        self._tts = SayTTS(self._config.tts)
+        self._tts = _apply_effect(SayTTS(self._config.tts), self._config)
         await self._tts.warm_up()
 
     async def _shutdown(self) -> None:
@@ -2098,6 +2743,10 @@ class Pipeline:
             closers.append(self._speaker.close())
         if self._watcher is not None:
             closers.append(self._watcher.close())
+        if self._remote_link is not None:
+            closers.append(self._remote_link.close())
+        if self._web_link is not None:
+            closers.append(self._web_link.close())
         closers.extend(w.close() for w in self._vigil_watchers)
         await asyncio.gather(*closers, return_exceptions=True)
         if self._transcript is not None:

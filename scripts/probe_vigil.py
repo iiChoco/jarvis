@@ -525,8 +525,8 @@ async def run_checks(tmp: Path) -> None:
     )
 
     check(
-        "the message outlet prompt names the phone",
-        "iMessage" in proactive_prompt("X.", outlet="message"),
+        "the message outlet prompt names the medium",
+        "text message" in proactive_prompt("X.", outlet="message"),
     )
     from ciel.brain.prompt import build_system_prompt
 
@@ -537,8 +537,8 @@ async def run_checks(tmp: Path) -> None:
     )
     check(
         "the away outlet is described only when wired",
-        "text it to the user" in with_vigil
-        and "text it to the user" not in build_system_prompt(vigil=True),
+        "text it to them" in with_vigil
+        and "text it to them" not in build_system_prompt(vigil=True),
     )
     check(
         "no vigil section when vigil is off",
@@ -809,6 +809,7 @@ async def run_checks(tmp: Path) -> None:
         p._presence = None
         p._transcript = None
         p._calendar = None
+        p._web_link = None
         p._tts = TurnTTS()
         p._owner_messages = TurnMessenger() if owner else None
         p._conversed = False

@@ -2,6 +2,317 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-08-29 — the audit's flagged items, closed
+
+**Why.** The documentation audit surfaced five findings too behavioral to
+fix as prose. Four were worth closing (the fifth — the unused CoreLocation
+dependency — is a design decision still owed).
+
+**What.** *Undo can read its own snapshots*: the undo prompt sends the
+model to read a snapshot in `~/.ciel/undo/snapshots`, which the workspace
+guard denied under any narrow workspace. Kept the journal's
+no-side-channel philosophy — undo stays ordinary tools — and gave the
+guard one carve-out instead: reads (never writes) under the snapshots
+directory, with a suffix check so a stray snapshot of a forbidden file
+stays buried. *Confirmations are lane-matched*: `remote()` now records
+which lane asked ("discord" or "web"), and a Discord text answers only a
+Discord-origin question — a question shown on the loopback page was never
+shown to the phone. The page still answers either origin, because every
+question is mirrored to it as a ciel-confirm row. *Backfill drains*: the
+reconnect sweep paged once (25 oldest) and silently lost the tail of a
+deeper gap; it now pages until drained, with a flood cap. *Two logs tell
+the truth*: the wake ready-log prints a custom model's phrase (the path
+stem), not its path; the speaker gate says "centroid" when the centroid
+row wins instead of naming a take that does not exist. Full scripted
+suite passes: 666 checks across nine probes, plus a direct exercise of
+the carve-out (read allowed, write denied, forbidden suffix denied,
+other outside paths still denied).
+
+## 2026-08-29 — the documentation audit: every claim checked against the code
+
+**Why.** "Go through all the documentation and make sure it is all up to
+date." Docs drift; this codebase documents itself unusually heavily, which
+means unusually many claims that can silently stop being true.
+
+**What.** Five parallel read-only audits swept every module docstring,
+config field doc, and the README against the source, and everything found
+was fixed. The README got the most: the intro and config example now name
+mlx-whisper as the shipped STT default (faster-whisper is the CPU
+fallback), the custom wake-word path is present tense (trained, probed,
+ready-line aware) instead of future work, the codename table gained its
+five missing rows (Singularities, Tower Clearance, Chart, Vigil, Witness)
+and un-conflated Compact Support from Singularities, the status-pill table
+gained the reasoning state, a full Vigil section now exists (watchers,
+policy order, budgets, the hold brake), the probe list gained its five
+missing scripts, enrollment documents all six modes and the real take
+count, and the module table covers the tree as it is. Two dozen docstring
+corrections landed across the packages — stale defaults (500 ms
+endpointing, say-as-fallback), phantom references (`build_memory_tools`,
+`probe_bargein.py`, the "plan"), wrong lists (Witness's deny list, Vigil's
+event sources, the grantable catalog's reload promise), and the confirm
+broker's Discord-only framing (the web lane shares it).
+
+Where the doc was right and the code was wrong, the code moved instead:
+the amara.org hallucination entry violated the list's own normalized-form
+invariant and could never match; `origin_allowed` judged a portless
+https Origin as port 80; the grants tool promised a reload that
+`[dev] autoreload = false` would never deliver; the system prompt told the
+model it cannot read outside the workspace even when `read_only_outside`
+says it can (now threaded through); and the fast-path grammar's address
+list lacked "jarvis" — the default wake phrase — so "hey jarvis, ten
+minute timer" always paid for the brain. Two probe fixes: the Vigil
+probe's minimal pipeline predated the web tap, and the Oura probe's
+junk-days check hard-coded the wrong weekday, latent until the real date
+moved past its fake one. Full scripted suite passes: 666 checks across
+nine probes.
+
+## 2026-08-29 — the voice speaks from the ceiling
+
+**Why.** "Give my current piper voice the post processing that JARVIS
+gets." The cinematic-assistant sound is mostly not a different voice but
+a treatment: small-speaker low-end rolloff, a presence lift where
+consonants live, and fast, quiet early reflections that place the voice
+in the room's architecture instead of nowhere.
+
+**What.** `tts/effect.py` — a `VoiceEffect` wrapper speaking the
+`TextToSpeech` protocol on both sides, so neither the pipeline nor the
+player learns it exists. One linear-phase FIR carries the whole tonal
+tilt (~6 ms group delay, normalized to unity at 1 kHz); twelve sparse
+early reflections at prime-ish spacings with alternating signs supply
+the room (~-12 dB wet, ringing ~130 ms past each sentence into a
+flushed tail); a tanh limiter with measured make-up gain keeps treated
+loudness within 0.6 dB of the dry voice. Pure numpy on purpose — scipy
+is only in the venv as a transitive — and stateful overlap-save per
+chunk, so time-to-first-audio pays only the FIR delay. Wired as
+`[tts] effect = "jarvis"` (default `"none"`, Literal-validated), applied
+in `build_tts` and re-applied on the runtime `say` fallback: the
+treatment belongs to the voice's character, not to whichever engine is
+producing it. Verified by A/B synthesis: sub-100 Hz -8 dB, presence
++3.7 dB, peaks soft-limited under full scale, RMS matched.
+
+## 2026-08-28 — the chart shows who is working
+
+**Why.** "I want to be able to see all active agents on the UI." Ciel
+does things between and during turns — a deep-thought pass someone is
+sitting in silence for, watches armed on background work, timers
+counting down — and the page showed none of it: a running watch was
+invisible until it spoke, and the only trace of deep thought was one
+event row scrolling away.
+
+**What.** The active-agent roster. A new `agents` frame in the web
+protocol (and a roster in the hello), carrying everything working on
+the user's behalf right now: `deep` (the brain now stamps the
+escalation in flight and clears it when the parent turn resumes —
+`Brain.deep_thought_since`), `watch` (the work watcher's registrations,
+labeled with their completion sentence), `timer`/`alarm`. Deliberately
+*not* the Vigil watchers themselves — standing infrastructure that is
+always on stops meaning anything in a roster; this lists work with an
+end. The pipeline polls the roster once a second at the mute sentinel's
+cadence (polling beats wiring change hooks through three sources) and
+the link dedupes, so an unchanged second costs one list build. On the
+page: a chip beside the state pill counts ("2 working", breathing while
+a deep pass runs), and expands into a strip with per-kind icons, the
+watched target, and live countdowns ("5m in · 24m left"). Unknown kinds
+render as plain rows — the transcript-label rule, because new agent
+sources will add new kinds. Verified scripted and live: `probe_web.py`
+grew roster checks (broadcast, dedup, hello carriage) and a `--port`
+flag plus a "deep" toggle in live mode, and the page was driven in a
+real browser — chip, panel, countdown tick, deep engage/clear.
+
+## 2026-08-26 — a page to talk through; a switch that keeps the room quiet
+
+**Why.** "This GUI is meant for when I'm outside, in class, at the
+library." Ciel had lanes for the keyboard and for Discord, but no way to
+*see* the conversation, and no way to be in the room with it without it
+making sound — a lecture hall tolerates neither a spoken reply nor a
+false wake.
+
+**What.** The web GUI (`remote/web.py`, codename **Chart** — a local
+coordinate window onto the same manifold; a native app later is another
+chart of the same atlas). A loopback aiohttp server, off by default
+(`[web] enabled = true`, `uv sync --extra web`): the page shows every
+lane's transcript rows live (a tap in `_record`), mirrors the HUD's
+state pill (a `TeeIndicator` fans the announcements), takes typed turns
+through the Discord lane's queue-and-send surface, and renders
+confirm-tier questions as Yes/No buttons (`confirm.remote`, the
+texted-question road). Web turns count as presence — reaching a
+loopback port means being at the machine, the keyboard's trust — and
+the one browser-shaped hole, cross-site WebSocket access, is closed by
+an Origin check before a frame is read. The WebSocket protocol is
+documented in the module as the contract a SwiftUI client builds
+against later. And the mute switch: one gate at the top of
+`Player.play()` silences everything (greeting, acks, timer rings,
+sentences, apologies) with no call site knowing mute exists; the frame
+loop stops watching for the wake word; Vigil "speak" decisions become
+held notes; timers surface as text on the page. State lives in
+`~/.ciel/mute` — the hold sentinel's trick — so the autoreloader's
+re-execs can't un-mute a lecture, and `touch ~/.ciel/mute` works from a
+hotkey with the page closed. Verified scripted and live:
+`probe_web.py`, plus the page driven in a real browser (send, echo,
+confirm banner, mute round-trip, reconnect with the draft preserved).
+
+**Why.** "Put a watcher on my ring stats and my location." The readiness
+watcher covered one number; a bad night is usually the *sleep* score, and
+a still day is the activity one. And location had no source at all —
+Ciel could not answer "where am I", let alone notice a move.
+
+**What.** The Oura watcher now files at most two notes a day: one in the
+morning when readiness or sleep (or both — "rough night by the ring")
+sits at or under its threshold, with hours asleep from the session and
+the weakest contributor named; one from `activity_check_after` when the
+activity score is still low ("a walk would fix it", importance 1). Each
+threshold is its own switch. And a location layer (`location.py`,
+`[location]`): two sources, honestly labelled. The Wi-Fi network the Mac
+is on (`system_profiler` — CoreWLAN and `ipconfig` redact the SSID now,
+and needs no permission) locates the laptop; Find My's device cache
+locates the phone, behind two gates the code names in its one-time
+warning — Full Disk Access for the app running Ciel, and a macOS that
+still writes the cache as JSON (14.4 and later don't). CoreLocation was
+tried and is out: macOS never shows a Python process the permission
+dialog (`kCLErrorDenied`, no prompt). `[location.places]` turns either
+reading into a name; the `where_am_i` tool (Witness-listed, read-only)
+speaks the place, the device it came from, and the reading's age; the
+Vigil watcher notes moves between named places as importance-1 notes
+after a silent startup baseline. Also repaired in passing: a bare
+`uv sync` while adding the CoreLocation bindings dropped every optional
+extra — the Piper voice, the voice gate, Discord — and Ciel fell back to
+`say` mid-conversation; `uv sync --all-extras` put them back. Verified
+scripted: `probe_location.py` and `probe_oura.py`.
+
+## 2026-08-21 — the ring answers "how did I sleep"
+
+**Why.** The most-asked morning question had no source: Ciel could read a
+calendar and a message thread but not the one sensor worn all night. And
+the ring's own verdict — a low readiness score — is exactly the kind of
+thing worth one unprompted sentence, which is what Vigil exists for.
+
+**What.** The Oura integration, end to end. `oura.py` is the client: Oura
+Cloud API v2 over OAuth2, stdlib urllib on a worker thread, read-only by
+construction (daily readiness, sleep, activity, and the sleep *sessions* —
+the summaries carry scores, but the number people want is hours, and that
+lives on the session). Oura stopped issuing personal access tokens in
+December 2025, so the way in is an application of your own: `[oura]`
+holds the client id (the secret by environment), `probe_oura.py
+--authorize` runs the browser approval once — `extapi:daily` scope only,
+PKCE, a localhost callback with a state check, the port bound only for
+the duration — and writes `~/.ciel/oura.json`, a new `FORBIDDEN_NAMES`
+entry written owner-only. The endpoints are the ones
+`api.ouraring.com/.well-known/oauth-authorization-server` advertises
+(`/v2/oauth/authorize`, `/v2/oauth/token`), not the legacy pair in the
+older docs: an application from the new developer portal is registered
+with this server only, and the legacy approval page mints a code the
+legacy token endpoint then rejects as `invalid_client` — observed live
+during setup, and the reason the module names its sources. Ciel owns that file: Oura's refresh tokens are
+single-use, so every refresh (lazy, a day before the month-long access
+token expires, serialized across the tool's and the watcher's threads) is
+persisted atomically before anything else happens; a spent or revoked
+refresh says how to repair it instead of failing forever. A legacy token
+still works as a static bearer until Oura shuts it off; the OAuth file
+wins. The `oura_summary` brain tool answers for a day or a range (up to
+two weeks), labelled as a person would read it back ("Today: sleep score
+79, 7 hours 12 minutes asleep, in bed 11:42 pm to 7:31 am…"), and is on
+the Witness list so an unattended morning turn may check the ring before
+it speaks. The Vigil watcher polls today's readiness every half hour and,
+at or under `low_readiness`, queues one importance-2 nudge per day naming
+the weakest contributor; a fine morning is silent. Armed is the one test
+everywhere — enabled *and* holding a way in — so the registry, the prompt,
+and the watcher can't disagree about whether the ring exists; enabled
+without an authorization warns once and arms nothing. Verified scripted:
+`probe_oura.py` (shaping, the tool through a fake client, the nudge, the
+watcher's lifecycle and failure streak, the token store's refresh and
+rotation, the live localhost callback, config).
+
+## 2026-08-20 — the wall of "clear" dies in the filter
+
+**Why.** Observed live: Whisper (large-v3-turbo) locked onto one token and
+transcribed a spoken sentence as "I'm going to use the same way to make a
+clear clear clear…" — three hundred clears. It sailed past both existing
+decode-time mitigations (`condition_on_previous_text=False` and the
+temperature fallback — the retry can loop too), then the Cauchy hold
+faithfully held the wall as a "partial thought" and merged it into the
+next utterance, doubling it. The model, to its credit, answered "That one
+came through garbled, sir" — but a thousand tokens of noise per garbled
+turn is a cost and a bug.
+
+**What.** A deterministic backstop in the shared filter layer
+(`stt/hallucinations.py`, both engines): transcripts that are *nothing
+but* a short n-gram repeated are dropped as hallucinations, and
+`collapse_repetition` salvages the head-and-wall case — real speech
+survives untouched, two copies of the looping phrase remain as evidence,
+the wall is gone before the hold, the merge, or the model ever see it.
+The bar is six consecutive copies of an n-gram (n ≤ 4): "no no no" and
+"very very very very" pass through untouched; no human utterance clears
+six. Punctuation variants ("clear, clear. clear!") count as one run.
+Verified scripted: `probe_stt.py`, 21 checks, including the observed
+failure verbatim and a 2000-word wall collapsing in well under a second.
+
+
+## 2026-08-20 — powers by text, mentions in servers, the token off-limits
+
+**Why.** With the Discord lane live, two asks followed immediately: change
+what Ciel may do from a phone ("enable your shell" from the couch across
+town), and answer `@ciel` in a server channel. And the lane's own token
+was sitting in model-readable config — a credential in a readable file is
+a credential in every future context window.
+
+**What.** Three pieces. *Grants* (`[grants]`, `brain/tools/grants.py`):
+list/grant/revoke over a fixed catalog of capability switches. Enabling
+passes the enforced confirmation gate ("Enable shell access — okay?" —
+voiced at home, texted away) before one byte of config changes; disabling
+runs instantly, because de-escalation with friction teaches people to
+leave things on. Edits are surgical (comments survive, parse-verified,
+rolled back on failure), journaled both directions but filing no read-back
+event (the tool verifies its own edit), and trip the reload that makes
+them real. The catalog is deny-by-construction: the Discord pinning, the
+voice gate, tool tiers, and the workspace path are simply not in it.
+*Mentions*: `@ciel` in a server the bot was invited to is a turn — owner
+account only, reply to that channel, and the turn is told it's in public:
+discretion note instead of the DM note, held Vigil notes never delivered
+outside DMs. No privileged intent needed (mention content is exempt).
+*Hardening*: the token moved to `~/.ciel/discord.token`, now a
+FORBIDDEN_NAMES entry, so file tools and the shell gate both refuse it;
+the DM last-seen mark persists (`discord.json`) so the catch-up sweep
+spans restarts — texts sent during a grant's own reload come back out of
+the gap, capped at ten minutes so stale instructions die unexecuted. Also
+fixed in passing: both confirm-gate hook timeouts (120 s) sat *below* the
+remote gate's worst case (two 120 s texted windows) — raised to 600 s, so
+a slow answer can no longer let the SDK time the hook out mid-question.
+Verified scripted: probe_grants (32 checks), probe_discord (37), and the
+full suite still green (148 shellguard, 56 closure, 171 vigil).
+
+
+## 2026-08-20 — the conversation follows you out the door
+
+**Why.** Ciel only existed inside earshot: away from the machine there was
+no way to ask it anything, and the away outlet (when armed at all) was
+one-way. "Text Ciel when I'm not home" is the missing half of living with
+an assistant.
+
+**What.** The Discord lane, codename Parallel Transport (`remote/discord.py`,
+`[discord]` in config, `uv sync --extra discord`). A DM from the pinned
+`owner_id` becomes an ordinary turn — same brain, same session, same
+transcript, held Vigil notes delivered — and the reply rides back as a
+text, buffered into one message rather than streamed as notifications.
+Identity is deterministic where the Barn Door is probabilistic: only the
+pinned account's DMs are read, and everything else is dropped before it
+reaches anything with tools. The Proof Obligation travels too: a
+confirm-tier action mid-remote-turn texts its question over the same DM
+and waits on notification time (~2 min) for a yes or no — and remote
+answers are accepted *only* for remote-origin questions, because a yes to
+a question voiced into a room you're not in is not an answer. Remote turns
+are deliberately not presence: their transcript rows carry remote labels,
+so Vigil keeps treating the room as empty and texts instead of speaking to
+nobody. When Vigil wants to message and iMessage isn't configured, the
+link is the fallback outlet (`discord.proactive` opts out). The lane
+degrades like the indicator — missing dependency, bad token, dead network
+are each one warning and a working voice assistant. Verified scripted
+(`probe_discord.py`, 29 checks: the gate, the queue contract, every
+walk-away path of the remote confirmation denying), and the existing
+shellguard/closure/vigil probes still pass. The live half —
+`probe_discord.py --live` against a real bot token — is the first thing
+to run after the five-minute Discord setup in the README.
+
+
 ## 2026-08-19 — nudges read Google Calendar at the source
 
 **Why.** This Mac syncs no calendars into Calendar.app, so the EventKit

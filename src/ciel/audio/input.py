@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # stopped calling the callback: the input device was lost. frames() would
 # otherwise wait forever, silently freezing the whole pipeline.
 _STALL_TIMEOUT_S = 3.0
-_STALL_LIMIT = 2  # consecutive stalls tolerated before ending capture
+_STALL_LIMIT = 2  # stalls before capture ends; the first gets a warning
 
 
 def pcm_to_float(frame: bytes) -> np.ndarray:

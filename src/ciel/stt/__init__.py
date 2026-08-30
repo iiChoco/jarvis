@@ -18,8 +18,10 @@ log = logging.getLogger(__name__)
 def build_stt(config: STTConfig) -> SpeechToText:
     """Instantiate the configured transcription engine.
 
-    The only place either engine is named. Swapping them is a config value,
-    which is the whole point of the protocol.
+    The only place an engine is *chosen* from config — swapping them is a
+    config value, which is the whole point of the protocol. (The pipeline's
+    ``_warm_up_stt`` names ``WhisperSTT`` once more, on the runtime fallback
+    path.)
     """
     if config.engine == "mlx-whisper":
         # Probed with find_spec, not imported — MlxWhisperSTT loads
