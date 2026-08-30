@@ -2,6 +2,49 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-08-29 — the seams cut for the hub (phase 0)
+
+**Why.** The hub-and-spoke plan is approved: the brain, memory, Vigil,
+Discord, and the Chart move to a cloud hub; the Mac keeps the audio
+pipeline and its Mac-only powers. Before any process splits, the
+in-place refactors — the ones the exploration flagged as prerequisites
+because lane identity and scheduling were smeared through the frame
+loop — and each pays for itself locally even if the project stopped
+here.
+
+**What.**
+
+- *Four lanes, one turn* (`turn.py`): a `TurnRequest` + lane registry
+  (labels, console tags, system notes, held-note policy, confirm
+  origins — today's strings byte-for-byte, because `user`/`user-web`
+  rows are presence evidence and the Chart renders by them) and a
+  `TurnSink` protocol for the delivery half. `Pipeline._run_turn` is
+  the one copy of the skeleton the four handlers used to hand-wire;
+  `_respond`/`_respond_stream` folded into the voice sink. In the
+  endgame the hub drives this same method with a sink that writes wire
+  frames.
+- *The ladder is a pure function* (`schedule.py`): the frame loop's
+  priority ladder — confirmation, timers, keyboard, page, phone,
+  Vigil — extracted as `pick_next(Snapshot)`, no clock reads, no I/O;
+  the loop builds a snapshot per frame and enacts the pick. The hub's
+  mic-less arbiter runs the same ladder. `TimerService.any_due` is the
+  arbiter's non-consuming look at the timer book. `State` moved to
+  `schedule.py` (re-exported).
+- *The lane surface is a Protocol* (`remote/lane.py`): the documented
+  queue-and-send shape both links implement, now runtime-checkable and
+  asserted by their probes — the third implementation is the hub link.
+- *Wall-clock twins*: `TurnRequest.arrival_wall` and the confirm
+  broker's `asked_at_wall` alongside the monotonic stamps nothing
+  cross-host can compare. Groundwork only; nothing consumes them yet.
+
+**Probes.** `probe_turns.py` (51 checks: golden row sequences per lane,
+prompt composition, confirm origins, escalation shapes, barge-in
+abandonment, local-command routing, failure shapes) and
+`probe_ladder.py` (15 checks: every rank and guard of the table). All
+existing probes green; the live instance hot-reloaded through the
+refactor and came back up — brain connected, Chart serving, Discord
+signed in.
+
 ## 2026-08-29 — the audit's flagged items, closed
 
 **Why.** The documentation audit surfaced five findings too behavioral to

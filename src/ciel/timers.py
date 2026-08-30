@@ -138,6 +138,13 @@ class TimerService:
 
     # ── the pipeline's side ──────────────────────────────────────────────────
 
+    def any_due(self, now: float | None = None) -> bool:
+        """Whether ``pop_due`` would return anything — the arbiter's
+        non-consuming look. The scheduling snapshot must not pop: an
+        un-enacted pick has to leave the timer on the books."""
+        now = time.time() if now is None else now
+        return any(not t.pending and t.due_at <= now for t in self._timers)
+
     def pop_due(self, now: float | None = None) -> list[Timer]:
         """Remove and return everything that has come due. The caller owns
         announcing them; once popped they are off the books, so a caller that

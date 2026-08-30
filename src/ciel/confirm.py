@@ -130,6 +130,7 @@ class VoiceConfirmBroker:
         self._utterance: asyncio.Future[np.ndarray | None] | None = None
         self._typed_answer: str | None = None
         self._asked_at: float | None = None
+        self._asked_at_wall: float | None = None
         self._barge_run = 0
         self._remote_send: Callable[[str], Awaitable[None]] | None = None
         """The text lane's reply sink while a remote turn is in flight
@@ -198,6 +199,15 @@ class VoiceConfirmBroker:
         action nobody was answering.
         """
         return self._asked_at
+
+    @property
+    def asked_at_wall(self) -> float | None:
+        """Wall-clock twin of :attr:`asked_at` — same lifecycle, same
+        None-when-idle. The monotonic stamp stays the predating rule's
+        clock on this machine (it can't jump backwards); the wall twin
+        exists for the hub split, whose gating only ever compares wall
+        stamps minted on the same host that reads them."""
+        return self._asked_at_wall
 
     def feed(self, frame: bytes) -> None:
         """Accept one mic frame from the frame loop; meaning depends on phase."""
@@ -344,6 +354,7 @@ class VoiceConfirmBroker:
                     return False
 
                 self._asked_at = time.monotonic()
+                self._asked_at_wall = time.time()
                 await self._speak(question)
 
                 # One re-prompt on an unclear answer, then deny. A gate that
@@ -386,6 +397,7 @@ class VoiceConfirmBroker:
             finally:
                 self._phase = _Phase.IDLE
                 self._asked_at = None
+                self._asked_at_wall = None
                 self._endpointer.reset()
 
     async def _ask_remote(self, question: str) -> bool:
@@ -410,6 +422,7 @@ class VoiceConfirmBroker:
             self._typed_answer = None  # a cancel can leave a stale one behind
             self._phase = _Phase.LISTEN
             self._asked_at = time.monotonic()
+            self._asked_at_wall = time.time()
             try:
                 if not await self._send_remote(send, question):
                     return False
@@ -441,6 +454,7 @@ class VoiceConfirmBroker:
             finally:
                 self._phase = _Phase.IDLE
                 self._asked_at = None
+                self._asked_at_wall = None
 
     async def _send_remote(
         self, send: Callable[[str], Awaitable[None]], text: str

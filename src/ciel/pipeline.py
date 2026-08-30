@@ -38,7 +38,6 @@ import time
 from collections import deque
 from contextlib import AsyncExitStack, aclosing
 from dataclasses import replace as dc_replace
-from enum import Enum, auto
 from pathlib import Path
 
 import numpy as np
@@ -70,6 +69,7 @@ from ciel.brain.tools.location import bind_locator
 from ciel.brain.tools.watch import bind_watcher
 from ciel.location import Locator
 from ciel.reload import SourceWatcher, default_roots
+from ciel.schedule import Snapshot, Source, State, pick_next
 from ciel.commands import Command, match as match_command
 from ciel.stt import SpeechToText, build_stt
 from ciel.timers import Timer, announcement, spoken_clock, spoken_duration
@@ -88,12 +88,6 @@ well above any legitimate scheduling hiccup and well below the shortest nap a
 lid-close produces. On macOS the monotonic clock largely pauses with the
 process, so every monotonic deadline in the loop silently stretched by the
 nap — the wake-up handler is where reality is reconciled."""
-
-
-class State(Enum):
-    WAITING = auto()    # not addressed; frames go to the wake detector
-    LISTENING = auto()  # addressed; frames go to the endpointer
-    BUSY = auto()       # thinking or speaking; frames watched for barge-in
 
 
 def trails_off(heard: str, audio: AudioConfig) -> bool:
@@ -773,6 +767,26 @@ class Pipeline:
         """A spoken or typed "reload" landed; the frame loop performs it from
         idle, exactly as it does for a source change."""
 
+    def _loop_snapshot(self) -> Snapshot:
+        """The arbiter's view of this instant, frozen. Deadline arithmetic
+        happens here (the missed-timer sweep flag, the policy-poll clock)
+        so ``pick_next`` stays a pure membership test."""
+        return Snapshot(
+            state=self._state,
+            confirm_active=self._confirm.active,
+            endpointer_speaking=self._endpointer.speaking,
+            held_thought=self._pending_text is not None,
+            timers_due=self._timers is not None
+            and (self._timer_missed_sweep or self._timers.any_due()),
+            typed_pending=bool(self._typed),
+            web_pending=self._web_link is not None and self._web_link.pending,
+            remote_pending=self._remote_link is not None
+            and self._remote_link.pending,
+            vigil_ready=self._events is not None
+            and self._events.pending
+            and time.monotonic() >= self._next_policy_check,
+        )
+
     async def run(self) -> None:
         await self._startup()
 
@@ -856,11 +870,18 @@ class Pipeline:
                         self._next_agents_push = now_wall + 1.0
                         self._web_link.note_agents(self._active_agents())
 
-                    # Checked above the state dispatch, not inside BUSY: a
+                    # The turn-slot arbitration: one frozen snapshot, one
+                    # pure pick (the ladder lives in ciel.schedule — the
+                    # order and its reasons are that module's docstring).
+                    # The blocks below only *enact* the pick; nothing is
+                    # consumed until its block claims it.
+                    source = pick_next(self._loop_snapshot())
+
+                    # Enacted above the state dispatch, not inside BUSY: a
                     # turn abandoned by barge-in leaves BUSY while its hook
                     # can still be pending, and a pending confirmation that
                     # stops receiving frames never resolves.
-                    if self._confirm.active:
+                    if source is Source.CONFIRM:
                         # A typed line while a question is pending is an
                         # answer — but only if it arrived *after* the question
                         # was put. A line typed earlier (while the turn was
@@ -909,18 +930,11 @@ class Pipeline:
                         self._confirm.feed(frame)
                         continue
 
-                    if (
-                        self._timers is not None
-                        and self._state is not State.BUSY
-                        and not self._endpointer.speaking
-                        and self._pending_text is None
-                    ):
+                    if source is Source.TIMERS:
                         # A due timer speaks the moment nothing else owns the
-                        # audio: not over Ciel's own turn (BUSY — it fires the
-                        # instant the turn ends), not over the user
-                        # mid-utterance, not into a Cauchy hold. Awaited
-                        # inline, like the wake acknowledgement: announcements
-                        # are seconds long, and the mic is drained after so
+                        # audio (the arbiter's quiet rule). Awaited inline,
+                        # like the wake acknowledgement: announcements are
+                        # seconds long, and the mic is drained after so
                         # Ciel's own voice isn't transcribed as a turn.
                         # First poll after a nap grace-filters what came due
                         # mid-sleep instead of announcing it stale.
@@ -934,19 +948,12 @@ class Pipeline:
                             await self._announce_timers(
                                 fired, player, mic, missed=sweep
                             )
-                            continue
+                        continue
 
-                    if (
-                        self._typed
-                        and self._state is not State.BUSY
-                        and not self._endpointer.speaking
-                        and self._pending_text is None
-                    ):
-                        # The keyboard takes the turn, but never *steals* one:
-                        # not while a turn runs (BUSY — the line queues as the
-                        # next turn), not mid-utterance (the spoken sentence
-                        # finishes first), not while Cauchy holds a partial
-                        # thought (the hold resolves, then the line runs).
+                    if source is Source.TYPED:
+                        # The keyboard takes the turn, but never *steals* one
+                        # (the arbiter's quiet rule: not over a running turn,
+                        # not mid-utterance, not over a held thought).
                         if self._maintenance is not None and not self._maintenance.done():
                             # Same hastening the wake path does: the typed
                             # turn serializes on the brain's lock, and an
@@ -961,20 +968,12 @@ class Pipeline:
                         )
                         continue
 
-                    if (
-                        self._web_link is not None
-                        and self._web_link.pending
-                        and self._state is not State.BUSY
-                        and not self._endpointer.speaking
-                        and self._pending_text is None
-                    ):
+                    if source is Source.WEB:
                         # The GUI claims the turn slot under the keyboard's
                         # rules, not the phone's: a chart is the user *at*
                         # the machine, so it may take a turn out of a
-                        # follow-up window — but never mid-utterance, and
-                        # never over a held partial thought. Queued bursts
-                        # coalesce into one turn, the texting-cadence
-                        # reasoning.
+                        # follow-up window. Queued bursts coalesce into one
+                        # turn, the texting-cadence reasoning.
                         if self._maintenance is not None and not self._maintenance.done():
                             # Same hastening as the typed lane: the web turn
                             # serializes on the brain's lock.
@@ -988,19 +987,13 @@ class Pipeline:
                         turn = asyncio.create_task(self._handle_web_turn(line))
                         continue
 
-                    if (
-                        self._remote_link is not None
-                        and self._state is State.WAITING
-                        and self._remote_link.pending
-                    ):
+                    if source is Source.REMOTE:
                         # The Discord lane claims the turn slot — a user
-                        # lane, so it outranks Vigil below, but only from
-                        # WAITING: whoever is in the room speaking or
-                        # mid-follow-up outranks the phone, and a text
-                        # tolerates the seconds that costs. Everything
-                        # queued right now coalesces into one turn (people
-                        # text in bursts; three turns for one thought
-                        # answers the greeting with a paragraph).
+                        # lane, so it outranks Vigil, but only from WAITING
+                        # (the arbiter's rule: the room outranks the phone).
+                        # Everything queued right now coalesces into one
+                        # turn (people text in bursts; three turns for one
+                        # thought answers the greeting with a paragraph).
                         if self._maintenance is not None and not self._maintenance.done():
                             # Same hastening as the typed lane: the remote
                             # turn serializes on the brain's lock.
@@ -1019,20 +1012,15 @@ class Pipeline:
                         )
                         continue
 
-                    if (
-                        self._events is not None
-                        and self._state is State.WAITING
-                        and self._events.pending
-                        and time.monotonic() >= self._next_policy_check
-                    ):
+                    if source is Source.VIGIL:
                         # Vigil: a pending event gets its policy decision.
-                        # Fourth in line behind confirmations, timers, and
-                        # the keyboard — the user always outranks the
+                        # Last in line — the user always outranks the
                         # machine — and stricter than the timer lane on
                         # purpose: WAITING only, never into a live listening
                         # window; the held-notes path covers those moments.
-                        # The frame-rate cost is the boolean above; presence
-                        # and policy run at most once per policy_poll_s.
+                        # The frame-rate cost is the snapshot's booleans;
+                        # presence and policy run at most once per
+                        # policy_poll_s.
                         self._next_policy_check = (
                             time.monotonic()
                             + self._config.proactive.policy_poll_s
