@@ -75,6 +75,9 @@ def probe_origin_gate() -> None:
 def probe_queue() -> None:
     print("\nthe turn queue")
     link = WebLink(WebConfig())
+    from ciel.remote.lane import Lane
+
+    check("WebLink conforms to the Lane protocol", isinstance(link, Lane))
     check("starts empty", not link.pending and link.pop_batch() is None)
 
     link._on_frame(json.dumps({"type": "say", "text": "  hello  "}))

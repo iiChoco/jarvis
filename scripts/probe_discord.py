@@ -174,6 +174,9 @@ def link_checks(state_file) -> None:
     )
     link = DiscordLink(config)
     link._client = FakeClient(user_id=7)  # the bot's own account, for mentions
+    from ciel.remote.lane import Lane
+
+    check("DiscordLink conforms to the Lane protocol", isinstance(link, Lane))
     check("token plus owner id arms the lane", link.armed)
     check("unconnected means can_send is False", not link.can_send)
 

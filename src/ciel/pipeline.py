@@ -36,8 +36,7 @@ import re
 import sys
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable
-from contextlib import aclosing
+from contextlib import AsyncExitStack, aclosing
 from dataclasses import replace as dc_replace
 from enum import Enum, auto
 from pathlib import Path
@@ -76,6 +75,7 @@ from ciel.stt import SpeechToText, build_stt
 from ciel.timers import Timer, announcement, spoken_clock, spoken_duration
 from ciel.transcript import Transcript
 from ciel.tts.base import TextToSpeech
+from ciel.turn import TurnRequest, TurnSink, lane_spec, prompt_note
 from ciel.ui.indicator import Indicator, TeeIndicator, build_indicator
 
 log = logging.getLogger(__name__)
@@ -88,56 +88,6 @@ well above any legitimate scheduling hiccup and well below the shortest nap a
 lid-close produces. On macOS the monotonic clock largely pauses with the
 process, so every monotonic deadline in the loop silently stretched by the
 nap — the wake-up handler is where reality is reconciled."""
-
-
-_REMOTE_NOTE = (
-    "(System note — this message arrived over the Discord link: the user is "
-    "away from this machine, and nothing you write will be spoken aloud. "
-    "Your reply goes back to them as a text, so keep it text-shaped: short "
-    "and plain. Nothing at the machine reaches them where they are — a "
-    "timer or alarm armed now rings here, not on their phone, so arm one "
-    "only for when they'll be back to hear it, and say as much.)\n\n"
-)
-"""Prefixed to every remote turn — the model's only way to know the room is
-empty. Prefix, not transcript: the record keeps the user's raw words, the
-same contract as the held-notes note."""
-
-
-_REMOTE_PUBLIC_NOTE = (
-    "(System note — this arrived as an @mention in a Discord server channel: "
-    "the user is away from this machine, and your reply posts to that channel "
-    "where OTHERS CAN READ IT. Keep it text-shaped and discreet — volunteer "
-    "no personal details, memories, schedules, or private context beyond what "
-    "the user's own message already put in the open, and offer to continue "
-    "in DMs when a real answer would need them. Nothing you write is spoken "
-    "aloud, and nothing at the machine reaches the user where they are.)\n\n"
-)
-"""The mention lane's variant of the note above. The audience is the
-difference: a DM is the owner's eyes only, a channel is whoever is in it —
-so this one trades the timer caveat for a discretion rule."""
-
-
-_WEB_NOTE = (
-    "(System note — this message arrived through the local GUI: the user is "
-    "at this machine but typing because the room should stay quiet, and your "
-    "reply is shown on screen, never spoken. Keep it text-shaped: short and "
-    "plain.)\n\n"
-)
-"""Prefixed to every web turn, the remote note's contract: prefix, not
-transcript — the record keeps the user's raw words."""
-
-
-_WEB_MUTED_NOTE = (
-    "(System note — this message arrived through the local GUI, and the "
-    "speakers are muted: the user is somewhere that must stay silent (a "
-    "class, a library). Your reply is shown on screen, never spoken, and "
-    "nothing at this machine can make a sound right now — a timer or alarm "
-    "armed now appears only as text on the screen, so say as much if you arm "
-    "one. Keep it text-shaped: short and plain.)\n\n"
-)
-"""The web note while muted. The difference worth spelling out is the
-timers: unmuted, a timer still rings at the machine; muted, its
-announcement is text on a page the user may have stopped watching."""
 
 
 class State(Enum):
@@ -227,6 +177,241 @@ def _apply_effect(engine: TextToSpeech, config: Config) -> TextToSpeech:
 
         return VoiceEffect(engine)
     return engine
+
+
+class _TextSink:
+    """Delivery for the typed and web lanes: there is nothing to deliver —
+    the console print is the typed lane's delivery and the transcript tap
+    is the web lane's — so the hooks only keep the conversation flags
+    honest. Text exchanges are conversations too: Closure owes them the
+    same reflection, rotation the same fresh session afterwards."""
+
+    def __init__(self, pipeline: "Pipeline", confirm_send=None) -> None:
+        self._p = pipeline
+        self.confirm_send = confirm_send
+
+    def gate(self) -> bool:
+        return True
+
+    async def begin(self, started: float) -> None:
+        return None
+
+    async def escalation(self) -> bool:
+        return True
+
+    async def thinking(self, sentence: str) -> bool:
+        self._flags()
+        return True
+
+    async def reply(self, sentence: str) -> bool:
+        self._flags()
+        return True
+
+    def _flags(self) -> None:
+        self._p._conversed = True
+        self._p._brain_conversed = True
+
+    async def finish(self, started: float) -> None:
+        return None
+
+    async def cleanup(self) -> None:
+        return None
+
+
+class _DiscordSink(_TextSink):
+    """Delivery for the Discord lane: the reply is *buffered* and sent as
+    one text rather than streamed — nobody is in the room to hear
+    sentences land, and ten notifications for one answer is nagging. A
+    deep-thought escalation sends an interim line, because a typing
+    indicator alone reads as a hang after the first thirty seconds."""
+
+    def __init__(self, pipeline: "Pipeline", send_here) -> None:
+        super().__init__(pipeline, confirm_send=send_here)
+        self._send = send_here
+        self._sentences: list[str] = []
+
+    async def escalation(self) -> bool:
+        try:
+            await self._send(
+                "Give me a moment — I want to think this through properly."
+            )
+        except RemoteUnavailable:
+            log.debug("could not text the escalation notice")
+        return True
+
+    async def reply(self, sentence: str) -> bool:
+        self._sentences.append(sentence)
+        self._flags()
+        return True
+
+    async def finish(self, started: float) -> None:
+        reply = " ".join(self._sentences).strip()
+        if reply:
+            await self._send(reply)
+
+
+class _VoiceSink:
+    """Delivery for the spoken lane — the audio machinery a text lane
+    never needs: the heard-ack filler, the thinking chime, the indicator
+    dance, the first-speech metric, and barge-in's abort.
+
+    The ack filler is the audible "I heard you": a short phrase spoken if
+    the brain is still silent after a grace window, launched as a task so
+    it overlaps the model's latency instead of adding to it. Every play
+    awaits ``_ack_done`` first so two voices never overlap, and a first
+    sentence that beats the window cancels the filler unspoken — "Let me
+    think about that." chased instantly by the answer is theater.
+    Deliberately never sets ``_spoke`` by itself: a filler alone must not
+    open a follow-up window.
+    """
+
+    def __init__(self, pipeline: "Pipeline", player: Player) -> None:
+        self._p = pipeline
+        self._player = player
+        self.confirm_send = None
+        self._started = 0.0
+        self._first_spoken: float | None = None
+        self._prev_kind: str | None = None
+        self._ack_task: asyncio.Task[None] | None = None
+        self._ack_speaking = False
+
+    def gate(self) -> bool:
+        return not self._p._interrupted
+
+    async def begin(self, started: float) -> None:
+        self._started = started
+        self._p._interrupted = False
+        if self._p._config.brain.ack_phrases:
+            self._ack_task = asyncio.create_task(self._ack_filler())
+
+    async def _ack_filler(self) -> None:
+        await asyncio.sleep(self._p._config.brain.ack_delay_s)
+        self._ack_speaking = True
+        await self._player.play(
+            self._p._tts.stream(random.choice(self._p._config.brain.ack_phrases))
+        )
+
+    async def _ack_done(self) -> None:
+        if self._ack_task is None:
+            return
+        if not self._ack_speaking:
+            # Still inside the grace window (or between sleep and speech,
+            # which is the same thing: nothing audible yet) — skip it.
+            self._ack_task.cancel()
+        task, self._ack_task = self._ack_task, None
+        try:
+            await task
+        except asyncio.CancelledError:
+            if not task.cancelled():
+                # The cancellation was aimed at *us*, not the filler —
+                # swallowing it here would eat the turn's own teardown.
+                raise
+        except Exception:  # noqa: BLE001 — a lost filler costs nothing
+            log.debug("ack playback failed", exc_info=True)
+
+    async def _play(self, sentence: str) -> bool:
+        """One sentence through the speakers, with the shared accounting:
+        the filler resolved first, the first-speech stamp, the flags, and
+        the between-sentences indicator. Returns False — after abandoning
+        the turn — when playback didn't finish."""
+        p = self._p
+        await self._ack_done()
+        if self._first_spoken is None:
+            self._first_spoken = time.monotonic() - self._started
+        completed = await self._player.play(p._tts.stream(sentence))
+        p._spoke = True
+        p._conversed = True
+        p._brain_conversed = True
+        # Back to "thinking" between sentences: the model is still
+        # generating, and leaving it on "speaking" during the gap would
+        # misreport what Ciel is actually doing.
+        p._indicator.set_state("thinking")
+        if not completed:
+            # Either the user talked over us — everything queued behind
+            # this sentence answers a question they've moved on from — or
+            # the output device died and nothing is being heard. Both
+            # abandon the turn; the recorded cause differs, and the
+            # difference matters (see _abandon_playback).
+            await p._abandon_playback(self._player.device_lost)
+            return False
+        return True
+
+    async def escalation(self) -> bool:
+        # The model just handed the question to deep-thought — from here
+        # the room goes quiet for as long as the deep pass takes. If
+        # nothing has been spoken yet this turn, name what is happening;
+        # if the model already announced it in its own words, don't say
+        # it twice.
+        p = self._p
+        if self._first_spoken is None:
+            line = "Give me a moment. I want to think this through properly."
+            print(f"  ciel: {line}")
+            p._record("ciel", line)
+            p._indicator.set_state("speaking")
+            if not await self._play(line):
+                # Barging in on the announcement means the deep pass must
+                # die too — otherwise the subagent runs on for a minute
+                # and then answers a question the user already abandoned.
+                return False
+        p._indicator.set_state("thinking")
+        return True
+
+    async def thinking(self, sentence: str) -> bool:
+        # Whether reasoning is *spoken* is the speak_thinking choice.
+        # Show-only reasoning keeps the indicator on "thinking" —
+        # "reasoning" means the voice is doing it aloud, and lying about
+        # that costs the pill its meaning.
+        spoken = self._p._config.brain.speak_thinking
+        self._p._indicator.set_state("reasoning" if spoken else "thinking")
+        self._prev_kind = "thinking"
+        if not spoken:
+            return True
+        return await self._play(sentence)
+
+    async def reply(self, sentence: str) -> bool:
+        p = self._p
+        if self._prev_kind == "thinking" and p._config.brain.thinking_chime:
+            # The audible boundary: reasoning is over, what follows is
+            # the answer. When the reasoning was show-only this tone is
+            # doing its best work — the deliberation was silent, and this
+            # is what says the silence is about to end on purpose.
+            await self._ack_done()
+            await p._play_chime(self._player)
+        p._indicator.set_state("speaking")
+        self._prev_kind = "reply"
+        return await self._play(sentence)
+
+    async def finish(self, started: float) -> None:
+        if self._first_spoken is None:
+            return
+        # Reconnect is called out separately because it dominates when it
+        # happens at all: a client killed by a laptop sleeping overnight
+        # is rebuilt lazily on the next turn, and that cost lands inside
+        # "to first speech" where it reads as a slow model. Split, a long
+        # turn names its own cause.
+        reconnect = self._p._brain.last_reconnect_s
+        log.info(
+            "turn: %.2fs to first speech (%.2fs reconnect, %.2fs model), "
+            "%.2fs total, $%.4f",
+            self._first_spoken,
+            reconnect,
+            max(0.0, self._first_spoken - reconnect),
+            time.monotonic() - started,
+            self._p._brain.last_turn_cost_usd,
+        )
+
+    async def play_reply(self, reply: str) -> None:
+        """A locally-handled command's spoken reply. ``_spoke`` is set
+        unconditionally, exactly as brain sentences do: an interrupted
+        reply must still open the follow-up window so the user's barge-in
+        ("...and a five minute one too") is heard without re-waking."""
+        await self._player.play(self._p._tts.stream(reply))
+        self._p._spoke = True
+
+    async def cleanup(self) -> None:
+        # A brain that yields nothing (or raises) must not leave the
+        # filler task dangling into the next turn.
+        await self._ack_done()
 
 
 class IdleSchedule:
@@ -1125,18 +1310,10 @@ class Pipeline:
                 self._pending_text = None
             assert text is not None
 
-            # Mechanical requests skip the brain entirely: no model latency,
-            # no cost, no session traffic. The grammar only fires on whole
-            # utterances it is certain about; everything else takes the
-            # normal path, so a missed match costs nothing new.
-            cmd = match_command(text) if self._config.commands.enabled else None
-            if cmd is not None and (
-                cmd.kind in ("reload", "dismiss") or self._timers is not None
-            ):
-                await self._run_local_command(cmd, text, player)
-                return
-
-            await self._respond(text, player, mic)
+            await self._run_turn(
+                TurnRequest(lane="voice", text=text, arrival_wall=time.time()),
+                _VoiceSink(self, player),
+            )
         except Exception:
             self._pending_text = None
             log.exception("turn failed")
@@ -1189,70 +1366,10 @@ class Pipeline:
         question (the broker owns that choreography), but a typed yes or no
         answers it just as well.
         """
-        self._indicator.set_state("thinking")
-        self._spoke = False
-        try:
-            print(f"\n  you (typed): {text}")
-            self._record("user", text)
-
-            # Same brain bypass as the spoken path; the reply goes to the
-            # console because typing is a request for quiet.
-            cmd = match_command(text) if self._config.commands.enabled else None
-            if cmd is not None and (
-                cmd.kind in ("reload", "dismiss") or self._timers is not None
-            ):
-                if cmd.kind != "dismiss":
-                    self._conversed = True
-                log.info("local command (typed): %s", cmd.kind)
-                reply = self._apply_local_command(cmd)
-                if reply is not None:
-                    print(f"  ciel: {reply}")
-                    self._record("ciel", reply)
-                return
-
-            started = time.monotonic()
-            # Held Vigil notes, after the local-command bypass — a "cancel
-            # the timer" line shouldn't consume notes no model will see.
-            text = self._with_held_notes(text)
-            # Same aclosing obligation as _respond: ask() holds the brain's
-            # turn lock, and an abandoned generator would deadlock the next
-            # turn behind it.
-            async with aclosing(self._brain.ask(text)) as stream:
-                async for kind, sentence in stream:
-                    if kind == "escalation":
-                        print("  [deep thought engaged]")
-                        self._record("event", "deep thought engaged")
-                        continue
-                    if kind == "thinking":
-                        print(f"  ciel (thinking): {sentence}")
-                        self._record("ciel-thinking", sentence)
-                    else:
-                        print(f"  ciel: {sentence}")
-                        self._record("ciel", sentence)
-                    # Typed exchanges are conversations too: Closure owes
-                    # them the same reflection, rotation the same fresh
-                    # session afterwards.
-                    self._conversed = True
-                    self._brain_conversed = True
-            log.info(
-                "typed turn: %.2fs total, $%.4f",
-                time.monotonic() - started,
-                self._brain.last_turn_cost_usd,
-            )
-        except Exception:
-            log.exception("typed turn failed")
-            self._indicator.set_state("error")
-            self._record("event", "typed turn failed")
-            print("  (something went wrong there — see the log)", flush=True)
-        finally:
-            # Same anchoring as the spoken path: a typed turn has no audio to
-            # wait for, so its timers start as the turn's text lands. Guarded
-            # for the same reason — a failed persist must not crash the loop.
-            if self._timers is not None:
-                try:
-                    self._timers.commit_pending()
-                except Exception:  # noqa: BLE001 - a failed commit must not crash the loop
-                    log.exception("could not start a pending timer")
+        await self._run_turn(
+            TurnRequest(lane="typed", text=text, arrival_wall=time.time()),
+            _TextSink(self),
+        )
 
     async def _handle_remote_turn(self, text: str, channel=None) -> None:
         """One turn that arrived over the Discord link (Parallel Transport).
@@ -1276,113 +1393,21 @@ class Pipeline:
         they are the owner's private catch-up, not channel content.
         """
         assert self._remote_link is not None
-        public = getattr(channel, "guild", None) is not None
-        origin = (
-            f"discord #{getattr(channel, 'name', '?')}" if public else "discord"
-        )
 
         async def send_here(reply_text: str) -> None:
             assert self._remote_link is not None
             await self._remote_link.send(reply_text, channel)
 
-        self._indicator.set_state("thinking")
-        self._spoke = False
-        try:
-            print(f"\n  you ({origin}): {text}")
-            self._record("user-remote", text)
-
-            # Same brain bypass as the other lanes. The reply is texted;
-            # "reload" earns an acknowledgement because its usual answer —
-            # the spoken "Reloading." — happens in a room the user isn't in.
-            cmd = match_command(text) if self._config.commands.enabled else None
-            if cmd is not None and (
-                cmd.kind in ("reload", "dismiss") or self._timers is not None
-            ):
-                if cmd.kind != "dismiss":
-                    self._conversed = True
-                log.info("local command (remote): %s", cmd.kind)
-                reply = self._apply_local_command(cmd)
-                if reply is None and cmd.kind == "reload":
-                    reply = "Reloading."
-                if reply is not None:
-                    print(f"  ciel: {reply}")
-                    self._record("ciel", reply)
-                    await send_here(reply)
-                return
-
-            started = time.monotonic()
-            # Held Vigil notes ride along exactly as they do at home — a
-            # text from away is still the user starting a conversation,
-            # and the notes were held precisely to reach them. But only
-            # into a DM: notes are the owner's private catch-up, and a
-            # public channel must never be where "your 2pm moved" lands.
-            if public:
-                prompt = _REMOTE_PUBLIC_NOTE + text
-            else:
-                prompt = _REMOTE_NOTE + self._with_held_notes(text)
-            sentences: list[str] = []
-            with self._confirm.remote(send_here, origin="discord"):
-                async with self._remote_link.typing(channel):
-                    # Same aclosing obligation as every consumer: ask()
-                    # holds the brain's turn lock.
-                    async with aclosing(self._brain.ask(prompt)) as stream:
-                        async for kind, sentence in stream:
-                            if kind == "escalation":
-                                print("  [deep thought engaged]")
-                                self._record("event", "deep thought engaged")
-                                try:
-                                    # Cover the coming silence — a typing
-                                    # indicator alone reads as a hang after
-                                    # the first thirty seconds.
-                                    await send_here(
-                                        "Give me a moment — I want to think "
-                                        "this through properly."
-                                    )
-                                except RemoteUnavailable:
-                                    log.debug("could not text the escalation notice")
-                                continue
-                            if kind == "thinking":
-                                print(f"  ciel (thinking): {sentence}")
-                                self._record("ciel-thinking", sentence)
-                            else:
-                                print(f"  ciel: {sentence}")
-                                self._record("ciel", sentence)
-                                sentences.append(sentence)
-                            self._conversed = True
-                            self._brain_conversed = True
-            reply = " ".join(sentences).strip()
-            if reply:
-                await send_here(reply)
-            log.info(
-                "remote turn (%s): %.2fs total, $%.4f",
-                origin,
-                time.monotonic() - started,
-                self._brain.last_turn_cost_usd,
-            )
-        except RemoteUnavailable as exc:
-            # The turn ran; only delivery failed. Logged, not retried — the
-            # link reconnects on its own, and the user will ask again the
-            # moment they notice silence. The transcript already holds the
-            # undelivered reply.
-            log.warning("remote reply undeliverable (%s)", exc)
-            self._record("event", "remote reply undeliverable")
-        except Exception:
-            log.exception("remote turn failed")
-            self._indicator.set_state("error")
-            self._record("event", "remote turn failed")
-            try:
-                await send_here("Sorry — something went wrong with that one.")
-            except Exception:  # noqa: BLE001 - best-effort, like the spoken apology
-                log.debug("could not text the failure notice", exc_info=True)
-        finally:
-            # Same anchoring as the typed path: no audio to wait for, so a
-            # timer armed this turn starts as the turn ends. Guarded for
-            # the same reason — a failed persist must not crash the loop.
-            if self._timers is not None:
-                try:
-                    self._timers.commit_pending()
-                except Exception:  # noqa: BLE001 - a failed commit must not crash the loop
-                    log.exception("could not start a pending timer")
+        await self._run_turn(
+            TurnRequest(
+                lane="discord",
+                text=text,
+                channel=channel,
+                public=getattr(channel, "guild", None) is not None,
+                arrival_wall=time.time(),
+            ),
+            _DiscordSink(self, send_here),
+        )
 
     async def _handle_web_turn(self, text: str) -> None:
         """One turn that arrived through the GUI (Chart).
@@ -1401,74 +1426,186 @@ class Pipeline:
         message is already a turn; there is no wake word to waive.
         """
         assert self._web_link is not None
+        await self._run_turn(
+            TurnRequest(lane="web", text=text, arrival_wall=time.time()),
+            _TextSink(self, confirm_send=self._web_link.send),
+        )
+
+    async def _run_turn(self, req: TurnRequest, sink: TurnSink) -> None:
+        """One user turn, whatever lane it rode in on — the single copy of
+        the skeleton the four lanes used to hand-wire separately.
+
+        The shape: record the user's raw words, try the local-command
+        bypass, glue the lane's system note and the held Vigil notes onto
+        the prompt (prefix, not transcript — the record never lies about
+        what was said), stream the brain through the lane's sink, then
+        let the sink deliver whatever it buffered. The sink is the
+        delivery half (audio, one text, or nothing because the transcript
+        tap already feeds the page); everything here is lane-independent,
+        which is what lets the hub drive this same method with a sink
+        that writes wire frames.
+
+        Voice-lane exceptions re-raise to ``_handle_turn``, whose guard
+        also covers the STT prelude and owns the spoken apology; text
+        lanes handle their own here, shaped per lane.
+        """
+        spec = lane_spec(req)
         self._indicator.set_state("thinking")
+        # A turn that never actually speaks must not open a follow-up
+        # window; the voice sink sets it back the moment audio plays.
         self._spoke = False
         try:
-            print(f"\n  you (web): {text}")
-            self._record("user-web", text)
+            print(f"\n  {spec.console_tag}: {req.text}")
+            self._record(spec.label, req.text)
 
-            # Same brain bypass as the other lanes. "reload" earns an
-            # acknowledgement for the Discord lane's reason at shorter
-            # range: the spoken "Reloading." goes through speakers that
-            # may well be muted, and the page deserves to say why Ciel
-            # just went quiet for a few seconds.
-            cmd = match_command(text) if self._config.commands.enabled else None
+            # Mechanical requests skip the brain entirely: no model
+            # latency, no cost, no session traffic. The grammar only fires
+            # on whole utterances it is certain about; everything else
+            # takes the normal path, so a missed match costs nothing new.
+            cmd = match_command(req.text) if self._config.commands.enabled else None
             if cmd is not None and (
                 cmd.kind in ("reload", "dismiss") or self._timers is not None
             ):
-                if cmd.kind != "dismiss":
-                    self._conversed = True
-                log.info("local command (web): %s", cmd.kind)
-                reply = self._apply_local_command(cmd)
-                if reply is None and cmd.kind == "reload":
-                    reply = "Reloading."
-                if reply is not None:
-                    print(f"  ciel: {reply}")
-                    self._record("ciel", reply)
+                await self._run_lane_command(cmd, req, spec, sink)
                 return
 
             started = time.monotonic()
-            # Held Vigil notes ride along as they do for the typed lane —
-            # the chart is the owner's eyes, so private catch-up belongs.
-            note = _WEB_MUTED_NOTE if self._muted else _WEB_NOTE
-            prompt = note + self._with_held_notes(text)
-            with self._confirm.remote(self._web_link.send, origin="web"):
-                # Same aclosing obligation as every consumer: ask() holds
-                # the brain's turn lock.
-                async with aclosing(self._brain.ask(prompt)) as stream:
-                    async for kind, sentence in stream:
-                        if kind == "escalation":
-                            print("  [deep thought engaged]")
-                            self._record("event", "deep thought engaged")
-                            continue
-                        if kind == "thinking":
-                            print(f"  ciel (thinking): {sentence}")
-                            self._record("ciel-thinking", sentence)
-                        else:
-                            print(f"  ciel: {sentence}")
-                            self._record("ciel", sentence)
-                        self._conversed = True
-                        self._brain_conversed = True
-            log.info(
-                "web turn: %.2fs total, $%.4f",
-                time.monotonic() - started,
-                self._brain.last_turn_cost_usd,
+            # Held Vigil notes, after the local-command bypass — a "cancel
+            # the timer" line shouldn't consume notes no model will see —
+            # and never into a public channel: notes are the owner's
+            # private catch-up, not channel content.
+            note = prompt_note(req, muted=self._muted)
+            prompt = note + (
+                self._with_held_notes(req.text) if spec.held_notes else req.text
             )
+            await sink.begin(started)
+            async with AsyncExitStack() as stack:
+                if spec.confirm_origin is not None:
+                    # Confirmations route over the lane: the person who
+                    # must say yes is wherever their reply lands.
+                    stack.enter_context(
+                        self._confirm.remote(
+                            sink.confirm_send, origin=spec.confirm_origin
+                        )
+                    )
+                if req.lane == "discord":
+                    assert self._remote_link is not None
+                    await stack.enter_async_context(
+                        self._remote_link.typing(req.channel)
+                    )
+                # aclosing is load-bearing, not tidiness: ask() holds the
+                # brain's turn lock, and a break below abandons the
+                # generator — without an explicit close, the lock stays
+                # held until garbage collection, and the next turn (or a
+                # reflection) deadlocks behind it.
+                stream = await stack.enter_async_context(
+                    aclosing(self._brain.ask(prompt))
+                )
+                async for kind, sentence in stream:
+                    if not sink.gate():
+                        break
+                    if kind == "escalation":
+                        print("  [deep thought engaged]")
+                        self._record("event", "deep thought engaged")
+                        if not await sink.escalation():
+                            break
+                        continue
+                    if kind == "thinking":
+                        print(f"  ciel (thinking): {sentence}")
+                        self._record("ciel-thinking", sentence)
+                        if not await sink.thinking(sentence):
+                            break
+                    else:
+                        print(f"  ciel: {sentence}")
+                        self._record("ciel", sentence)
+                        if not await sink.reply(sentence):
+                            break
+            await sink.finish(started)
+            if spec.log_name == "remote":
+                log.info(
+                    "remote turn (%s): %.2fs total, $%.4f",
+                    spec.origin,
+                    time.monotonic() - started,
+                    self._brain.last_turn_cost_usd,
+                )
+            elif spec.log_name is not None:
+                log.info(
+                    "%s turn: %.2fs total, $%.4f",
+                    spec.log_name,
+                    time.monotonic() - started,
+                    self._brain.last_turn_cost_usd,
+                )
+        except RemoteUnavailable as exc:
+            if req.lane != "discord":
+                raise
+            # The turn ran; only delivery failed. Logged, not retried — the
+            # link reconnects on its own, and the user will ask again the
+            # moment they notice silence. The transcript already holds the
+            # undelivered reply.
+            log.warning("remote reply undeliverable (%s)", exc)
+            self._record("event", "remote reply undeliverable")
         except Exception:
-            log.exception("web turn failed")
+            if req.lane == "voice":
+                raise
+            log.exception("%s turn failed", spec.log_name)
             self._indicator.set_state("error")
-            # An event row, so the page itself shows what happened — the
-            # web lane's version of the spoken apology.
-            self._record("event", "web turn failed — see the log")
+            if req.lane == "typed":
+                self._record("event", "typed turn failed")
+                print("  (something went wrong there — see the log)", flush=True)
+            elif req.lane == "web":
+                # An event row, so the page itself shows what happened —
+                # the web lane's version of the spoken apology.
+                self._record("event", "web turn failed — see the log")
+            else:
+                self._record("event", "remote turn failed")
+                try:
+                    await sink.confirm_send(
+                        "Sorry — something went wrong with that one."
+                    )
+                except Exception:  # noqa: BLE001 - best-effort, like the spoken apology
+                    log.debug("could not text the failure notice", exc_info=True)
         finally:
-            # Same anchoring as the typed path: no audio to wait for, so a
-            # timer armed this turn starts as the turn ends. Guarded for
-            # the same reason — a failed persist must not crash the loop.
+            # Release the sink first (the voice lane's ack filler), then
+            # anchor timers: a timer armed during this turn starts counting
+            # as the turn's delivery ends, so the "starting now" the user
+            # just heard is when the count actually starts. Guarded — a
+            # failed persist must not crash the loop.
+            await sink.cleanup()
             if self._timers is not None:
                 try:
                     self._timers.commit_pending()
                 except Exception:  # noqa: BLE001 - a failed commit must not crash the loop
                     log.exception("could not start a pending timer")
+
+    async def _run_lane_command(
+        self, cmd: Command, req: TurnRequest, spec, sink: TurnSink
+    ) -> None:
+        """The local-command bypass, shaped per lane at the edges only:
+        where the reply lands, and whether a quiet "reload" earns an
+        acknowledgement — its usual answer, the spoken "Reloading.",
+        happens in a room the user may not be in or hearing."""
+        if cmd.kind != "dismiss":
+            # A dismissal alone is not a conversation: an accidental wake
+            # ended with "never mind" should not arm reflection and
+            # rotation over an exchange with nothing in it.
+            self._conversed = True
+        if req.lane == "voice":
+            log.info("local command: %s", cmd.kind)
+        else:
+            log.info("local command (%s): %s", spec.log_name, cmd.kind)
+        reply = self._apply_local_command(cmd)
+        if reply is None and cmd.kind == "reload" and spec.reload_ack is not None:
+            reply = spec.reload_ack
+        if reply is None:
+            return  # reload and dismiss stay quiet on purpose
+        print(f"  ciel: {reply}")
+        self._record("ciel", reply)
+        if req.lane == "voice":
+            self._indicator.set_state("speaking")
+            assert isinstance(sink, _VoiceSink)
+            await sink.play_reply(reply)
+        elif req.lane == "discord":
+            await sink.confirm_send(reply)
 
     def _active_agents(self) -> list[dict]:
         """The roster of everything working on the user's behalf right now,
@@ -1612,8 +1749,9 @@ class Pipeline:
     async def _run_local_command(
         self, cmd: Command, text: str, player: Player
     ) -> None:
-        """Speak a locally-handled turn — same console and transcript shape
-        as ``_respond``, just with nothing to wait for."""
+        """Speak a locally-handled turn — the pre-merge dismissal's path:
+        same console and transcript shape as ``_run_turn``, just with
+        nothing to wait for."""
         print(f"\n  you: {text}")
         self._record("user", text)
         if cmd.kind != "dismiss":
@@ -1628,7 +1766,7 @@ class Pipeline:
         print(f"  ciel: {reply}")
         self._record("ciel", reply)
         self._indicator.set_state("speaking")
-        # _spoke is set unconditionally, exactly as _respond_stream does: an
+        # _spoke is set unconditionally, exactly as the voice sink does: an
         # interrupted reply must still open the follow-up window so the user's
         # barge-in ("...and a five minute one too") is heard without re-waking.
         # Setting it to the play's completion instead would drop that speech
@@ -1691,180 +1829,6 @@ class Pipeline:
                 parts.append(f"your {spoken_duration(t.duration_s)} timer with {left} left")
         listing = "; ".join(parts)
         return f"{listing[0].upper()}{listing[1:]}."
-
-    async def _respond(self, text: str, player: Player, mic: MicStream) -> None:
-        print(f"\n  you: {text}")
-        self._record("user", text)
-        # Held Vigil notes ride into the model's view of this turn; the
-        # print and record above stay the user's raw words.
-        text = self._with_held_notes(text)
-        started = time.monotonic()
-        self._interrupted = False
-
-        # The audible "I heard you": a short filler spoken if the brain is
-        # still silent after a grace window. Launched as a task so it overlaps
-        # the model's latency instead of adding to it; every later play awaits
-        # it first so two voices never overlap. A first sentence that beats
-        # the window cancels the filler unspoken — "Let me think about that."
-        # chased instantly by the answer is theater, and it would delay the
-        # real reply behind its own playback. Deliberately does not set
-        # _spoke — a filler alone must not open a follow-up window.
-        ack_task: asyncio.Task[None] | None = None
-        ack_speaking = False
-        if self._config.brain.ack_phrases:
-
-            async def _ack_filler() -> None:
-                nonlocal ack_speaking
-                await asyncio.sleep(self._config.brain.ack_delay_s)
-                ack_speaking = True
-                await player.play(
-                    self._tts.stream(random.choice(self._config.brain.ack_phrases))
-                )
-
-            ack_task = asyncio.create_task(_ack_filler())
-
-        async def ack_done() -> None:
-            nonlocal ack_task
-            if ack_task is None:
-                return
-            if not ack_speaking:
-                # Still inside the grace window (or between sleep and speech,
-                # which is the same thing: nothing audible yet) — skip it.
-                ack_task.cancel()
-            task, ack_task = ack_task, None
-            try:
-                await task
-            except asyncio.CancelledError:
-                if not task.cancelled():
-                    # The cancellation was aimed at *us*, not the filler —
-                    # swallowing it here would eat the turn's own teardown.
-                    raise
-            except Exception:  # noqa: BLE001 — a lost filler costs nothing
-                log.debug("ack playback failed", exc_info=True)
-
-        try:
-            await self._respond_stream(text, player, started, ack_done)
-        finally:
-            # A brain that yields nothing (or raises) must not leave the
-            # filler task dangling into the next turn.
-            await ack_done()
-
-    async def _respond_stream(
-        self,
-        text: str,
-        player: Player,
-        started: float,
-        ack_done: Callable[[], Awaitable[None]],
-    ) -> None:
-        """The streaming body of a brain turn — split out so ``_respond``
-        can guarantee the heard-ack task is awaited on every exit path."""
-        first_spoken: float | None = None
-        prev_kind: str | None = None
-        # aclosing is load-bearing, not tidiness: ask() holds the brain's
-        # turn lock, and a `break` below abandons the generator — without an
-        # explicit close, the lock stays held until garbage collection, and
-        # the next turn (or a reflection) deadlocks behind it.
-        async with aclosing(self._brain.ask(text)) as stream:
-            async for kind, sentence in stream:
-                if self._interrupted:
-                    break
-
-                if kind == "escalation":
-                    # The model just handed the question to deep-thought —
-                    # from here the room goes quiet for as long as the deep
-                    # pass takes. If nothing has been spoken yet this turn,
-                    # name what is happening; if the model already announced
-                    # it in its own words, don't say it twice.
-                    print("  [deep thought engaged]")
-                    self._record("event", "deep thought engaged")
-                    if first_spoken is None:
-                        line = "Give me a moment. I want to think this through properly."
-                        print(f"  ciel: {line}")
-                        self._record("ciel", line)
-                        await ack_done()
-                        self._indicator.set_state("speaking")
-                        first_spoken = time.monotonic() - started
-                        completed = await player.play(self._tts.stream(line))
-                        self._spoke = True
-                        self._conversed = True
-                        self._brain_conversed = True
-                        if not completed:
-                            # Barging in on the announcement means the deep
-                            # pass must die too — otherwise the subagent runs
-                            # on for a minute and then answers a question the
-                            # user already abandoned. A lost output device
-                            # abandons it the same way, but says so honestly.
-                            await self._abandon_playback(player.device_lost)
-                            break
-                    self._indicator.set_state("thinking")
-                    continue
-
-                # Thinking is always shown once the brain yields it (the
-                # console is the record); whether it is also *spoken* is the
-                # speak_thinking choice. Show-only reasoning keeps the
-                # indicator on "thinking" — "reasoning" means the voice is
-                # doing it aloud, and lying about that costs the pill its
-                # meaning.
-                spoken = kind != "thinking" or self._config.brain.speak_thinking
-                if kind == "thinking":
-                    print(f"  ciel (thinking): {sentence}")
-                    self._record("ciel-thinking", sentence)
-                    self._indicator.set_state(
-                        "reasoning" if spoken else "thinking"
-                    )
-                else:
-                    if prev_kind == "thinking" and self._config.brain.thinking_chime:
-                        # The audible boundary: reasoning is over, what
-                        # follows is the answer. When the reasoning was
-                        # show-only this tone is doing its best work — the
-                        # deliberation was silent, and this is what says the
-                        # silence is about to end on purpose.
-                        await ack_done()
-                        await self._play_chime(player)
-                    print(f"  ciel: {sentence}")
-                    self._record("ciel", sentence)
-                    self._indicator.set_state("speaking")
-                prev_kind = kind
-
-                if not spoken:
-                    continue
-                await ack_done()
-                if first_spoken is None:
-                    first_spoken = time.monotonic() - started
-                completed = await player.play(self._tts.stream(sentence))
-                self._spoke = True
-                self._conversed = True
-                self._brain_conversed = True
-                # Back to "thinking" between sentences: the model is still
-                # generating, and leaving it on "speaking" during the gap would
-                # misreport what Ciel is actually doing.
-                self._indicator.set_state("thinking")
-
-                if not completed:
-                    # Either the user talked over us — everything queued
-                    # behind this sentence answers a question they've moved
-                    # on from — or the output device died and nothing is
-                    # being heard. Both abandon the turn; the recorded cause
-                    # differs, and the difference matters (see the helper).
-                    await self._abandon_playback(player.device_lost)
-                    break
-
-        if first_spoken is not None:
-            # Reconnect is called out separately because it dominates when it
-            # happens at all: a client killed by a laptop sleeping overnight
-            # is rebuilt lazily on the next turn, and that cost lands inside
-            # "to first speech" where it reads as a slow model. Split, a long
-            # turn names its own cause.
-            reconnect = self._brain.last_reconnect_s
-            log.info(
-                "turn: %.2fs to first speech (%.2fs reconnect, %.2fs model), "
-                "%.2fs total, $%.4f",
-                first_spoken,
-                reconnect,
-                max(0.0, first_spoken - reconnect),
-                time.monotonic() - started,
-                self._brain.last_turn_cost_usd,
-            )
 
     # ── the proactive turn (Vigil) ───────────────────────────────────────────
 
