@@ -546,7 +546,7 @@ class Pipeline:
         # change is teed into it. Created before the indicator so the tee
         # below can include it.
         self._web_link: WebLink | None = (
-            WebLink(config.web) if config.web.enabled else None
+            WebLink(config.web, config.hub) if config.web.enabled else None
         )
         if self._web_link is not None:
             self._web_link.on_mute = self._set_muted
@@ -2645,9 +2645,7 @@ class Pipeline:
             print("\nReady. Just talk.")
         # hotkey prints its own prompt via reset()/start()
         if self._web_link is not None and self._web_link.serving:
-            print(
-                f"GUI: http://{self._config.web.host}:{self._config.web.port}"
-            )
+            print(f"GUI: {self._web_link.url}")
         if self._muted:
             # A silenced greeting must not read as a broken speaker.
             print("  [muted — Ciel will stay silent and not listen for its name]")

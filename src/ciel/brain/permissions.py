@@ -91,6 +91,9 @@ FORBIDDEN_NAMES = frozenset({
     # The Oura authorization — client secret and a refresh token, same
     # arrangement: its own file so this list can name it.
     "oura.json",
+    # The hub token — the wire's shared secret; its own file for the same
+    # reason.
+    "hub.token",
     # Agent and CLI state. `.claude` is not just settings — it holds session
     # transcripts and history from every coding session, which is a broader
     # disclosure than any single credential file.

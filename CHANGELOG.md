@@ -2,6 +2,67 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-02 — the wire gets a catalog; the Chart reaches the tailnet (phase 1)
+
+**Why.** Phase 1 of the hub-and-spoke move: grow the hub server in
+place, one process still on the Mac, so the protocol every future
+client speaks — the browser Chart today, the Mac spoke and a phone
+later — is written down and enforced before anything is split. The
+win that needs no VPS: the Chart from a phone over Tailscale, with a
+door that asks for a token and a reconnect that doesn't blank the
+screen.
+
+**What.**
+
+- *The catalog* (`wire.py`, codename Meridian): every frame type in
+  each direction — the Chart's existing frames plus the ones the later
+  phases need (`turn.*`, `confirm.request`/`answer`, `tool.request`/
+  `result`/`cancel`, `event.publish`, `presence`, `deliver.*`,
+  `timers.sync`) — with required and optional fields, a codec that
+  refuses what it doesn't name (unknown types, missing fields, a
+  bool where an int belongs) and passes unknown extra fields (a newer
+  peer), versioned by `WIRE_VERSION` in both hellos.
+- *The client speaks first* (`remote/web.py`): the hello now comes
+  from the client — `role`, `token`, `client_id`, `caps`, and a resume
+  claim — and the server answers with its own. `admit` is the whole
+  auth policy as one pure function: a loopback peer is trusted by
+  reach as before (its first frame need not even be a hello — an
+  older page keeps working), every other peer must carry the hub
+  token, compared constant-time, with an `error` frame naming the
+  close code (4401, 4400, 4408) before the socket closes.
+- *Seq and resume*: every broadcast frame carries a `seq` under a
+  per-process `epoch`; a `ReplayRing` remembers the last
+  `resume_frames` of them. A reconnecting client's claim, when the
+  epoch matches and the ring still holds its seq, is answered with
+  `resumed: true` and exactly the frames it missed — no history
+  window, no blanked screen. Any other claim gets the fresh hello it
+  always got. A confirm older than `resume_grace_s` is not replayed
+  (the Discord catch-up rule: the broker has timed it out).
+- *`[hub]` config*: `bind` (the tailnet address), `token` /
+  `token_file` — minted owner-only at first start when the bind is
+  not loopback, and named in `FORBIDDEN_NAMES` — `origins` for a
+  MagicDNS name, `hello_timeout_s`, and the ring's size and grace.
+  The Origin gate accepts loopback, the bind address, and the listed
+  names — never the request's own Host header, which a DNS-rebinding
+  page would satisfy.
+- *The page* (`chart.html`): sends the hello with its remembered
+  token and resume claim, tracks the epoch and last seq in
+  sessionStorage beside the ack ledger, keeps its rows on a resumed
+  hello, and on a 4401 close shows a token form instead of a retry
+  loop. `wss://` when served over TLS, for `tailscale serve` later.
+
+**Probes.** `probe_wire.py`, 69 checks: the codec round-trips every
+catalog type and refuses each malformation; the ring's stamp and every
+resume outcome; `admit` across every peer-and-frame combination; the
+Origin gate off loopback; the welcome with planted queues; and a real
+aiohttp socket on loopback — the 4401 refusal with its error frame,
+4400 for a say before hello, 4408 after a silent hello timeout, a
+resume that replays exactly the frames a dropped socket missed, an old
+page's first say kept, a foreign Origin refused at the upgrade.
+`probe_web.py` stays at 35 (one expectation grew a seq). Live smoke
+from a phone over the tailnet is still owed — Tailscale is not yet
+installed on this machine.
+
 ## 2026-09-02 — the section watcher keeps its own cookie warm
 
 **Why.** The section watcher's one soft spot was its login: the site

@@ -462,7 +462,32 @@ before widening `host`; there is no account id here to gate on.
 **A native app later** is already provided for: the page speaks a small
 JSON protocol over one WebSocket, documented at the top of
 `src/ciel/remote/web.py` — a SwiftUI client connects to the same `/ws`
-and the server never knows the difference.
+and the server never knows the difference. The frame catalog itself —
+every type in each direction, the codec, and the resume rules — lives
+in `src/ciel/wire.py`.
+
+**From the phone, over Tailscale.** The socket can listen on the
+machine's tailnet address instead of loopback, so a phone on the same
+Tailscale network opens the Chart from anywhere — and nowhere else, since
+the address is not routable from the internet:
+
+```toml
+[hub]
+bind = "100.101.102.103"   # this machine's Tailscale address: `tailscale ip -4`
+# origins = ["ciel-hub.tail1234.ts.net"]   # only if you open the page by MagicDNS name
+```
+
+Reach is no longer identity off loopback, so every non-loopback client
+must present a token. Ciel mints one at first start into
+`~/.ciel/hub.token` (owner-only, and on the model's forbidden list by
+name) and says so in the log; open `http://100.101.102.103:8765` on the
+phone, the page asks for the token once, paste it, done — it is
+remembered per browser. Loopback keeps working exactly as before, no
+token asked. A dropped connection (a Wi-Fi handoff, a phone that
+slept) picks up where it left off: the page tells the server the last
+frame it saw, and the server replays only what was missed, so the
+screen never blanks and re-fills. `scripts/probe_wire.py` drives the
+codec, the ring, the door, and a real socket on loopback.
 
 ## Watching things (Vigil)
 

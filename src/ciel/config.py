@@ -1161,6 +1161,79 @@ class WebConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class HubConfig:
+    """The hub's wire server — the Chart socket, reachable beyond loopback.
+
+    Codename Meridian (see ``wire.py``). Phase one of the hub-and-spoke
+    move: the same process, the same ``/ws``, but bindable to the
+    tailnet and gated by a token, so a phone on the Tailscale network
+    can open the Chart while the laptop's lid is open. Later phases put
+    the Mac spoke and the brain on opposite ends of this same socket."""
+
+    bind: str = ""
+    """The address the wire server listens on; empty means ``[web].host``
+    (loopback). Set it to the machine's Tailscale address (``100.x.y.z``)
+    to reach it from the tailnet and nowhere else — never a public
+    interface. ``0.0.0.0`` works but then list the names clients will
+    use in ``origins``, since the Origin gate can't infer them."""
+
+    token: str = ""
+    """The shared secret every non-loopback client must present in its
+    hello. A credential: prefer ``CIEL_HUB_TOKEN`` in the environment or
+    the file — this field exists so a one-off run can pin one. When both
+    are empty and the bind is not loopback, Ciel mints one into
+    ``token_file`` at start and logs where it went."""
+
+    token_file: Path = field(
+        default_factory=lambda: Path.home() / ".ciel" / "hub.token"
+    )
+    """Where the minted token lives — owner-only, and named in
+    ``FORBIDDEN_NAMES`` so the model's file tools and the shell gate both
+    refuse to read it. Paste its contents into the Chart once; the page
+    remembers it."""
+
+    require_token: bool = False
+    """Ask even loopback clients for the token. Off by default: reaching
+    a loopback port already means being at the machine, and the typed
+    lane trusts that. On is for the probe, and for a shared machine."""
+
+    origins: tuple[str, ...] = ()
+    """Extra Origin hosts the socket accepts, beyond loopback and the
+    bind address itself — the MagicDNS name (``ciel-hub.tail1234.ts.net``)
+    when the page is opened by name rather than by address. Exact host
+    match; the port must still be ``[web].port``."""
+
+    hello_timeout_s: float = 5.0
+    """How long a fresh socket may stay silent before the hub closes it:
+    the client speaks first now (its hello carries the token and the
+    resume claim), so a socket that never says hello is a port scan or
+    a page too old to know."""
+
+    resume_frames: int = 1024
+    """How many recent broadcast frames the hub keeps for resume. A
+    client that missed more than this gets a fresh hello with the
+    ``[web].history_lines`` window instead — the same catch-up the
+    Chart always had."""
+
+    resume_grace_s: float = 600.0
+    """How old a live confirm prompt may be and still be replayed to a
+    resuming client — the Discord catch-up rule: a ten-minute-old
+    question is still waited on; anything older has already been timed
+    out by the broker, and a replayed banner would invite an answer to
+    nothing."""
+
+    def current_token(self) -> str:
+        """The token to check against: the field, else the file, else
+        empty (which, off loopback, means mint one)."""
+        if self.token:
+            return self.token
+        try:
+            return self.token_file.read_text().strip()
+        except OSError:
+            return ""
+
+
+@dataclass(frozen=True, slots=True)
 class MCPServerConfig:
     """One external MCP server — a connector to an outside service.
 
@@ -1536,6 +1609,7 @@ class Config:
     messages: MessagesConfig = field(default_factory=MessagesConfig)
     discord: DiscordConfig = field(default_factory=DiscordConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    hub: HubConfig = field(default_factory=HubConfig)
     oura: OuraConfig = field(default_factory=OuraConfig)
     sections: SectionsConfig = field(default_factory=SectionsConfig)
     location: LocationConfig = field(default_factory=LocationConfig)
@@ -1576,6 +1650,7 @@ _SECTIONS = {
     "messages": MessagesConfig,
     "discord": DiscordConfig,
     "web": WebConfig,
+    "hub": HubConfig,
     "oura": OuraConfig,
     "sections": SectionsConfig,
     "location": LocationConfig,

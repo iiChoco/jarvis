@@ -184,8 +184,21 @@
     color: #f0dbaf;
     flex: none;
   }
-  body.disconnected #conn { display: flex; }
+  body.disconnected #conn, body.needtoken #conn { display: flex; }
   #conn .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gold); animation: br 2.2s ease-in-out infinite; flex: none; }
+  body.needtoken #conn .dot { animation: none; }
+  /* the token form: shown only when the server closed with 4401 */
+  #tokenform { display: none; align-items: center; gap: 8px; margin-left: auto; }
+  body.needtoken #tokenform { display: flex; }
+  #tokenin {
+    font: 500 12px/1.4 var(--mono); letter-spacing: .04em;
+    background: rgba(6, 18, 24, .7); color: #dfe6e6;
+    border: 1px solid rgba(232, 201, 138, .4); border-radius: 4px;
+    padding: 4px 8px; width: 220px; max-width: 45vw;
+  }
+  #tokenin:focus { outline: none; border-color: var(--gold); }
+  #tokenbtn { border: 1px solid rgba(232, 201, 138, .5); border-radius: 4px; padding: 4px 10px; color: #f0dbaf; }
+  #tokenbtn:hover { background: rgba(232, 201, 138, .12); }
 
   #mutebanner {
     display: none;
@@ -388,7 +401,12 @@
   <span id="srstatus" class="sr" aria-live="assertive"></span>
 </header>
 
-<div id="conn"><span class="dot"></span><span id="connlabel">reconnecting to Ciel</span></div>
+<div id="conn"><span class="dot"></span><span id="connlabel">reconnecting to Ciel</span>
+  <form id="tokenform" autocomplete="off">
+    <input id="tokenin" type="password" placeholder="hub token" aria-label="hub token" autocomplete="off">
+    <button id="tokenbtn" type="submit">CONNECT</button>
+  </form>
+</div>
 
 <div id="agentsbar">
   <div class="caption">working on your behalf</div>
@@ -466,6 +484,53 @@ let ws = null;
 let muted = false;
 let retryMs = 500;
 let attempts = 0;
+
+// Who this page is, and where it left off. The id names the client in
+// the server's log and outlives the tab; the resume claim — the
+// server's epoch and the last seq seen on it — lives with the ack
+// ledger in sessionStorage, because a reflexive refresh is exactly the
+// moment it matters. A claim the server can't honor (a new process, a
+// ring that moved on) costs nothing: the hello comes back fresh, with
+// the history window, which is what this page always got.
+const clientId = (() => {
+  try {
+    let id = localStorage.getItem("chartId");
+    if (!id) {
+      id = "chart-" + Math.random().toString(36).slice(2, 10);
+      localStorage.setItem("chartId", id);
+    }
+    return id;
+  } catch { return "chart"; }
+})();
+let epoch = null;
+let lastSeq = 0;
+try {
+  const r = JSON.parse(sessionStorage.getItem("resume") || "null");
+  if (r && typeof r.epoch === "string" && Number.isInteger(r.seq)) {
+    epoch = r.epoch; lastSeq = r.seq;
+  }
+} catch {}
+function saveResume() {
+  try { sessionStorage.setItem("resume", JSON.stringify({ epoch, seq: lastSeq })); } catch {}
+}
+
+// The hub token: required off loopback, remembered per origin. Asked
+// for only when the server says so (close code 4401) — a loopback page
+// never sees the form.
+function hubToken() {
+  try { return localStorage.getItem("hubToken") || ""; } catch { return ""; }
+}
+const tokenForm = document.getElementById("tokenform");
+const tokenIn = document.getElementById("tokenin");
+tokenForm.addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const t = tokenIn.value.trim();
+  if (!t) return;
+  try { localStorage.setItem("hubToken", t); } catch {}
+  tokenIn.value = "";
+  document.body.classList.remove("needtoken");
+  connect();
+});
 
 function nearBottom() {
   return logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 80;
@@ -682,7 +747,8 @@ function answer(word) {
 }
 
 function connect() {
-  ws = new WebSocket(`ws://${location.host}/ws`);
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${scheme}://${location.host}/ws`);
 
   ws.onopen = () => {
     retryMs = 500;
@@ -693,12 +759,22 @@ function connect() {
     // sent in the gap rides seq-less rather than joining a ledger the
     // hello is about to resend (the double would be manufactured here).
     acks = false;
+    // The client speaks first: who, the proof, and where it left off.
+    const hello = { type: "hello", v: 1, role: "chart", client_id: clientId, caps: ["acks", "resume"] };
+    const token = hubToken();
+    if (token) hello.token = token;
+    if (epoch !== null) hello.resume = { epoch, seq: lastSeq };
+    sendFrame(hello);
   };
 
   ws.onmessage = (ev) => {
     clearProbe(); // any inbound frame is proof of life
     let f;
     try { f = JSON.parse(ev.data); } catch { return; }
+    if (f.type !== "hello" && f.type !== "ack" && Number.isInteger(f.seq)) {
+      lastSeq = f.seq; // every broadcast frame moves the resume claim
+      saveResume();
+    }
     if (f.type === "hello") {
       // The capability handshake: the ledger, the probe, and the restart
       // chip all wait for the server to say it speaks them.
@@ -711,9 +787,19 @@ function connect() {
         unacked.clear(); // debts an ack-less server can never settle
         saveLedger();
       }
-      rows.textContent = "";               // a reconnect replays history
-      for (const r of f.history || []) addRow(r.role, r.text, r.t);
-      logEl.scrollTop = logEl.scrollHeight;
+      if (typeof f.epoch === "string") {
+        epoch = f.epoch;
+        lastSeq = Number.isInteger(f.seq) ? f.seq : 0;
+        saveResume();
+      }
+      if (!f.resumed) {
+        // A fresh picture: the history window replaces whatever was
+        // drawn. A resumed one keeps the screen — the frames this page
+        // missed follow the hello one by one, as if nothing dropped.
+        rows.textContent = "";
+        for (const r of f.history || []) addRow(r.role, r.text, r.t);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
       setState(f.state || "idle");
       setMuted(!!f.muted);
       setAgents(f.agents);
@@ -738,16 +824,24 @@ function connect() {
     }
   };
 
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
     attempts += 1;
-    connLabel.textContent = attempts > 1
-      ? "reconnecting to Ciel · attempt " + attempts
-      : "reconnecting to Ciel";
     document.body.classList.add("disconnected");
     sendBtn.disabled = true;
     clearAsk();
     clearProbe(); // a pending deadline must not shoot the next socket
     disarmRestart(); // an armed chip must not survive into the fresh process
+    if (ev && ev.code === 4401) {
+      // The server wants the hub token — this page is off loopback.
+      // No retry loop: the form reconnects when the user submits.
+      connLabel.textContent = hubToken() ? "hub token refused" : "hub token needed";
+      document.body.classList.add("needtoken");
+      tokenIn.focus();
+      return;
+    }
+    connLabel.textContent = attempts > 1
+      ? "reconnecting to Ciel · attempt " + attempts
+      : "reconnecting to Ciel";
     setTimeout(connect, retryMs);
     retryMs = Math.min(retryMs * 2, 8000);
   };

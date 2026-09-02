@@ -27,7 +27,7 @@ import sys
 import time
 from dataclasses import replace
 
-from ciel.config import WebConfig, load_config
+from ciel.config import HubConfig, WebConfig, load_config
 from ciel.remote.web import WebIndicator, WebLink, origin_allowed
 
 CHECKS: list[str] = []
@@ -238,8 +238,9 @@ def probe_agents() -> None:
         link._agents == roster and queue.qsize() == 1,
     )
     check(
-        "the frame carries type and roster",
-        json.loads(queue.get_nowait()) == {"type": "agents", "agents": roster},
+        "the frame carries type, roster, and its seq",
+        json.loads(queue.get_nowait())
+        == {"type": "agents", "agents": roster, "seq": 1},
     )
 
     link.note_agents(list(roster))
@@ -255,14 +256,19 @@ def probe_agents() -> None:
 # ── live ─────────────────────────────────────────────────────────────────────
 
 
-async def live(port: int | None = None) -> None:
+async def live(port: int | None = None, require_token: str | None = None) -> None:
     cfg = load_config()
     web_cfg = replace(cfg.web, enabled=True)
     if port is not None:
         # A running Ciel usually owns the configured port; the probe can
         # serve beside it rather than demand it.
         web_cfg = replace(web_cfg, port=port)
-    link = WebLink(web_cfg)
+    hub_cfg = replace(cfg.hub, bind="")  # loopback here, whatever the config binds
+    if require_token is not None:
+        # The door the phone sees, on loopback: the page must show the
+        # token form on 4401 and connect once the token is pasted.
+        hub_cfg = replace(hub_cfg, token=require_token, require_token=True)
+    link = WebLink(web_cfg, hub_cfg)
     muted = False
 
     def on_mute(value: bool) -> None:
@@ -284,7 +290,9 @@ async def live(port: int | None = None) -> None:
     if not link.serving:
         print("could not serve — see the warning above")
         return
-    print(f"open http://{web_cfg.host}:{web_cfg.port} — echoes until Ctrl-C")
+    print(f"open {link.url} — echoes until Ctrl-C")
+    if require_token is not None:
+        print(f"  the page will ask for the token: {require_token}")
 
     # A sample roster so the agents chip has something to count; typing
     # "deep" toggles a deep-thought entry on top of it, the way a real
@@ -355,11 +363,15 @@ def main() -> None:
         "--port", type=int, default=None,
         help="serve on this port (the configured one may belong to a running Ciel)",
     )
+    parser.add_argument(
+        "--require-token", metavar="TOKEN", default=None,
+        help="with --live: ask even loopback pages for this hub token",
+    )
     args = parser.parse_args()
 
     if args.live:
         with contextlib.suppress(KeyboardInterrupt):
-            asyncio.run(live(args.port))
+            asyncio.run(live(args.port, args.require_token))
         return
 
     probe_origin_gate()
