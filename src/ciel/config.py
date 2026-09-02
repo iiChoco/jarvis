@@ -826,6 +826,153 @@ class OuraConfig:
         the system prompt, and the watcher all make, so they agree."""
         return self.enabled and (self.authorized() or bool(self.token))
 
+
+@dataclass(frozen=True, slots=True)
+class SectionsConfig:
+    """Watching the course section-signup site for an open spot
+    (``sections.py``, watcher in ``proactive/sections.py``).
+
+    Berkeley's *sections* app (sections.datastructur.es for CS 61B) fills
+    sections first-come-first-served, and a dropped spot is gone in
+    minutes. This watcher polls the site's ``refresh_state`` API and,
+    when a watched section stops being full, files an importance-3 event
+    — spoken immediately if you're around, texted if you're away and the
+    messaging outlet is armed. Read-only: it never joins a section.
+
+    The site only shows sections to a signed-in browser, and its Canvas
+    OAuth can't be automated, so setup is: sign in once in a browser,
+    copy the ``Cookie`` request header from any ``/api/`` call in
+    DevTools' Network tab into ``cookie`` here, then run
+    ``uv run scripts/probe_sections.py --live`` to list section ids and
+    pick the ones for ``watch``. When the cookie eventually expires, the
+    watcher's health streak files a note saying so."""
+
+    enabled: bool = False
+    """Off by default, like every watcher that earns unprompted speech."""
+
+    url: str = "https://sections.datastructur.es"
+    """The deployment to watch — other courses run the same app under
+    other names."""
+
+    cookie: str = ""
+    """The browser's ``Cookie`` header for the site, as a *seed*. A session
+    credential: anyone holding it is signed in as you there, so prefer
+    ``CIEL_SECTIONS_COOKIE`` in the launch environment if you'd rather it
+    not live in the config file. Whenever ``cookie_file`` holds a value it
+    wins over this — the refresh job (below) writes there, and the site's
+    session slides its own two-hour expiry forward on every poll, so a
+    continuously-running watcher never needs this touched again."""
+
+    cookie_file: Path = field(
+        default_factory=lambda: Path.home() / ".ciel" / "sections-cookie"
+    )
+    """Where the live cookie lives once the refresh job is set up — the
+    same owner-only-file pattern as the Oura tokens. The site's session
+    dies only after two hours with no request, i.e. an overnight sleep;
+    ``scripts/refresh_sections_cookie.py`` re-mints it through a browser
+    profile that still holds a bCourses login and writes it here, and the
+    watcher reads it fresh on every scan, so a refresh in that other
+    process is picked up on the next poll with no reload."""
+
+    watch: tuple[str, ...] = ()
+    """Section ids worth interrupting for, as the probe's listing prints
+    them (``watch = ["12", "31"]``). Empty watches nothing — this filter
+    is the consent, and "any section anywhere" is a notification storm,
+    not a wish."""
+
+    poll_s: float = 30.0
+    """How often the site is asked. Spots race by in minutes, so the
+    default leans quick; one small JSON read per poll keeps that
+    neighborly."""
+
+    auto_refresh: bool = False
+    """When on, a signed-out scan spawns ``refresh_cmd`` once (then waits
+    out ``refresh_cooldown_s`` before trying again) instead of only filing
+    the re-login note — self-healing the midday case where the machine was
+    off past the two-hour window. The scheduled launchd job covers the
+    ordinary overnight death; this covers the rest. Off until the refresh
+    job is actually set up, or every signed-out scan would spawn a doomed
+    browser."""
+
+    refresh_cmd: tuple[str, ...] = ()
+    """The command ``auto_refresh`` runs, argv-style
+    (``["/Users/.../python", "scripts/refresh_sections_cookie.py"]``). Its
+    job is to write a fresh cookie to ``cookie_file``; its output is
+    logged, not parsed. Empty disables the spawn even when
+    ``auto_refresh`` is on."""
+
+    refresh_cooldown_s: float = 600.0
+    """The shortest gap between two spawned refreshes. A dead cookie fails
+    every 30-second poll; without a cooldown that would launch a browser
+    every 30 seconds. Ten minutes is longer than a refresh takes and short
+    enough that a genuine re-login lands promptly."""
+
+    email_on_opening: int = 0
+    """How many emails an opening sends — an alarm, not a notice: several
+    distinct messages minutes apart make a phone buzz until it's looked
+    at, where one message is a single buzz easily missed. Sent by the
+    watcher itself the moment the event is queued, outside the speak/text
+    policy and its quiet hours on purpose: a spot is gone in minutes and
+    the user asked to be woken for it. 0 sends nothing. Needs the
+    ``[mcp.gmail]`` connector authorized — its tokens are borrowed
+    (``gmail.py``), the same way the Google Calendar watcher borrows."""
+
+    email_interval_s: float = 60.0
+    """Seconds between the alarm's messages. Each carries its own subject
+    ("1 of 5") so Gmail doesn't fold them into one thread with one
+    notification."""
+
+    email_to: str = ""
+    """Where the alarm goes. Empty means the Gmail account the connector
+    is signed in as — "email me". Anything else is pinned here by you;
+    deterministic code never chooses a recipient at send time."""
+
+    email_from: str = ""
+    """The From address — Ciel's own, e.g. ``ciel@example.com``, once that
+    is a verified "send mail as" alias on the connector's account. Empty
+    sends as the account itself. Unverified aliases are rewritten by
+    Gmail to the primary address rather than rejected."""
+
+    smtp_token: str = ""
+    """Set this and the alarm goes out as Ciel through an SMTP relay
+    instead of as you through Gmail (``mail.py``): for Cloudflare Email
+    Service, an API token with the Email Sending permission — a
+    credential, so ``CIEL_SECTIONS_SMTP_TOKEN`` in the environment is the
+    tidier home. With it, ``email_from`` (Ciel's address on the onboarded
+    domain) and ``email_to`` (a verified destination — sending there is
+    free) are both required; nothing is looked up at send time."""
+
+    smtp_host: str = "smtp.mx.cloudflare.net"
+    """The relay. Cloudflare's speaks implicit TLS only."""
+
+    smtp_port: int = 465
+    """SMTPS. The relay has no STARTTLS on 587."""
+
+    smtp_user: str = "api_token"
+    """The login name — for Cloudflare, literally this string; the token
+    is the password."""
+
+    gmail_oauth_keys: Path = field(
+        default_factory=lambda: Path.home() / ".gmail-mcp" / "gcp-oauth.keys.json"
+    )
+    """The Gmail connector's OAuth client — the same Desktop-app JSON."""
+
+    gmail_token_file: Path = field(
+        default_factory=lambda: Path.home() / ".gmail-mcp" / "credentials.json"
+    )
+    """Where the Gmail connector saved its refresh token. Read-only here."""
+
+    def current_cookie(self) -> str:
+        """The cookie to send: the live file the refresh job maintains
+        wins, the config seed is the fallback. Read fresh on every call so
+        another process's refresh needs no reload to take effect."""
+        try:
+            live = self.cookie_file.read_text().strip()
+        except OSError:
+            live = ""
+        return live or self.cookie
+
+
 @dataclass(frozen=True, slots=True)
 class LocationConfig:
     """Where the user is (``location.py``) — from what this machine can see.
@@ -1390,6 +1537,7 @@ class Config:
     discord: DiscordConfig = field(default_factory=DiscordConfig)
     web: WebConfig = field(default_factory=WebConfig)
     oura: OuraConfig = field(default_factory=OuraConfig)
+    sections: SectionsConfig = field(default_factory=SectionsConfig)
     location: LocationConfig = field(default_factory=LocationConfig)
     grants: GrantsConfig = field(default_factory=GrantsConfig)
     commands: CommandsConfig = field(default_factory=CommandsConfig)
@@ -1429,6 +1577,7 @@ _SECTIONS = {
     "discord": DiscordConfig,
     "web": WebConfig,
     "oura": OuraConfig,
+    "sections": SectionsConfig,
     "location": LocationConfig,
     "grants": GrantsConfig,
     "commands": CommandsConfig,

@@ -18,11 +18,15 @@ protocol and never knows what is drawing it.
 
   Server → client:
 
-  * ``{"type": "hello", "muted": bool, "state": str, "agents": [agent…],
-    "history": [row…]}`` — sent once on connect: the mute switch's
-    position, the current indicator state, the active-agent roster, and
-    the last ``history_lines`` transcript rows so a client opening
-    mid-conversation shows the conversation.
+  * ``{"type": "hello", "acks": true, "muted": bool, "state": str,
+    "agents": [agent…], "history": [row…]}`` — sent once on connect: the
+    mute switch's position, the current indicator state, the
+    active-agent roster, and the last ``history_lines`` transcript rows
+    so a client opening mid-conversation shows the conversation.
+    ``acks`` advertises the receipt lane (ack, pong, restart): the page
+    is served from disk, so it can be newer than the process behind the
+    socket — a client seeing no flag is talking to an older server and
+    must fall back to fire-and-forget sends, no probe, no resend.
   * ``{"type": "row", "role": str, "text": str, "t": float}`` — one
     transcript row as it lands, every lane included. Roles are the
     transcript's speaker labels verbatim (``user``, ``user-web``,
@@ -44,13 +48,34 @@ protocol and never knows what is drawing it.
     waiting on a yes or no *right now*; show it actionably. The question
     also arrives as a ``ciel-confirm`` row, which is the historical
     record — this frame is the live prompt.
+  * ``{"type": "ack", "seq": int}`` — a delivery receipt, sent only to
+    the client whose ``say`` carried that ``seq``.
+  * ``{"type": "pong"}`` — the reply to a ``ping``, sent only to the
+    asker.
 
   Client → server:
 
-  * ``{"type": "say", "text": str}`` — one typed turn (or the answer to
-    a pending confirmation; the pipeline tells the difference by timing,
-    exactly as it does for the keyboard).
+  * ``{"type": "say", "text": str, "seq": int}`` — one typed turn (or
+    the answer to a pending confirmation; the pipeline tells the
+    difference by timing, exactly as it does for the keyboard). ``seq``
+    is optional; a say carrying an ``int`` one is acked back to its
+    sender (any other type is ignored rather than echoed — one NaN
+    would poison the receipt stream of a json-lenient client).
+    The ack exists for the half-open socket a sleeping machine or a
+    frozen tab leaves behind: the browser still reports OPEN after the
+    server has long since dropped the connection, so a send can succeed
+    locally and arrive nowhere. A client that cares holds each say
+    until its ack and resends the unacked after a reconnect — late,
+    never voided. At-least-once on purpose: the ack rides the outbound
+    queue, so a connection dying between the two can double a line —
+    a visible, cheap failure where the void was a silent one.
+  * ``{"type": "ping"}`` — a liveness probe, answered with ``pong``.
+    For the same half-open sockets: protocol-level pings are invisible
+    to page script, so a page returning from a nap asks at the app
+    layer and reconnects if nothing comes back.
   * ``{"type": "mute", "muted": bool}`` — move the mute switch.
+  * ``{"type": "restart"}`` — ask for a clean restart: the same re-exec
+    a typed "reload" queues, performed from idle, never mid-conversation.
 
 Identity is the reach: the server binds loopback, so being able to open
 the socket means being at the machine — the typed lane's own trust
@@ -152,6 +177,10 @@ class WebLink:
         link never owns mute state — it only displays and relays it,
         because the thing being silenced (the speakers, the wake word)
         lives in the pipeline."""
+        self.on_restart: Callable[[], None] | None = None
+        """Set by the pipeline: the GUI's restart button calls here.
+        The same ownership rule as on_mute — the re-exec belongs to the
+        pipeline's frame loop; the link only relays the request."""
 
     # ── inbound: the turn queue ──────────────────────────────────────────────
 
@@ -233,16 +262,30 @@ class WebLink:
         if not self._clients:
             return
         data = json.dumps(payload)
-        for ws, queue in list(self._clients.items()):
-            try:
-                queue.put_nowait(data)
-            except asyncio.QueueFull:
-                # Forgotten here, closed asynchronously: close() can block
-                # on the very socket that stopped reading, and this method
-                # is called from the frame loop.
-                log.debug("web client fell behind — dropping it")
-                self._clients.pop(ws, None)
-                asyncio.get_running_loop().create_task(self._drop(ws))
+        for ws in list(self._clients):
+            self._enqueue(ws, data)
+
+    def _send_to(self, ws: Any, payload: dict[str, Any]) -> None:
+        """One client's private frame — the ack and pong lane. A sender
+        already dropped (or never known, or None) is a silent miss in
+        ``_enqueue`` — its loss."""
+        self._enqueue(ws, json.dumps(payload))
+
+    def _enqueue(self, ws: Any, data: str) -> None:
+        """One frame onto one client's queue — the fell-behind rule lives
+        here alone: a full queue sheds the client rather than growing in
+        Ciel's memory. Forgotten here, closed asynchronously: close() can
+        block on the very socket that stopped reading, and callers run on
+        the frame loop."""
+        queue = self._clients.get(ws)
+        if queue is None:
+            return
+        try:
+            queue.put_nowait(data)
+        except asyncio.QueueFull:
+            log.debug("web client fell behind — dropping it")
+            self._clients.pop(ws, None)
+            asyncio.get_running_loop().create_task(self._drop(ws))
 
     async def _drop(self, ws: Any) -> None:
         with contextlib.suppress(Exception):
@@ -345,6 +388,7 @@ class WebLink:
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=_CLIENT_QUEUE_MAX)
         queue.put_nowait(json.dumps({
             "type": "hello",
+            "acks": True,
             "muted": self._muted,
             "state": self._state,
             "agents": self._agents,
@@ -360,7 +404,7 @@ class WebLink:
             async for msg in ws:
                 if msg.type != web.WSMsgType.TEXT:
                     continue
-                self._on_frame(msg.data)
+                self._on_frame(msg.data, ws)
         except Exception:  # noqa: BLE001 - one client's tantrum stays its own
             log.debug("web client errored", exc_info=True)
         finally:
@@ -379,22 +423,40 @@ class WebLink:
         except Exception:  # noqa: BLE001 - a dead socket ends its own pump
             self._clients.pop(ws, None)
 
-    def _on_frame(self, raw: str) -> None:
+    def _on_frame(self, raw: str, ws: Any = None) -> None:
         """One inbound frame: total, like the Discord message handler —
-        a malformed frame costs a debug line, never the socket loop."""
+        a malformed frame costs a debug line, never the socket loop.
+        ``ws`` names the sender so the private replies (ack, pong) reach
+        it alone; None means a sender already gone, or a caller with no
+        use for receipts."""
         try:
             frame = json.loads(raw)
             kind = frame.get("type")
             if kind == "say":
+                seq = frame.get("seq")
+                if isinstance(seq, int):
+                    # The receipt half of the delivery guarantee (see the
+                    # protocol notes). Acked before the blank check on
+                    # purpose: received is received, and a page must not
+                    # resend forever a line the server will never queue.
+                    # Ints only, as the contract says: echoing whatever
+                    # arrived would let one NaN (or one huge structure)
+                    # poison the sender's own receipt stream.
+                    self._send_to(ws, {"type": "ack", "seq": seq})
                 text = str(frame.get("text", "")).strip()
                 if not text:
                     return
                 if len(text) > self._config.max_inbound_chars:
                     text = text[: self._config.max_inbound_chars]
                 self._queue.append((time.monotonic(), text, None))
+            elif kind == "ping":
+                self._send_to(ws, {"type": "pong"})
             elif kind == "mute":
                 if self.on_mute is not None:
                     self.on_mute(bool(frame.get("muted")))
+            elif kind == "restart":
+                if self.on_restart is not None:
+                    self.on_restart()
             else:
                 log.debug("web frame of unknown type %r ignored", kind)
         except Exception:  # noqa: BLE001

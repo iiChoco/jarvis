@@ -568,6 +568,113 @@ walk would fix it"). A fine day produces nothing. Scores appear once the
 ring syncs through the phone; the watcher rescans every half hour and on
 wake from sleep. Any threshold set to 0 switches that check off.
 
+## A spot in a section (the signup site)
+
+Off by default, and only useful with Vigil on. Berkeley courses fill
+sections first-come-first-served on the *sections* app
+(sections.datastructur.es for CS 61B), and a dropped spot is gone in
+minutes. Watched, an opening becomes an importance-3 event the moment a
+scan sees it — spoken if you're around, texted through the away outlet if
+you're not — phrased whole: "a spot just opened in CS 61B lab section 31 —
+Tuesdays 10:00 AM to 12:00 PM at Soda 275 with Erin."
+
+The site shows sections only to a browser signed in through the course's
+Canvas OAuth, which can't be automated, so setup borrows your browser's
+session. **Two minutes:**
+
+1. Sign in at the site, open DevTools → Network, click any `/api/` request,
+   and copy the whole `Cookie` request header.
+2. Point Ciel at it and pick the sections you want:
+
+   ```toml
+   [sections]
+   enabled = true
+   cookie = "session=..."   # or CIEL_SECTIONS_COOKIE in the environment
+   watch = ["12", "31"]     # section ids, from the listing below
+   ```
+
+   `uv run scripts/probe_sections.py --live` lists every section with its
+   id, weekly slot, and open spots — the ids are what `watch` wants — and
+   marks the watched and enrolled ones.
+
+The scan is a transition detector: full → open fires, still-open stays
+quiet, a refill and reopening fires again (dedupe is bucketed by the hour,
+so a flapping roster can't burn the day's texting budget). A section the
+site says you're already enrolled in is old news and never fires. Read-only
+by construction: the client can see `join_section` in the site's API and
+deliberately doesn't call it — Ciel tells you a spot opened; taking it
+stays a human act. Polls every `poll_s` (30 s) and on wake from sleep,
+since a spot that opened mid-nap is exactly the race this watcher exists to
+win.
+
+### The email alarm
+
+A spoken nudge is one sentence and a text is one buzz; a spot that is
+gone in minutes may deserve more. `email_on_opening = 5` makes the watcher
+itself email you when a watched section opens — five distinct messages
+(each with its own subject, so Gmail doesn't fold them into one thread
+with one notification), `email_interval_s` apart. It runs alongside the
+queued event, deliberately outside the interruption policy and its quiet
+hours: the policy judges whether a moment has earned an interruption, and
+this setting is your standing answer that for this one thing it always
+has. Mail goes through the `[mcp.gmail]` connector's login (its refresh
+token is borrowed read-only, like the calendar watcher borrows the
+calendar's — `gmail.py`), to that same account unless `email_to` pins
+another, and as that account unless `email_from` names a verified "send
+mail as" alias. Or, with `smtp_token` set, the alarm goes out *as Ciel*
+through an SMTP relay instead (`mail.py`) — Cloudflare Email Service's
+`smtp.mx.cloudflare.net:465`, username `api_token`, an API token with the
+Email Sending permission as the password, `email_from` on the onboarded
+domain (`ciel@example.com`) and `email_to` a verified destination, which
+Cloudflare relays free on every plan. No usable sender: a warning at
+startup, and openings fall back to the ordinary nudge.
+
+### Keeping the cookie alive
+
+The site's session is a sliding two-hour window: every request pushes its
+expiry forward, so while Ciel is polling, the cookie *never* lapses — the
+watcher keeps itself signed in for free. It only dies after two hours with
+no request, which in practice means an overnight sleep. Reviving it means
+the Canvas OAuth login again, and that needs a live bCourses session, so it
+can't be done from a bare script (CalNet and Duo would block it, and Ciel
+will not store your password or answer your Duo prompt).
+
+The way around that is a dedicated browser profile you sign into once, which
+then holds the bCourses session (Duo's "remember this device" keeps it
+alive for days). After that, `scripts/refresh_sections_cookie.py` follows
+the OAuth round-trip silently in a headless Chrome and writes the fresh
+cookie to `~/.ciel/sections-cookie`, where the watcher reads it on the next
+poll. **One-time setup:**
+
+1. Make a small venv with Playwright (kept out of Ciel's own dependencies):
+
+   ```bash
+   uv venv ~/.ciel/sections-refresh-venv
+   VIRTUAL_ENV=~/.ciel/sections-refresh-venv uv pip install playwright
+   ```
+
+2. Sign in once, in a visible browser, and complete CalNet + Duo yourself
+   (tick "remember this device", and approve the app if Canvas asks):
+
+   ```bash
+   ~/.ciel/sections-refresh-venv/bin/python \
+       scripts/refresh_sections_cookie.py --login
+   ```
+
+3. From then on it's automatic, two ways over. A launchd agent
+   (`~/Library/LaunchAgents/es.datastructur.sections-refresh.plist`) runs
+   the script each morning and on wake — for when the cookie died overnight
+   and Ciel isn't up yet. And with `auto_refresh = true` in `[sections]`,
+   the watcher itself runs it the moment a scan comes back signed-out — for
+   when Ciel *is* up but the Mac was off past the two-hour window. Both are
+   cheap: the script makes one plain HTTP check first and only spins up
+   Chrome when the cookie is genuinely dead.
+
+When the remembered bCourses session eventually lapses (a week or two), a
+silent refresh fails, the watcher's failure streak files a note, and one
+more `--login` re-arms it. Uses Google Chrome via Playwright's
+`channel="chrome"`, so nothing but the `playwright` package is downloaded.
+
 ## Where you are (location)
 
 Off by default. On, "where am I" — and anything that depends on place —

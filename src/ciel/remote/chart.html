@@ -124,6 +124,13 @@
   #mute:hover { border-color: rgba(140, 240, 255, .45); color: var(--text); }
   body.muted #mute { background: rgba(143, 168, 179, .12); border-color: rgba(143, 168, 179, .45); color: #b6c6cd; }
 
+  /* the restart chip: quiet until armed, gold while it wants a second click */
+  #restart:hover { border-color: rgba(232, 201, 138, .5); color: var(--gold); }
+  #restart.arming { background: rgba(232, 201, 138, .12); border-color: rgba(232, 201, 138, .6); color: #f0dbaf; }
+
+  /* visually hidden, read aloud: the armed state must reach ears too */
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
   #agentsbar {
     display: none;
     border-bottom: 1px solid rgba(184, 155, 232, .22);
@@ -324,13 +331,14 @@
 
   @media (max-width: 640px) {
     .corner { display: none; }
-    header { gap: 9px; padding: 13px 15px; }
+    header { gap: 9px; padding: 13px 15px; flex-wrap: wrap; } /* five chips beat 375px — wrap, never clip */
     .brand { gap: 9px; }
     .aperture { width: 22px; height: 22px; }
     .wordmark { font-size: 15px; letter-spacing: .2em; }
     .chip { padding: 5px 10px; font-size: 8.5px; letter-spacing: .16em; gap: 6px; }
     .chip .dot { width: 5px; height: 5px; }
     .long { display: none; }
+    #restart.arming .long { display: inline; } /* SURE? must be readable to mean anything */
     #agentsbar .caption, #agentrows { padding-left: 15px; padding-right: 15px; }
     .agent .kind { width: 84px; letter-spacing: .14em; }
     .agent .label { white-space: normal; font-size: 14px; }
@@ -374,6 +382,10 @@
   <button class="chip" id="mute" title="While muted, Ciel neither speaks nor listens for its name">
     <span>MIC</span><span class="long" id="mutelabel"> · ON</span>
   </button>
+  <button class="chip" id="restart" style="display: none" aria-pressed="false" title="Restart Ciel — waits for the current exchange to finish, then relaunches">
+    <span aria-hidden="true">↻</span><span class="long" id="restartlabel">RESTART</span>
+  </button>
+  <span id="srstatus" class="sr" aria-live="assertive"></span>
 </header>
 
 <div id="conn"><span class="dot"></span><span id="connlabel">reconnecting to Ciel</span></div>
@@ -610,19 +622,64 @@ function clearAsk() { document.body.classList.remove("asking"); }
 function sendFrame(obj) {
   // Refuses rather than drops: the caller keeps what it was trying to
   // send. A frame written to a CONNECTING or CLOSING socket is a message
-  // the user watched themselves send that never existed.
+  // the user watched themselves send that never existed. The one dead
+  // state this test cannot see — OPEN in the browser, long since dropped
+  // by the server, the parting gift of a sleeping machine — is covered
+  // for says by the ack ledger below, and shortened for everything else
+  // by the liveness probe.
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   ws.send(JSON.stringify(obj));
   return true;
 }
 
+// The ack ledger: every say carries a seq and stays here until the
+// server's receipt comes back; a reconnect resends whatever is still
+// owed. So a message written into a half-open socket arrives late, never
+// voided. At-least-once on purpose: the rare double (say delivered, ack
+// lost) is a visible, cheap failure where the void was a silent one.
+// sessionStorage backs the ledger because the half-open state it exists
+// for is exactly what provokes a reflexive refresh — the debts must
+// outlive the page. And the whole scheme waits for a hello that says
+// acks: this page is served from disk, so it can be newer than the
+// process behind the socket, and an ack-less server would leave every
+// say owed forever while the probe shot healthy sockets.
+let acks = false; // what the hello said this server speaks
+let saySeq = 0;
+const unacked = new Map(); // seq → text; insertion order is send order
+try {
+  for (const [seq, t] of JSON.parse(sessionStorage.getItem("unacked") || "[]")) {
+    unacked.set(seq, t);
+    saySeq = Math.max(saySeq, seq);
+  }
+} catch {}
+
+function saveLedger() {
+  try { sessionStorage.setItem("unacked", JSON.stringify([...unacked])); } catch {}
+}
+
 function say(t) {
-  if (!sendFrame({ type: "say", text: t })) return false;
+  if (!acks) {
+    // No hello yet, or an older server: the pre-ledger lane, fire-and-forget.
+    if (!sendFrame({ type: "say", text: t })) return false;
+  } else {
+    const seq = ++saySeq;
+    if (!sendFrame({ type: "say", text: t, seq })) return false;
+    unacked.set(seq, t);
+    saveLedger();
+  }
   clearAsk(); // whatever was pending, this line is the user's word on it
   return true;
 }
 
-function answer(word) { say(word); }
+// A confirm answer rides outside the ledger on purpose: a resend would
+// arrive freshly stamped, and the pipeline answers whatever question is
+// open *now* — a stale yes must never authorize a question the user
+// never saw. A swallowed answer is merely an unanswered question, and
+// the broker's timeout owns that case with the safe default.
+function answer(word) {
+  if (!sendFrame({ type: "say", text: word })) return;
+  clearAsk();
+}
 
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
@@ -632,12 +689,28 @@ function connect() {
     attempts = 0;
     document.body.classList.remove("disconnected");
     sendBtn.disabled = false;
+    // Capabilities reset until this server's hello claims them — a say
+    // sent in the gap rides seq-less rather than joining a ledger the
+    // hello is about to resend (the double would be manufactured here).
+    acks = false;
   };
 
   ws.onmessage = (ev) => {
+    clearProbe(); // any inbound frame is proof of life
     let f;
     try { f = JSON.parse(ev.data); } catch { return; }
     if (f.type === "hello") {
+      // The capability handshake: the ledger, the probe, and the restart
+      // chip all wait for the server to say it speaks them.
+      acks = !!f.acks;
+      restartBtn.style.display = acks ? "" : "none";
+      if (acks) {
+        // Settle the ledger: whatever the last socket swallowed rides again.
+        for (const [seq, t] of unacked) sendFrame({ type: "say", text: t, seq });
+      } else if (unacked.size) {
+        unacked.clear(); // debts an ack-less server can never settle
+        saveLedger();
+      }
       rows.textContent = "";               // a reconnect replays history
       for (const r of f.history || []) addRow(r.role, r.text, r.t);
       logEl.scrollTop = logEl.scrollHeight;
@@ -659,6 +732,9 @@ function connect() {
       document.body.classList.add("asking");
       const stick = nearBottom();
       if (stick) logEl.scrollTop = logEl.scrollHeight;
+    } else if (f.type === "ack") {
+      unacked.delete(f.seq);
+      saveLedger();
     }
   };
 
@@ -670,6 +746,8 @@ function connect() {
     document.body.classList.add("disconnected");
     sendBtn.disabled = true;
     clearAsk();
+    clearProbe(); // a pending deadline must not shoot the next socket
+    disarmRestart(); // an armed chip must not survive into the fresh process
     setTimeout(connect, retryMs);
     retryMs = Math.min(retryMs * 2, 8000);
   };
@@ -695,6 +773,81 @@ text.addEventListener("input", () => {
 });
 muteBtn.addEventListener("click", () => sendFrame({ type: "mute", muted: !muted }));
 unmuteBtn.addEventListener("click", () => sendFrame({ type: "mute", muted: false }));
+
+// The restart chip arms on the first click and fires on the second — a
+// stray click must not cost the mic and the models a relaunch. The server
+// answers with an event row, and the reconnect banner narrates the rest.
+const restartBtn = document.getElementById("restart");
+const restartLabel = document.getElementById("restartlabel");
+const srStatus = document.getElementById("srstatus");
+let restartArm = null;
+let restartArmedAt = 0;
+
+function disarmRestart() {
+  if (restartArm !== null) clearTimeout(restartArm);
+  restartArm = null;
+  restartBtn.classList.remove("arming");
+  restartBtn.setAttribute("aria-pressed", "false");
+  restartBtn.style.minWidth = "";
+  restartLabel.textContent = "RESTART";
+  srStatus.textContent = "";
+}
+
+restartBtn.addEventListener("click", () => {
+  if (restartArm === null) {
+    // Freeze the hit target: the shorter armed label must not shift the
+    // chip row under a cursor that is about to click again.
+    restartBtn.style.minWidth = restartBtn.offsetWidth + "px";
+    restartBtn.classList.add("arming");
+    restartBtn.setAttribute("aria-pressed", "true");
+    restartLabel.textContent = "SURE?";
+    srStatus.textContent = "Armed — press again to restart Ciel";
+    restartArmedAt = Date.now();
+    restartArm = setTimeout(disarmRestart, 4000);
+    return;
+  }
+  // A second click this fast is a bounce or a habitual double-click, not
+  // a decision — SURE? was never readable. The arm stands; a real second
+  // click still fires.
+  if (Date.now() - restartArmedAt < 350) return;
+  // Refused (reconnecting): stay armed rather than disarm into a look
+  // identical to success — the caller keeps what it was trying to send.
+  if (!sendFrame({ type: "restart" })) return;
+  disarmRestart();
+});
+
+// The liveness probe: ask the server for any frame at all. A browser can
+// hold a socket OPEN long after the far side gave up on it (the machine
+// slept, the tab was frozen), and protocol-level pings are invisible to
+// page script — so ask at the app layer. No answer inside the deadline
+// means the socket is a ghost: close it, and the usual reconnect path
+// (with the ledger resend) does the rest.
+let probeDeadline = null;
+
+function clearProbe() {
+  if (probeDeadline !== null) clearTimeout(probeDeadline);
+  probeDeadline = null;
+}
+
+function verifyLink() {
+  // Gated on acks: a server that never pongs would make every probe
+  // shoot a healthy socket.
+  if (!acks || !ws || ws.readyState !== WebSocket.OPEN || probeDeadline !== null) return;
+  sendFrame({ type: "ping" });
+  probeDeadline = setTimeout(() => { probeDeadline = null; ws.close(); }, 3000);
+}
+
+// When to suspect the socket: coming back to the tab (a bfcache restore
+// lands here too), and a slow heartbeat that catches the rest — a
+// machine-level sleep under a page that stayed visible, a peer gone
+// without a FIN. Hidden tabs are left alone: their timers throttle by
+// design, and the visibility handler probes the moment they matter again.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") verifyLink();
+});
+setInterval(() => {
+  if (document.visibilityState === "visible") verifyLink();
+}, 15000);
 
 connect();
 </script>

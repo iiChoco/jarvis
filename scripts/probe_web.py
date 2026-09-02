@@ -11,7 +11,8 @@ printed URL, type, watch it come back — the GUI, the WebSocket protocol,
 the mute switch, and the confirm banner all exercised without a
 microphone or a model. Type "confirm test" in the page to see the
 confirmation banner; type "deep" to toggle a deep-thought entry in the
-agents chip; flip the mute switch and the probe reports it.
+agents chip; flip the mute switch or arm the restart chip and the probe
+reports it (the probe only reports a restart — nothing relaunches here).
 
 If the page works here but not under Ciel, the lane is fine and the
 pipeline wiring is the place to look; if nothing works here, it is the
@@ -113,6 +114,56 @@ def probe_queue() -> None:
     )
 
 
+def probe_delivery_receipts() -> None:
+    print("\nthe delivery receipts")
+    link = WebLink(WebConfig())
+    # Hand-planted client queues stand in for sockets (probe_agents'
+    # trick): what lands in them is what each page would receive.
+    asker: asyncio.Queue = asyncio.Queue()
+    bystander: asyncio.Queue = asyncio.Queue()
+    link._clients["asker"] = asker
+    link._clients["bystander"] = bystander
+
+    link._on_frame(json.dumps({"type": "ping"}), "asker")
+    check(
+        "a ping pongs to the asker alone, and queues no turn",
+        json.loads(asker.get_nowait()) == {"type": "pong"}
+        and bystander.qsize() == 0
+        and not link.pending,
+    )
+
+    link._on_frame(json.dumps({"type": "say", "text": "hi", "seq": 7}), "asker")
+    check("a seq'd say queues its turn", link.pending and link.peek()[1] == "hi")
+    check(
+        "and acks the seq to its sender alone",
+        json.loads(asker.get_nowait()) == {"type": "ack", "seq": 7}
+        and bystander.qsize() == 0,
+    )
+
+    link._on_frame(json.dumps({"type": "say", "text": "", "seq": 8}), "asker")
+    check(
+        "a blank say is dropped but still acked — never resent forever",
+        json.loads(asker.get_nowait()) == {"type": "ack", "seq": 8}
+        and link.pop_batch() == ("hi", None),
+    )
+
+    link._on_frame(json.dumps({"type": "say", "text": "plain"}), "asker")
+    check(
+        "a say without a seq queues, unacked",
+        link.peek()[1] == "plain" and asker.qsize() == 0,
+    )
+
+    link._on_frame(json.dumps({"type": "say", "text": "gone", "seq": 9}))
+    link._on_frame(json.dumps({"type": "ping"}), "never-registered")
+    check(
+        "a sender already dropped (or never known) still gets its turn "
+        "queued, just no receipt",
+        link.pop_batch() == ("plain\ngone", None)
+        and asker.qsize() == 0
+        and bystander.qsize() == 0,
+    )
+
+
 def probe_mute_relay() -> None:
     print("\nthe mute relay")
     link = WebLink(WebConfig())
@@ -128,6 +179,23 @@ def probe_mute_relay() -> None:
 
     link.note_muted(True)
     check("note_muted with no clients is survived", True)
+
+
+def probe_restart_relay() -> None:
+    print("\nthe restart relay")
+    link = WebLink(WebConfig())
+    calls: list[bool] = []
+    link.on_restart = lambda: calls.append(True)
+    link._on_frame(json.dumps({"type": "restart"}))
+    check("restart frames reach the pipeline hook", calls == [True])
+    check("a restart frame queues no turn", not link.pending)
+
+    orphan = WebLink(WebConfig())
+    orphan._on_frame(json.dumps({"type": "restart"}))
+    check(
+        "a restart frame with no hook is survived, and queues nothing",
+        calls == [True] and not orphan.pending,
+    )
 
 
 def probe_view() -> None:
@@ -205,6 +273,12 @@ async def live(port: int | None = None) -> None:
         link.note_row("event", "muted" if value else "unmuted")
 
     link.on_mute = on_mute
+
+    def on_restart() -> None:
+        print("  [restart requested]")
+        link.note_row("event", "restart requested — Ciel restarts when idle")
+
+    link.on_restart = on_restart
 
     await link.start()
     if not link.serving:
@@ -290,7 +364,9 @@ def main() -> None:
 
     probe_origin_gate()
     probe_queue()
+    probe_delivery_receipts()
     probe_mute_relay()
+    probe_restart_relay()
     probe_view()
     probe_agents()
     print(f"\nall {len(CHECKS)} checks passed")

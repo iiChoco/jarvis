@@ -2,6 +2,97 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-02 — the section watcher keeps its own cookie warm
+
+**Why.** The section watcher's one soft spot was its login: the site
+authenticates through Canvas OAuth (CalNet + Duo), and a hand-pasted
+cookie felt like a daily chore. Probing it changed the picture — the
+session is a *sliding* two-hour window, so every poll refreshes it and a
+running watcher never lapses. The only real death is an overnight sleep,
+and that is the narrow thing worth automating.
+
+**What.**
+
+- *Cookie from a file, read live* (`config.py`, `sections.py`): the live
+  cookie moves to `~/.ciel/sections-cookie` (the Oura-token pattern —
+  config holds only a seed), and `current_cookie()` re-reads it on every
+  scan, so another process's refresh is picked up on the next poll with
+  no reload.
+- *The refresh job* (`scripts/refresh_sections_cookie.py`): a
+  self-contained Playwright script driving a dedicated Chrome profile
+  that holds a bCourses session (seeded once, headed, by the user —
+  CalNet and Duo stay in human hands; the script never sees a password).
+  It makes one plain HTTP check first and only launches Chrome when the
+  cookie is actually dead, then follows the OAuth redirects silently and
+  writes the fresh cookie. Runs two ways: a launchd agent each morning
+  and on wake (for when Ciel isn't up), and the watcher's own self-heal.
+- *Self-heal* (`proactive/sections.py`): a scan that comes back signed
+  out (`SectionsUnavailable.auth`) spawns `refresh_cmd` once per
+  `refresh_cooldown_s`, distinct from a network failure, which leaves the
+  cookie alone. A refresh that keeps failing (the remembered session
+  lapsed) still surfaces the ordinary re-login note.
+
+- *The email alarm* (`gmail.py`, `proactive/sections.py`): an opening
+  can also email the user ``email_on_opening`` times, ``email_interval_s``
+  apart, each with its own subject so they arrive as separate
+  notifications. Sent by the watcher the moment the event is queued —
+  outside the policy and quiet hours on purpose, since the user asked to
+  be woken for this one thing. ``GmailSender`` borrows the ``[mcp.gmail]``
+  connector's refresh token read-only (the calendar watcher's pattern);
+  the recipient defaults to the signed-in account and is otherwise pinned
+  in config, never chosen at send time; ``email_from`` sets a verified
+  send-as alias as the From. And a second sender (`mail.py`,
+  ``SmtpSender``): with ``smtp_token`` set the alarm goes out *as Ciel*
+  — ``ciel@example.com`` through Cloudflare Email Service's SMTPS relay,
+  free to the account's verified destinations — leaving the user's Gmail
+  connector untouched. ``MailUnavailable`` is the failure shape both
+  senders share.
+
+**Probes.** `probe_sections.py` grows to 64 checks: cookie-file
+precedence over the seed, the self-heal spawn and its cooldown,
+`auto_refresh` off never spawning a browser, the sender's raw message and
+default recipient and From, the alarm's count and distinct subjects, and its off
+and unauthorized switches, the SMTP sender through a fake relay and the
+watcher's choice between the two. Playwright launch, the graceful not-signed-in
+exit, the launchd load, and one live test email were verified by hand.
+
+## 2026-08-31 — the section sniper (a Vigil watcher)
+
+**Why.** CS 61B fills sections first-come-first-served on
+sections.datastructur.es and a dropped spot is gone in minutes — a race a
+poll wins and a person loses. Exactly the shape Vigil promised a new
+watcher would be: one module and one line in the pipeline; the policy,
+the away outlet, and the health streak were already waiting.
+
+**What.**
+
+- *The site as a client* (`sections.py`): one read-only call —
+  `POST /api/refresh_state` with a browser cookie (the course's Canvas
+  OAuth can't be automated; the session is borrowed, Discord-token
+  style) — parsed tolerantly into `Section`s with spots, weekly slot,
+  and the signed-in user's enrollments. A signed-out answer *raises*
+  toward re-login rather than reading as "every section vanished". The
+  API's `join_section` is deliberately not wrapped: Ciel says a spot
+  opened; taking it stays a human act.
+- *The watcher* (`proactive/sections.py`): a transition detector —
+  full → open fires importance 3 (speak now, or text the away outlet),
+  expiring in 30 minutes because a stale spot is pure disappointment;
+  still-open stays quiet; a reopening fires again. Dedupe keys bucket
+  by local hour, the deliberate trade that survives autoreloader
+  restarts mid-opening and keeps a flapping roster from burning the
+  day's three-text budget. Enrolled sections never fire. A dead cookie
+  becomes a `WatcherHealth` note pointing at the fix.
+- *Config* (`[sections]`): `url` (other courses run the same app),
+  `cookie`, `watch` (section ids — the filter is the consent), and a
+  30-second `poll_s`, the one watcher whose whole value is the race.
+
+**Probes.** `probe_sections.py` (35 checks: payload shapes including
+signed-out and broken rows, phrasing, every transition — first scans,
+flaps, enrollment, the hour bucket — the watcher's lifecycle and failure
+streak, config from TOML and environment; `--live` lists the site's
+sections with ids and open spots, which is also where `watch` ids come
+from).
+
 ## 2026-08-29 — the seams cut for the hub (phase 0)
 
 **Why.** The hub-and-spoke plan is approved: the brain, memory, Vigil,

@@ -63,6 +63,7 @@ from ciel.proactive.oura import OuraWatcher
 from ciel.proactive.events import EventQueue, ProactiveEvent
 from ciel.proactive.policy import Decision, InterruptionPolicy
 from ciel.proactive.presence import PresenceProbe
+from ciel.proactive.sections import SectionsWatcher
 from ciel.proactive.watchers import ScheduleWatcher
 from ciel.proactive.work import WorkWatcher
 from ciel.brain.tools.location import bind_locator
@@ -549,6 +550,7 @@ class Pipeline:
         )
         if self._web_link is not None:
             self._web_link.on_mute = self._set_muted
+            self._web_link.on_restart = self._request_restart
 
         self._mute_sentinel = config.state_dir / "mute"
         """The quiet brake, the hold sentinel's sibling: while this file
@@ -730,6 +732,14 @@ class Pipeline:
                 # least one threshold: all zero keeps the tool and drops
                 # the nudges.
                 self._vigil_watchers.append(OuraWatcher(config.oura, self._events))
+            if config.sections.enabled:
+                # A spot opening in a watched course section — the one
+                # watcher whose whole value is the race, hence its own
+                # quick poll. Cookie or watch list missing, it idles
+                # with a warning rather than arming nothing silently.
+                self._vigil_watchers.append(
+                    SectionsWatcher(config.sections, self._events)
+                )
             if self._locator is not None:
                 self._vigil_watchers.append(
                     LocationWatcher(config.location, self._locator, self._events)
@@ -1114,6 +1124,24 @@ class Pipeline:
                                 await player.play(self._tts.stream("Reloading."))
                             except Exception:  # noqa: BLE001
                                 log.debug("could not announce the reload", exc_info=True)
+                            # Those awaits kept the loop serving sockets: a
+                            # turn that landed meanwhile is already
+                            # receipted (the web lane acks at arrival), so
+                            # re-exec'ing now would void a delivered line.
+                            # Serve it instead; the flags stay set and the
+                            # reload re-fires from the next idle frame.
+                            if (
+                                self._typed
+                                or (
+                                    self._web_link is not None
+                                    and self._web_link.pending
+                                )
+                                or (
+                                    self._remote_link is not None
+                                    and self._remote_link.pending
+                                )
+                            ):
+                                continue
                             self.reload_requested = True
                             break
 
@@ -1689,6 +1717,24 @@ class Pipeline:
         self._record("event", notice)
         if self._web_link is not None:
             self._web_link.note_muted(muted)
+
+    def _request_restart(self) -> None:
+        """The GUI's restart button — a typed "reload" without the words.
+
+        Queues the same clean re-exec, which the frame loop performs from
+        idle: never yank the process out from under a conversation. The
+        event row is the acknowledgement, on every open chart — the page
+        that asked may be watching a conversation still in flight.
+        """
+        if self._reload_pending:
+            # Still acknowledged: a typed "reload" sets the flag with no
+            # row, and silence here would be indistinguishable from a
+            # dropped frame to the page that just clicked.
+            self._record("event", "restart already pending — Ciel restarts when idle")
+            return
+        self._reload_pending = True
+        print("\n  [restart requested from the chart]", flush=True)
+        self._record("event", "restart requested — Ciel restarts when idle")
 
     async def _read_stdin(self) -> None:
         """Feed typed lines into the turn queue — the tier-one chatbox.
