@@ -149,6 +149,15 @@ class Spoke:
                 self._watchers.append(
                     LocationWatcher(config.location, self._locator, self._publish)
                 )
+        if config.sections.enabled and config.proactive.enabled:
+            # Portable in principle, Mac-bound in practice: its cookie is
+            # minted by a browser profile on this machine, so the watcher
+            # runs here and publishes like the other Mac watchers.
+            from ciel.proactive.sections import SectionsWatcher
+
+            self._watchers.append(
+                SectionsWatcher(config.sections, self._publish, mail=config.mail)
+            )
         messages = None
         if config.messages.enabled:
             from ciel.messages import MessagesClient

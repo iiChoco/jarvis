@@ -956,11 +956,13 @@ class Pipeline:
                 # least one threshold: all zero keeps the tool and drops
                 # the nudges.
                 self._vigil_watchers.append(OuraWatcher(config.oura, self._events))
-            if config.sections.enabled:
+            if config.sections.enabled and not hub:
                 # A spot opening in a watched course section — the one
                 # watcher whose whole value is the race, hence its own
                 # quick poll. Cookie or watch list missing, it idles
                 # with a warning rather than arming nothing silently.
+                # On the hub it runs on the spoke instead: its cookie is
+                # minted by a browser profile on the Mac.
                 self._vigil_watchers.append(
                     SectionsWatcher(config.sections, self._events, mail=config.mail)
                 )
