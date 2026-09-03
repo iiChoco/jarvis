@@ -268,6 +268,10 @@ def probe_admit() -> None:
                        ("100.101.102.103", "ciel-hub.tail1.ts.net")),
     )
     check(
+        "a configured name reaching us through a proxy on 443 passes",
+        origin_allowed("https://ciel.example.com", 8765, ("100.101.102.103", "ciel.example.com")),
+    )
+    check(
         "an unlisted name is refused even on our port (DNS rebinding)",
         not origin_allowed("http://attacker.example:8765", 8765, ("100.101.102.103",)),
     )

@@ -24,6 +24,13 @@ WorkingDirectory=/home/ciel/jarvis
 Environment=PATH=/home/ciel/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=/home/ciel
 Environment=PYTHONUNBUFFERED=1
+# The brain's login. On Linux the CLI has no keychain: run `claude
+# setup-token` once (it prints a long-lived OAuth token for the
+# subscription — never an API key, which would bill per use) and put it in
+# this file, owner-only, as CLAUDE_CODE_OAUTH_TOKEN=... — the file is on
+# the model's forbidden list by name. Optional, so a box logged in through
+# `claude login` (which writes ~/.claude/.credentials.json) works without it.
+EnvironmentFile=-/home/ciel/.ciel/hub.env
 ExecStart=/home/ciel/jarvis/.venv/bin/python -m ciel hub
 Restart=always
 RestartSec=5

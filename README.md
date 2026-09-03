@@ -552,6 +552,16 @@ ordinary Bash and file tools on the hub act on the hub's own workspace.
 and audio module and constructing the hub anyway; `probe_tool_rpc.py`
 and `probe_presence.py` drive the calls and the publishers.
 
+**The Chart from anywhere.** With the hub on a server, the page can
+also sit behind a public name through a Cloudflare Tunnel: `cloudflared`
+on the server carries the hostname to the hub's tailnet socket, so the
+hub still listens nowhere public, and a Cloudflare Access application
+in front of the name asks for your email before a byte reaches the
+page; the hub's own token gates the socket behind that. List the public
+name in `[hub].origins` — a configured name is trusted on any port,
+since a proxied name arrives on the proxy's port, not the hub's — and
+the page speaks `wss://` on its own when served over TLS.
+
 ## Watching things (Vigil)
 
 Off by default. Everything else Ciel says was asked for; Vigil is the

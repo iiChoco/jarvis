@@ -99,8 +99,9 @@ FORBIDDEN_NAMES = frozenset({
     # arrangement: its own file so this list can name it.
     "oura.json",
     # The hub token — the wire's shared secret; its own file for the same
-    # reason.
-    "hub.token",
+    # reason. And the hub's environment file, which holds the brain's
+    # login on a server with no keychain.
+    "hub.token", "hub.env",
     # Agent and CLI state. `.claude` is not just settings — it holds session
     # transcripts and history from every coding session, which is a broader
     # disclosure than any single credential file.

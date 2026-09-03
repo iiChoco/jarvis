@@ -2,6 +2,41 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-03 — the hub leaves the Mac (phase 4, in progress)
+
+**Why.** The point of the whole move: the brain on a machine that never
+sleeps. An Azure for Students VM (West US, arm64 — the only sizes the
+subscription's policy and quota allowed; the SDK ships an arm64 Linux
+wheel with the bundled CLI, so it works), reached over Tailscale.
+
+**What.**
+
+- `deploy/ciel-hub.service`: the hub under systemd — after the network
+  and tailscaled, restarted in five seconds, an optional
+  `~/.ciel/hub.env` for the brain's login on a box with no keychain
+  (``hub.env`` joins ``FORBIDDEN_NAMES``). `deploy/ai.ciel.spoke.plist`:
+  the room's half as a launch agent on the Mac, `ciel spoke` with
+  `--no-sync` so a launch never drops the extras.
+- The Origin gate trusts a configured name on any port: the public name
+  arrives through a proxy on 443, not on the hub's port. `probe_wire`
+  gains the case (70).
+- Public Chart: a Cloudflare Tunnel (`ciel-hub`) from the VM to the
+  hub's tailnet socket, a CNAME for the public name, and a Cloudflare
+  Access application with a one-time-PIN policy for the owner's emails
+  in front of it. The hub listens on the tailnet only; the tunnel and
+  Access are the only way in from the internet, the hub token the gate
+  behind them.
+
+**State.** VM bootstrapped (uv, Node 22, Tailscale, cloudflared), the
+repo and `~/.ciel` state copied with paths rewritten, the hub service
+active and bound to the tailnet address, Discord signed in from the VM,
+the wire driven from the Mac over the tailnet (direct, 7 ms). The
+brain's login on the VM is the interactive `claude` `/login`, not
+`setup-token` (which prints a token for an environment variable and
+stores nothing) — the plan's assumption, corrected. Remaining: the
+spoke pointed at the VM as the daily driver, the lid-closed test, the
+kill-and-restart, and the move to Hetzner before the credit runs out.
+
 ## 2026-09-02 — the hub needs no Mac in it (phase 3)
 
 **Why.** Phase 3 of the hub-and-spoke move: everything the hub still

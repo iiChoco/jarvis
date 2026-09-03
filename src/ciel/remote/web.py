@@ -168,10 +168,10 @@ def origin_allowed(
     No Origin passes — that is a native client (or curl), which reached
     the port and is judged by the hello instead. An Origin that parses to
     loopback on our port is our own served page; so is one on any of
-    ``hosts`` — the bind address and the configured names, never the
-    request's own Host header. Everything else is some other page a
-    browser happens to have open, and is refused before a single frame
-    is read.
+    ``hosts`` on any port — the bind address and the configured names
+    (a proxied name arrives on the proxy's port), never the request's own
+    Host header. Everything else is some other page a browser happens to
+    have open, and is refused before a single frame is read.
     """
     if not origin:
         return True
@@ -183,8 +183,13 @@ def origin_allowed(
         return False
     host = (parts.hostname or "").lower()
     default_port = 443 if parts.scheme == "https" else 80
-    allowed = _LOOPBACK_HOSTS | {h.lower() for h in hosts if h}
-    return host in allowed and (parts.port or default_port) == port
+    if host in {h.lower() for h in hosts if h}:
+        # A configured name is trusted on any port: it is either the bind
+        # address itself or a name the operator listed on purpose — and
+        # a name that reaches this socket through a proxy (a Cloudflare
+        # tunnel, `tailscale serve`) carries the proxy's port, not ours.
+        return True
+    return host in _LOOPBACK_HOSTS and (parts.port or default_port) == port
 
 
 def loopback_peer(remote: str | None) -> bool:
