@@ -194,18 +194,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "claude-agent-sdk" },
-    { name = "faster-whisper" },
-    { name = "mlx-whisper" },
     { name = "numpy" },
-    { name = "onnxruntime" },
-    { name = "openwakeword" },
-    { name = "pyobjc-framework-cocoa" },
-    { name = "pyobjc-framework-contacts" },
-    { name = "pyobjc-framework-corelocation" },
-    { name = "pyobjc-framework-eventkit" },
-    { name = "pyobjc-framework-quartz" },
-    { name = "sounddevice" },
-    { name = "webrtcvad-wheels" },
 ]
 
 [package.optional-dependencies]
@@ -222,27 +211,50 @@ web = [
     { name = "aiohttp" },
 ]
 
+[package.dev-dependencies]
+hub = [
+    { name = "aiohttp" },
+]
+spoke = [
+    { name = "faster-whisper" },
+    { name = "mlx-whisper" },
+    { name = "onnxruntime" },
+    { name = "openwakeword" },
+    { name = "pyobjc-framework-cocoa" },
+    { name = "pyobjc-framework-contacts" },
+    { name = "pyobjc-framework-corelocation" },
+    { name = "pyobjc-framework-eventkit" },
+    { name = "pyobjc-framework-quartz" },
+    { name = "sounddevice" },
+    { name = "webrtcvad-wheels" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", marker = "extra == 'web'", specifier = ">=3.10" },
     { name = "claude-agent-sdk", specifier = ">=0.1.0" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.4" },
+    { name = "numpy", specifier = ">=2.1" },
+    { name = "piper-tts", marker = "extra == 'piper'", specifier = ">=1.7.0" },
+    { name = "sherpa-onnx", marker = "extra == 'voice'", specifier = ">=1.10,<1.11" },
+]
+provides-extras = ["piper", "voice", "discord", "web"]
+
+[package.metadata.requires-dev]
+hub = [{ name = "aiohttp", specifier = ">=3.10" }]
+spoke = [
     { name = "faster-whisper", specifier = ">=1.1.0" },
     { name = "mlx-whisper", specifier = ">=0.4.2" },
-    { name = "numpy", specifier = ">=2.1" },
     { name = "onnxruntime", specifier = ">=1.20" },
     { name = "openwakeword", specifier = ">=0.6.0" },
-    { name = "piper-tts", marker = "extra == 'piper'", specifier = ">=1.7.0" },
     { name = "pyobjc-framework-cocoa", specifier = ">=10.1" },
     { name = "pyobjc-framework-contacts", specifier = ">=10.1" },
     { name = "pyobjc-framework-corelocation", specifier = ">=10.1" },
     { name = "pyobjc-framework-eventkit", specifier = ">=10.1" },
     { name = "pyobjc-framework-quartz", specifier = ">=10.1" },
-    { name = "sherpa-onnx", marker = "extra == 'voice'", specifier = ">=1.10,<1.11" },
     { name = "sounddevice", specifier = ">=0.5.1" },
     { name = "webrtcvad-wheels", specifier = ">=2.0.14" },
 ]
-provides-extras = ["piper", "voice", "discord", "web"]
 
 [[package]]
 name = "claude-agent-sdk"

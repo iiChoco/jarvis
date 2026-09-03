@@ -52,6 +52,8 @@ from ciel.pipeline import _SLEEP_GAP_S, build_tts, trails_off
 from ciel.reload import SourceWatcher, default_roots
 from ciel.schedule import State
 from ciel.spoke.client import HubClient
+from ciel.spoke.executor import Executor
+from ciel.spoke.publisher import Heartbeat, PublishQueue
 from ciel.stt import SpeechToText, build_stt
 from ciel.tts.base import TextToSpeech
 from ciel.ui.indicator import Indicator, build_indicator
@@ -113,6 +115,55 @@ class Spoke:
             on_frame=self._on_frame,
             on_connect=self._on_connect,
             on_disconnect=self._on_disconnect,
+        )
+
+        # The Mac's senses and watchers, publishing to the hub (see
+        # spoke/publisher.py), and the hub's hands here (spoke/executor.py).
+        # The same modules the single process runs; only their queue and
+        # their caller changed.
+        self._publish = PublishQueue(self._link.send, node=config.spoke.client_id)
+        self._watchers: list = []
+        self._work_watcher = None
+        self._calendar = None
+        self._locator = None
+        self._presence = None
+        if config.proactive.enabled:
+            from ciel.proactive.presence import PresenceProbe
+            from ciel.proactive.work import WorkWatcher
+
+            self._presence = PresenceProbe(config.proactive)
+            self._work_watcher = WorkWatcher(config.proactive.watches_file, self._publish)
+            self._watchers.append(self._work_watcher)
+            if config.proactive.calendar_enabled and config.proactive.calendar_source != "google":
+                from ciel.proactive.calendar import CalendarWatcher
+
+                self._calendar = CalendarWatcher(config.proactive, self._publish)
+                self._watchers.append(self._calendar)
+        if config.location.enabled:
+            from ciel.location import Locator
+
+            self._locator = Locator(config.location)
+            if config.proactive.enabled:
+                from ciel.proactive.location import LocationWatcher
+
+                self._watchers.append(
+                    LocationWatcher(config.location, self._locator, self._publish)
+                )
+        messages = None
+        if config.messages.enabled:
+            from ciel.messages import MessagesClient
+
+            messages = MessagesClient(config.messages)
+        self._executor = Executor(
+            config, self._link.send,
+            messages=messages, locator=self._locator,
+            watcher=self._work_watcher, calendar=self._calendar,
+        )
+        self._heartbeat = Heartbeat(
+            self._link.send, self._presence, self._work_watcher,
+            node=config.spoke.client_id,
+            interval_s=config.spoke.heartbeat_s,
+            idle_threshold_s=config.proactive.presence_idle_s,
         )
         self._mute_sentinel = config.state_dir / "mute"
         self._muted = self._mute_sentinel.exists()
@@ -263,11 +314,15 @@ class Spoke:
             self._wake.start(),
             self._indicator.start(),
             self._link.start(),
+            self._heartbeat.start(),
         ]
         if self._speaker is not None:
             startup.append(self._speaker.warm_up())
         if self._watcher is not None:
             startup.append(self._watcher.start())
+        # The Mac's watchers start here but never block here, as in the
+        # single process: a permission dialog stalls a watcher, not the room.
+        startup.extend(w.start() for w in self._watchers)
         await asyncio.gather(*startup)
         log.info("spoke ready in %.1fs", time.monotonic() - started)
 
@@ -304,12 +359,15 @@ class Spoke:
             self._tts.close(),
             self._wake.close(),
             self._indicator.close(),
+            self._heartbeat.close(),
+            self._executor.close(),
             self._link.close(),
         ]
         if self._speaker is not None:
             closers.append(self._speaker.close())
         if self._watcher is not None:
             closers.append(self._watcher.close())
+        closers.extend(w.close() for w in self._watchers)
         await asyncio.gather(*closers, return_exceptions=True)
 
     def _announce_ready(self) -> None:
@@ -428,6 +486,12 @@ class Spoke:
         self._reported = None
         if isinstance(hello.get("muted"), bool) and hello["muted"] != self._muted:
             self._set_muted(hello["muted"], from_hub=True)
+        # Whatever the last socket swallowed rides again, and the hub gets
+        # a fresh reading of the room at once.
+        resent = self._publish.resend()
+        if resent:
+            log.info("re-published %d event(s) after the reconnect", resent)
+        self._heartbeat.beat(force=True)
 
     def _on_disconnect(self) -> None:
         if self._hub_turn is not None or self._awaiting_hub:
@@ -479,6 +543,10 @@ class Spoke:
             self._indicator.set_state(state)
         elif kind == "muted":
             self._set_muted(bool(frame["muted"]), from_hub=True)
+        elif kind in ("tool.request", "tool.cancel"):
+            self._executor.handle(frame)
+        elif kind == "event.ack":
+            self._publish.acked(frame["publish_id"])
         # rows, agents, confirm banners, hellos: the Chart's business
 
     async def _play_sentence(self, turn_id: str, n: int, kind: str, text: str) -> None:

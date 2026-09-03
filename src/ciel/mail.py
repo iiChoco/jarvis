@@ -42,11 +42,16 @@ class Mailer(Protocol):
 class SmtpSender:
     """Plain-text mail over SMTPS with a static login."""
 
-    def __init__(self, host: str, port: int, user: str, token: str) -> None:
+    def __init__(
+        self, host: str, port: int, user: str, token: str, copy_to: str = ""
+    ) -> None:
         self._host = host
         self._port = port
         self._user = user
         self._token = token
+        self._copy_to = copy_to
+        """Bcc on every message — the sender's own record. smtplib strips
+        the header before the wire, so the recipient never sees it."""
 
     def available(self) -> bool:
         return bool(self._token and self._host)
@@ -58,6 +63,8 @@ class SmtpSender:
         message = EmailMessage()
         message["From"] = sender
         message["To"] = to
+        if self._copy_to and self._copy_to.lower() != to.lower():
+            message["Bcc"] = self._copy_to
         message["Subject"] = subject
         message.set_content(body)
         try:
@@ -66,13 +73,21 @@ class SmtpSender:
                 timeout=_SMTP_TIMEOUT_S, context=ssl.create_default_context(),
             ) as relay:
                 relay.login(self._user, self._token)
-                relay.send_message(message)
+                refused = relay.send_message(message) or {}
         except smtplib.SMTPAuthenticationError as exc:
             raise MailUnavailable(f"the SMTP relay rejected the token ({exc.smtp_code})") from exc
         except smtplib.SMTPException as exc:
             raise MailUnavailable(f"the SMTP relay refused the message ({exc})") from exc
         except (OSError, socket.timeout) as exc:
             raise MailUnavailable(f"the SMTP relay could not be reached ({exc})") from exc
+        # A partial refusal comes back as a dict, not an exception: the
+        # recipient refused is a failed send; only the copy refused is a
+        # delivered message with a missing record, worth a line in the log.
+        if any(r.lower() == to.lower() for r in refused):
+            code, reason = next(iter(refused.values()))
+            raise MailUnavailable(f"the relay refused {to} ({code} {reason!r})")
+        for address, (code, reason) in refused.items():
+            log.warning("mail: the copy to %s was refused (%s %r)", address, code, reason)
         return str(message.get("Message-ID", ""))
 
 

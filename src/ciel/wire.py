@@ -131,10 +131,13 @@ CATALOG: dict[str, FrameSpec] = {
     "event.publish": FrameSpec(
         "c2h", required={"publish_id": "str", "event": "dict"}
     ),
+    # The spoke's heartbeat (~10 s, and on change): the raw presence
+    # signals the hub folds into its own view, plus the roster of the
+    # spoke's active work watches (they live on the machine being watched).
     "presence": FrameSpec(
         "c2h",
         required={"node": "str", "attended": "bool", "locked": "bool"},
-        optional={"idle_s": "num", "active_watches": "int"},
+        optional={"idle_s": "num", "active_watches": "int", "watches": "list"},
     ),
     "deliver.result": FrameSpec(
         "c2h", required={"event_id": "str", "ok": "bool"}, optional={"error": "str"}
@@ -175,6 +178,9 @@ CATALOG: dict[str, FrameSpec] = {
         optional={"timeout_s": "num"},
     ),
     "tool.cancel": FrameSpec("h2c", required={"rpc_id": "str"}),
+    # The receipt for a published event — the publisher's cue to drop it
+    # from its outbox; unacked ones ride again after a reconnect.
+    "event.ack": FrameSpec("h2c", required={"publish_id": "str"}),
     "deliver.speak": FrameSpec(
         "h2c", required={"event_id": "str", "text": "str"},
         optional={"meta": "dict", "seq": "int"},

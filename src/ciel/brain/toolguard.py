@@ -82,6 +82,17 @@ def _describe_grant(args: dict[str, Any]) -> str:
     return describe_grant(args)
 
 
+def _describe_send_as_ciel(args: dict[str, Any]) -> str:
+    to = args.get("to")
+    subject = args.get("subject")
+    parts = ["Send an email from my own address"]
+    if to:
+        parts.append(f"to {_shorten(to)}")
+    if subject:
+        parts.append(f"with the subject {_shorten(subject)}")
+    return " ".join(parts)
+
+
 def _describe_send_message(args: dict[str, Any]) -> str:
     to = args.get("to")
     body = args.get("text")
@@ -99,6 +110,7 @@ def _describe_send_message(args: dict[str, Any]) -> str:
 _FORMATTERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "send_email": _describe_send_email,
     "send_message": _describe_send_message,
+    "send_as_ciel": _describe_send_as_ciel,
     "grant_capability": _describe_grant,
     "create-event": _describe_event("Create"),
     "update-event": _describe_event("Update"),

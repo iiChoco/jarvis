@@ -110,8 +110,12 @@ class Brain:
         journal: ActionJournal | None = None,
         projects_index_provider: "Callable[[], str | None] | None" = None,
         verify_emitter: "Callable[[str, dict], None] | None" = None,
+        mac_tools: bool = False,
     ) -> None:
         self._config = config
+        self._mac_tools = mac_tools
+        """The hub's tools onto the user's Mac are registered: their shell
+        gets the shell gate under its own name, their writes the journal."""
         self._brain_config: BrainConfig = config.brain
         # Providers, not strings: the indexes are read at every connect, so a
         # rotation picks up whatever reflection just wrote. A string would
@@ -174,6 +178,15 @@ class Brain:
         if config.shell.enabled and confirmer is not None:
             self._shell_guard = ShellGuard(config.shell, confirmer)
             log.info("shell enabled behind the voice gate")
+        # The Mac's shell, from the hub: the same tiers and the same gate,
+        # matched on the RPC tool's name, and the question says where.
+        self._mac_shell_guard: ShellGuard | None = None
+        if mac_tools and config.shell.enabled and confirmer is not None:
+            self._mac_shell_guard = ShellGuard(
+                config.shell, confirmer,
+                tool_name="mcp__ciel__run_on_mac", where="the Mac",
+            )
+            log.info("the Mac's shell enabled behind the voice gate")
 
         # Connector tools on a `confirm` list get the same gate. Both halves
         # again: names to gate AND a confirmer to gate them through. Without
@@ -194,6 +207,9 @@ class Brain:
         # rather than letting it run silently on the tool description's say-so.
         if config.messages.enabled and config.messages.allow_send:
             gated.add("mcp__ciel__send_message")
+        # Mail from Ciel's own address: outward, irreversible, same gate.
+        if config.mail.armed:
+            gated.add("mcp__ciel__send_as_ciel")
         # The capability grant is the escalation channel itself, so it gets
         # the gate before anything else does: no config changes on a bare
         # tool call, only on the user's spoken or texted yes. The revoke
@@ -226,6 +242,10 @@ class Brain:
         # journaling lives outside the guards so nothing here can grow into an
         # enforcement path.
         self._recorder: ActionRecorder | None = None
+        mac_mutators: frozenset[str] = (
+            frozenset({"mcp__ciel__run_on_mac", "mcp__ciel__mac_write_file"})
+            if mac_tools else frozenset()
+        )
         if journal is not None:
             self._recorder = ActionRecorder(
                 journal,
@@ -233,8 +253,9 @@ class Brain:
                 # off?" deserves a record — but neither files a read-back
                 # event: the grant parse-verifies its own config edit, and
                 # an unattended re-check would add a turn to observe what
-                # the tool already proved.
-                self._gated_tools | grant_tools,
+                # the tool already proved. The Mac's shell and writes are
+                # journaled like the local ones.
+                self._gated_tools | grant_tools | mac_mutators,
                 verify_emitter=verify_emitter,
                 verify_for=self._gated_tools - grant_tools,
             )
@@ -360,6 +381,14 @@ class Brain:
                 # tool without a token, and the prompt must not promise it.
                 oura=self._config.oura.armed,
                 location=self._config.location.enabled,
+                # Ciel's own address, so "email me" and "can you email
+                # someone as yourself" get honest answers.
+                mail_address=(
+                    self._config.mail.address if self._config.mail.armed else None
+                ),
+                mail_owner=self._config.mail.owner,
+                mail_copy_to=self._config.mail.copy_to,
+                mac=self._mac_tools,
             ),
             # Explicit allowlist. The Agent SDK ships the full Claude Code
             # toolset — Bash, Write, Edit — and a voice assistant that can
@@ -466,6 +495,8 @@ class Brain:
             pre.extend(self._guard.as_hooks()["PreToolUse"])
         if self._shell_guard is not None:
             pre.extend(self._shell_guard.as_hooks()["PreToolUse"])
+        if self._mac_shell_guard is not None:
+            pre.extend(self._mac_shell_guard.as_hooks()["PreToolUse"])
         if self._tool_guard is not None:
             pre.extend(self._tool_guard.as_hooks()["PreToolUse"])
         if self._recorder is not None:

@@ -51,7 +51,7 @@ from ciel.sections import (
 )
 
 if TYPE_CHECKING:
-    from ciel.config import SectionsConfig
+    from ciel.config import MailConfig, SectionsConfig
 
 log = logging.getLogger(__name__)
 
@@ -142,35 +142,62 @@ def alarm_message(event: ProactiveEvent, n: int, count: int) -> tuple[str, str]:
     return subject, body
 
 
-def _pick_mailer(config: "SectionsConfig") -> Mailer | None:
-    """Ciel's own relay when a token is set, else the user's Gmail; None,
-    with a warning, when neither is usable — the alarm then simply
-    doesn't exist and openings fall back to the ordinary nudge."""
+def _pick_mailer(
+    config: "SectionsConfig", mail: "MailConfig | None"
+) -> tuple[Mailer | None, str, str]:
+    """The sender, the From, and the To for the alarm.
+
+    In order: a relay of the watcher's own (``smtp_token`` here), then
+    Ciel's own address (``[mail]``, the usual case — one token, one
+    address, shared), then the user's Gmail. None, with a warning, when
+    nothing is usable — the alarm then simply doesn't exist and openings
+    fall back to the ordinary nudge.
+    """
     if config.smtp_token:
         if not (config.email_from and config.email_to):
             log.warning(
                 "sections: smtp_token is set but email_from/email_to are "
                 "not both pinned — openings will not email"
             )
-            return None
-        return SmtpSender(
-            config.smtp_host, config.smtp_port, config.smtp_user, config.smtp_token
+            return None, "", ""
+        return (
+            SmtpSender(config.smtp_host, config.smtp_port, config.smtp_user, config.smtp_token),
+            config.email_from, config.email_to,
+        )
+    if mail is not None and mail.armed:
+        sender = config.email_from or mail.address
+        to = config.email_to or mail.owner
+        if not to:
+            log.warning(
+                "sections: [mail] is armed but neither email_to nor [mail] "
+                "owner names a recipient — openings will not email"
+            )
+            return None, "", ""
+        return (
+            SmtpSender(mail.smtp_host, mail.smtp_port, mail.smtp_user, mail.token, mail.copy_to),
+            sender, to,
         )
     gmail = GmailSender(config.gmail_oauth_keys, config.gmail_token_file)
     if gmail.available():
-        return gmail
+        return gmail, config.email_from, config.email_to
     log.warning(
         "sections: email_on_opening is set but no sender is usable (no "
-        "smtp_token, Gmail connector not authorized) — openings will not email"
+        "smtp_token, no [mail], Gmail connector not authorized) — openings "
+        "will not email"
     )
-    return None
+    return None, "", ""
 
 
 class SectionsWatcher:
     """Polls the signup site and nudges the queue when a watched section
     stops being full."""
 
-    def __init__(self, config: "SectionsConfig", queue: EventQueue) -> None:
+    def __init__(
+        self,
+        config: "SectionsConfig",
+        queue: EventQueue,
+        mail: "MailConfig | None" = None,
+    ) -> None:
         self._config = config
         self._queue = queue
         self._task: asyncio.Task[None] | None = None
@@ -181,8 +208,10 @@ class SectionsWatcher:
         """When the self-heal refresh was last spawned — the cooldown anchor
         that keeps a dead cookie from launching a browser every poll."""
         self._mailer: Mailer | None = None
+        self._alarm_from = ""
+        self._alarm_to = ""
         if config.email_on_opening > 0:
-            self._mailer = _pick_mailer(config)
+            self._mailer, self._alarm_from, self._alarm_to = _pick_mailer(config, mail)
         self._alarms: set[asyncio.Task[None]] = set()
 
     async def start(self) -> None:
@@ -231,8 +260,7 @@ class SectionsWatcher:
             subject, body = alarm_message(event, n, count)
             try:
                 await asyncio.to_thread(
-                    self._mailer.send, self._config.email_to, subject, body,
-                    self._config.email_from,
+                    self._mailer.send, self._alarm_to, subject, body, self._alarm_from,
                 )
                 log.info("sections alarm email %d/%d sent", n, count)
             except MailUnavailable as exc:

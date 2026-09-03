@@ -2,6 +2,78 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-02 — the hub needs no Mac in it (phase 3)
+
+**Why.** Phase 3 of the hub-and-spoke move: everything the hub still
+reached into macOS for goes over the wire instead, so the hub can leave
+this machine with nothing but an address changing. Still both on the
+Mac, RPC forced on, which is how it gets proven before the move.
+
+**What.**
+
+- *Tool RPC* (`hub/server.py`, `hub/rpc.py`, `spoke/executor.py`):
+  ``tool.request`` down, ``tool.result`` back, a cancel on the hub's
+  deadline, every open call failed at once when the spoke leaves. The
+  hub binds duck types instead of implementations — ``RemoteScreen``,
+  ``RemoteMessagesClient``, ``RemoteLocator``, ``RemoteWorkWatcher``,
+  ``RemoteCalendar``, ``RemoteMac`` — so ``bind_screen``,
+  ``bind_client``, ``bind_locator``, ``bind_watcher`` just get
+  different objects (``build_tool_server(config, remote)``). The
+  spoke's executor runs the same modules the single process uses: the
+  screen capture, the Messages client, the locator, the work watcher,
+  the EventKit agenda; one task per call, failures as sentences.
+- *The Mac tools* (`brain/tools/mac.py`): ``run_on_mac``,
+  ``mac_read_file``, ``mac_write_file``, ``mac_list_dir`` — registered
+  only on the hub. ``ShellGuard`` generalized to any tool that carries
+  a command (``tool_name``, ``arg``, and a question that says where),
+  so the Mac's shell sits behind the same three tiers and the same
+  spoken yes; the workspace guard's path map gains the file tools; the
+  recorder journals the Mac's shell and writes; the prompt gains a
+  section naming the Mac as the default target. Defense in depth on
+  the spoke: the classifier and the path check re-run from *its*
+  config, the deny tier refused regardless, the confirm tier refused
+  unless the call carries the hub's ``confirmed``.
+- *Publishers* (`spoke/publisher.py`): ``PublishQueue`` is the queue
+  the Mac's watchers push into — ``event.publish`` up, held in an
+  outbox until ``event.ack``, resent after a reconnect, a local dedupe
+  keeping rescans off the wire. The spoke runs ``CalendarWatcher``,
+  ``LocationWatcher``, and ``WorkWatcher`` against it; the hub's
+  ``_on_published_event`` pushes into the real ``EventQueue``, whose
+  dedupe absorbs a resend. Portable watchers (the brief, Google's
+  calendar, the ring, the sections) stay on the hub.
+- *Presence* (`hub/rpc.py` ``PresenceView``, `spoke/publisher.py`
+  ``Heartbeat``): the spoke sends the raw signals — locked, seconds
+  since input, attended — every ``[spoke].heartbeat_s`` and at once on
+  a change, with the roster of active watches for the agents chip; the
+  hub folds them with its own conversation recency into the same
+  ``PresenceState`` the policy always read. A heartbeat older than
+  ``[hub].presence_stale_s`` is an empty room, whatever else is true.
+- *The import audit*: the audio stack (sounddevice, webrtcvad, the
+  speech models) and the Mac frameworks are imported where they are
+  built — the local role's constructor, the methods only it runs, the
+  broker's endpointer on first use — never at module level in anything
+  the hub imports. `probe_hub_imports.py` refuses all of them by name
+  in a child interpreter and constructs ``Pipeline(role="hub")``; the
+  spoke is checked to fail the same test.
+- *Config*: ``[hub].presence_stale_s``, ``[spoke].heartbeat_s``,
+  ``[shell].command_timeout_s`` (the Mac-run command's own clock);
+  ``event.ack``, ``presence.watches`` in the catalog.
+
+**Probes.** `probe_tool_rpc.py`: every remote duck type through a real
+executor over the real server, the tools bound to them end to end
+(the screen with a fake capture, the watch tool arming on the Mac, the
+four Mac tools), the quiet tier unconfirmed and the side-effect tier
+confirmed, the deny tier refused on the Mac, a command past the Mac's
+timeout killed, reads and writes inside the workspace and refused
+outside it, no spoke, a spoke that never answers (deadline, cancel),
+the spoke leaving mid-call, an unknown tool. `probe_presence.py`, 26:
+the view as a table with the stale rule, the publish queue's outbox,
+ack, resend and dedupe, the heartbeat on change, and the hub's side
+through the real server. `probe_hub_imports.py`, 2. `probe_spoke`
+grows the executor and outbox routing. Live: still both on this Mac —
+the daily driver with RPC forced on, every Mac tool and a Vigil
+speak/message/note each observed, is owed.
+
 ## 2026-09-02 — two processes: the room and the brain (phase 2)
 
 **Why.** Phase 2 of the hub-and-spoke move, the riskiest cut: split
@@ -198,12 +270,27 @@ and that is the narrow thing worth automating.
   connector untouched. ``MailUnavailable`` is the failure shape both
   senders share.
 
-**Probes.** `probe_sections.py` grows to 64 checks: cookie-file
+- *Ciel's own address* (`[mail]`, `brain/tools/mail.py`): the relay
+  became Ciel's, not just the watcher's. `send_as_ciel` sends from
+  `[mail] address` behind the spoken-yes gate (a describer of its own:
+  "Send an email from my own address to ..."), stays off the Witness
+  observers, and the prompt gains a section on whose voice a message is
+  in — Ciel's mail here, the user's through their own tool. The watcher's
+  alarm borrows `[mail]`'s relay, address, and owner when it has no relay
+  of its own, so one token serves both; its own `smtp_token` still wins.
+  `copy_to` Bcc's every message to an inbox of the user's — their record
+  of what Ciel sent — and the relay now reads `smtplib`'s partial-refusal
+  return instead of ignoring it: a refused copy is a warning, a refused
+  recipient is a failed send.
+
+**Probes.** `probe_sections.py` grows to 73 checks: cookie-file
 precedence over the seed, the self-heal spawn and its cooldown,
 `auto_refresh` off never spawning a browser, the sender's raw message and
 default recipient and From, the alarm's count and distinct subjects, and its off
 and unauthorized switches, the SMTP sender through a fake relay and the
-watcher's choice between the two. Playwright launch, the graceful not-signed-in
+watcher's choice among the three. `probe_mail.py` (12 checks: the tool
+through a fake relay, the gate's question, the prompt's presence and absence,
+and config arming). Playwright launch, the graceful not-signed-in
 exit, the launchd load, and one live test email were verified by hand.
 
 ## 2026-08-31 — the section sniper (a Vigil watcher)

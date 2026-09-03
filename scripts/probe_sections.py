@@ -29,7 +29,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from ciel.config import SectionsConfig, load_config
+from ciel.config import MailConfig, SectionsConfig, load_config
 from ciel.gmail import GmailSender
 from ciel import mail as mailmod
 from ciel.mail import MailUnavailable, SmtpSender
@@ -413,8 +413,11 @@ class FakeRelay:
             raise smtplib.SMTPAuthenticationError(535, b"bad token")
         FakeRelay.logins.append((user, token))
 
+    refuse: dict = {}
+
     def send_message(self, message):
         FakeRelay.sent.append(message)
+        return dict(FakeRelay.refuse)
 
 
 async def smtp_checks(tmp: Path) -> None:
@@ -430,11 +433,32 @@ async def smtp_checks(tmp: Path) -> None:
         check("it logs in as api_token with the token and sends over 465",
               FakeRelay.logins[-1] == ("api_token", "tok") and FakeRelay.args == ("smtp.mx.cloudflare.net", 465)
               and m["From"] == "ciel@example.com" and m["To"] == "me@gmail.com" and m["Subject"] == "Hi")
+        copied = SmtpSender("h", 465, "api_token", "tok", copy_to="me@berkeley.edu")
+        copied.send("me@gmail.com", "Hi", "b", "ciel@example.com")
+        check("copy_to rides along as a Bcc", FakeRelay.sent[-1]["Bcc"] == "me@berkeley.edu")
+        copied.send("Me@Berkeley.edu", "Hi", "b", "ciel@example.com")
+        check("no Bcc when the copy address is the recipient", FakeRelay.sent[-1]["Bcc"] is None)
         try:
             sender.send("me@gmail.com", "Hi", "b", "")
             check("no From is refused before the wire", False)
         except MailUnavailable:
             check("no From is refused before the wire", True)
+        FakeRelay.refuse = {"me@berkeley.edu": (550, b"unverified")}
+        logging.disable(logging.WARNING)
+        try:
+            copied.send("me@gmail.com", "Hi", "b", "ciel@example.com")
+            check("a refused copy still counts as sent", True)
+        except MailUnavailable:
+            check("a refused copy still counts as sent", False)
+        finally:
+            logging.disable(logging.NOTSET)
+        FakeRelay.refuse = {"me@gmail.com": (550, b"denied")}
+        try:
+            sender.send("me@gmail.com", "Hi", "b", "ciel@example.com")
+            check("a refused recipient is a failed send", False)
+        except MailUnavailable as exc:
+            check("a refused recipient is a failed send", "550" in str(exc))
+        FakeRelay.refuse = {}
         FakeRelay.reject_login = True
         try:
             sender.send("me@gmail.com", "Hi", "b", "ciel@example.com")
@@ -456,6 +480,27 @@ async def smtp_checks(tmp: Path) -> None:
                                                  email_to="me@gmail.com"), q("s1"))._mailer, SmtpSender))
         check("no token keeps Gmail",
               isinstance(SectionsWatcher(base, q("s2"))._mailer, GmailSender))
+        mail = MailConfig(enabled=True, address="ciel@example.com", owner="me@gmail.com", token="mt",
+                          copy_to="me@berkeley.edu")
+        shared = SectionsWatcher(base, q("s5"), mail=mail)
+        check("[mail] armed lends its relay, address, owner, and copy to the alarm",
+              isinstance(shared._mailer, SmtpSender) and shared._mailer._token == "mt"
+              and shared._mailer._copy_to == "me@berkeley.edu"
+              and shared._alarm_from == "ciel@example.com" and shared._alarm_to == "me@gmail.com")
+        pinned = SectionsWatcher(replace(base, email_to="other@x.edu"), q("s6"), mail=mail)
+        check("email_to still overrides the owner", pinned._alarm_to == "other@x.edu")
+        own = SectionsWatcher(replace(base, smtp_token="tok", email_from="a@b.c", email_to="d@e.f"),
+                              q("s7"), mail=mail)
+        check("the watcher's own token wins over [mail]", own._mailer._token == "tok")
+        logging.disable(logging.WARNING)
+        try:
+            check("[mail] with no owner and no email_to arms nothing",
+                  SectionsWatcher(base, q("s8"), mail=replace(mail, owner=""))._mailer is None)
+            check("[mail] disabled falls through to Gmail",
+                  isinstance(SectionsWatcher(base, q("s9"), mail=replace(mail, enabled=False))._mailer,
+                             GmailSender))
+        finally:
+            logging.disable(logging.NOTSET)
         logging.disable(logging.WARNING)
         try:
             check("a token without pinned addresses arms nothing",

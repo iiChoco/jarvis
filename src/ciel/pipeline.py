@@ -46,14 +46,10 @@ from collections import deque
 from contextlib import AsyncExitStack, aclosing
 from dataclasses import replace as dc_replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ciel.audio.input import MicStream, float_to_pcm
-from ciel.audio.output import Player
-from ciel.audio.speaker import build_speaker_gate
-from ciel.audio.vad import Endpointer
-from ciel.audio.wake import HotkeyWake, WakeDetector, build_wake_detector
 from ciel.brain.agent import Brain
 from ciel.brain.prompt import REFLECTION_PROMPT, proactive_prompt
 from ciel.brain.tools import build_tool_server
@@ -63,6 +59,7 @@ from ciel.confirm import VoiceConfirmBroker
 from ciel.messages import MessagesClient, MessagesUnavailable
 from ciel.remote.discord import DiscordLink, RemoteUnavailable
 from ciel.remote.web import WebIndicator, WebLink
+from ciel.hub.rpc import RemoteBindings
 from ciel.hub.server import HubServer
 from ciel.proactive.calendar import CalendarWatcher
 from ciel.proactive.gcal import GoogleCalendarWatcher
@@ -80,12 +77,22 @@ from ciel.location import Locator
 from ciel.reload import SourceWatcher, default_roots
 from ciel.schedule import Snapshot, Source, State, pick_next
 from ciel.commands import Command, match as match_command
-from ciel.stt import SpeechToText, build_stt
 from ciel.timers import Timer, announcement, spoken_clock, spoken_duration
 from ciel.transcript import Transcript
-from ciel.tts.base import TextToSpeech
 from ciel.turn import TurnRequest, TurnSink, lane_spec, prompt_note
 from ciel.ui.indicator import Indicator, TeeIndicator, build_indicator
+
+if TYPE_CHECKING:
+    # The audio stack is imported where it is built (the local role's
+    # constructor and the methods only it runs), never at module level:
+    # the hub imports this module on a machine with no sound device, no
+    # VAD library, and no Metal.
+    from ciel.audio.input import MicStream
+    from ciel.audio.output import Player
+    from ciel.audio.vad import Endpointer
+    from ciel.audio.wake import WakeDetector
+    from ciel.stt import SpeechToText
+    from ciel.tts.base import TextToSpeech
 
 log = logging.getLogger(__name__)
 
@@ -144,7 +151,7 @@ def proactive_valve(reply: str) -> str | None:
     return match.group(1).upper() if match else None
 
 
-def build_tts(config: Config) -> TextToSpeech:
+def build_tts(config: Config) -> "TextToSpeech":
     """Instantiate the configured speech engine.
 
     The only place an engine is *chosen* from config — swapping them is a
@@ -168,7 +175,7 @@ def build_tts(config: Config) -> TextToSpeech:
     return _apply_effect(engine, config)
 
 
-def _apply_effect(engine: TextToSpeech, config: Config) -> TextToSpeech:
+def _apply_effect(engine: "TextToSpeech", config: Config) -> "TextToSpeech":
     """Wrap the engine in the configured voice treatment, if any.
 
     Applied at build time rather than inside either engine so the effect
@@ -268,7 +275,7 @@ class _VoiceSink:
     open a follow-up window.
     """
 
-    def __init__(self, pipeline: "Pipeline", player: Player) -> None:
+    def __init__(self, pipeline: "Pipeline", player: "Player") -> None:
         self._p = pipeline
         self._player = player
         self.confirm_send = None
@@ -669,17 +676,46 @@ class Pipeline:
         back the same way, and the main loop is the ladder on a tick
         instead of on a frame."""
         hub = role == "hub"
-        self._stt: SpeechToText | None = None if hub else build_stt(config.stt)
-        self._tts: TextToSpeech | None = None if hub else build_tts(config)
-        self._wake: WakeDetector | None = None if hub else build_wake_detector(config.wake)
-        # The lambda defers to the running noise-floor estimate (tracked in
-        # the frame loop) so endpointing in a noisy room demands speech
-        # louder than the room — see Endpointer._clears_floor.
-        self._endpointer: Endpointer | None = (
-            None if hub
-            else Endpointer(config.audio, noise_floor=lambda: self._noise_floor)
-        )
-        self._speaker = None if hub else build_speaker_gate(config.voice)
+        self._stt: "SpeechToText | None" = None
+        self._tts: "TextToSpeech | None" = None
+        self._wake: "WakeDetector | None" = None
+        self._endpointer: "Endpointer | None" = None
+        self._speaker = None
+        if not hub:
+            from ciel.audio.speaker import build_speaker_gate
+            from ciel.audio.vad import Endpointer
+            from ciel.audio.wake import build_wake_detector
+            from ciel.stt import build_stt
+
+            self._stt = build_stt(config.stt)
+            self._tts = build_tts(config)
+            self._wake = build_wake_detector(config.wake)
+            # The lambda defers to the running noise-floor estimate (tracked in
+            # the frame loop) so endpointing in a noisy room demands speech
+            # louder than the room — see Endpointer._clears_floor.
+            self._endpointer = Endpointer(
+                config.audio, noise_floor=lambda: self._noise_floor
+            )
+            self._speaker = build_speaker_gate(config.voice)
+
+        # The web GUI (Chart): a user lane like the typed deque and the
+        # Discord link, plus a *view* — every transcript row and state
+        # change is teed into it. Created before the tools on the hub,
+        # whose Mac-bound tools bind the wire, and before the indicator so
+        # the tee below can include it.
+        self._web_link: WebLink | None
+        self._remote: "RemoteBindings | None" = None
+        if hub:
+            # The hub's socket is the spoke's door; the Chart rides along
+            # whether or not config asked for it.
+            if not config.web.enabled:
+                log.info("hub: the wire server is on regardless of [web].enabled")
+            self._web_link = HubServer(config.web, config.hub)
+            self._remote = RemoteBindings(self._web_link, config)
+        else:
+            self._web_link = (
+                WebLink(config.web, config.hub) if config.web.enabled else None
+            )
 
         # Custom tools (memory today, whatever lands in the registry later) are
         # assembled before the brain, because the memory index they expose has
@@ -691,25 +727,10 @@ class Pipeline:
             self._projects,
             self._journal,
             self._timers,
-        ) = build_tool_server(config)
+        ) = build_tool_server(config, self._remote)
         if self._memory is not None and self._memory.all():
             log.info("loaded %d memories", len(self._memory.all()))
 
-        # The web GUI (Chart): a user lane like the typed deque and the
-        # Discord link, plus a *view* — every transcript row and state
-        # change is teed into it. Created before the indicator so the tee
-        # below can include it.
-        self._web_link: WebLink | None
-        if hub:
-            # The hub's socket is the spoke's door; the Chart rides along
-            # whether or not config asked for it.
-            if not config.web.enabled:
-                log.info("hub: the wire server is on regardless of [web].enabled")
-            self._web_link = HubServer(config.web, config.hub)
-        else:
-            self._web_link = (
-                WebLink(config.web, config.hub) if config.web.enabled else None
-            )
         if self._web_link is not None:
             self._web_link.on_mute = self._set_muted
             self._web_link.on_restart = self._request_restart
@@ -779,6 +800,9 @@ class Pipeline:
             # emitter no-ops until the Vigil queue exists (checked at call
             # time, so construction order doesn't matter).
             verify_emitter=self._emit_verify,
+            # The Mac tools exist when the Mac is elsewhere.
+            mac_tools=self._remote is not None
+            and (config.shell.enabled or config.files.enabled),
         )
         # Memory writes carry provenance: "proactive" when a Vigil turn with
         # nobody around is writing, "conversation" otherwise — reflection
@@ -874,7 +898,9 @@ class Pipeline:
         # Where the user is: the tool works with or without Vigil (it reads
         # on demand); the watcher below only exists with it.
         self._locator: Locator | None = (
-            Locator(config.location) if config.location.enabled else None
+            Locator(config.location)
+            if config.location.enabled and not hub
+            else None
         )
         if self._locator is not None:
             bind_locator(self._locator)
@@ -884,25 +910,42 @@ class Pipeline:
                 config.proactive.held_max_age_h * 3600,
             )
             self._policy = InterruptionPolicy(config.proactive)
-            self._presence = PresenceProbe(config.proactive)
-            if config.proactive.calendar_enabled:
-                # Same contract, different source of truth: EventKit for
-                # calendars macOS syncs, Google's API for calendars that
-                # never touch this machine.
-                self._calendar = (
-                    GoogleCalendarWatcher(config.proactive, self._events)
-                    if config.proactive.calendar_source == "google"
-                    else CalendarWatcher(config.proactive, self._events)
-                )
-                self._vigil_watchers.append(self._calendar)
+            if hub:
+                # The Mac's watchers publish from the spoke: EventKit,
+                # location, the work watcher, and the presence signals all
+                # arrive over the wire. Portable watchers (the brief, the
+                # ring, Google's calendar, the sections) run here.
+                assert self._remote is not None and isinstance(self._web_link, HubServer)
+                self._presence = self._remote.presence
+                self._web_link.on_event = self._on_published_event
+                self._web_link.on_presence = self._on_presence
+                if config.proactive.calendar_enabled:
+                    if config.proactive.calendar_source == "google":
+                        self._calendar = GoogleCalendarWatcher(config.proactive, self._events)
+                        self._vigil_watchers.append(self._calendar)
+                    else:
+                        self._calendar = self._remote.calendar
+                self._work_watcher = self._remote.watcher
+            else:
+                self._presence = PresenceProbe(config.proactive)
+                if config.proactive.calendar_enabled:
+                    # Same contract, different source of truth: EventKit for
+                    # calendars macOS syncs, Google's API for calendars that
+                    # never touch this machine.
+                    self._calendar = (
+                        GoogleCalendarWatcher(config.proactive, self._events)
+                        if config.proactive.calendar_source == "google"
+                        else CalendarWatcher(config.proactive, self._events)
+                    )
+                    self._vigil_watchers.append(self._calendar)
+                work = WorkWatcher(config.proactive.watches_file, self._events)
+                bind_watcher(work)
+                self._vigil_watchers.append(work)
+                self._work_watcher = work
             if config.proactive.brief_time:
                 self._vigil_watchers.append(
                     ScheduleWatcher(config.proactive, self._events)
                 )
-            work = WorkWatcher(config.proactive.watches_file, self._events)
-            bind_watcher(work)
-            self._vigil_watchers.append(work)
-            self._work_watcher = work
             if config.oura.armed and (
                 config.oura.low_readiness > 0
                 or config.oura.low_sleep > 0
@@ -919,7 +962,7 @@ class Pipeline:
                 # quick poll. Cookie or watch list missing, it idles
                 # with a warning rather than arming nothing silently.
                 self._vigil_watchers.append(
-                    SectionsWatcher(config.sections, self._events)
+                    SectionsWatcher(config.sections, self._events, mail=config.mail)
                 )
             if self._locator is not None:
                 self._vigil_watchers.append(
@@ -1001,6 +1044,9 @@ class Pipeline:
         if self._role == "hub":
             await self._run_hub()
             return
+        from ciel.audio.input import MicStream
+        from ciel.audio.output import Player
+
         assert self._tts is not None and self._stt is not None
         await self._startup()
 
@@ -1567,6 +1613,37 @@ class Pipeline:
         log.debug("spoke cancelled turn %s (%s)", turn_id, reason or "no reason")
         asyncio.get_running_loop().create_task(self._abandon_playback(False))
 
+    def _on_published_event(self, raw: dict[str, Any]) -> bool:
+        """A Mac watcher's event, arrived over the wire — into the queue,
+        whose dedupe absorbs a resend. Malformed ones are refused loudly;
+        the publisher is code, not a user."""
+        if self._events is None:
+            return False
+        event = ProactiveEvent(
+            id=str(raw["id"]),
+            source=str(raw["source"]),
+            importance=int(raw["importance"]),
+            created_at=float(raw["created_at"]),
+            expires_at=float(raw["expires_at"]) if raw.get("expires_at") is not None else None,
+            summary=str(raw["summary"]),
+            dedupe_key=str(raw["dedupe_key"]),
+            payload={str(k): str(v) for k, v in (raw.get("payload") or {}).items()},
+            deliver_after=float(raw["deliver_after"]) if raw.get("deliver_after") is not None else None,
+        )
+        if self._events.push(event):
+            log.info("event published from the Mac: %s", event.summary)
+            return True
+        return False
+
+    def _on_presence(self, frame: dict[str, Any]) -> None:
+        """The spoke's heartbeat: the presence view and the watch roster."""
+        if self._remote is None:
+            return
+        self._remote.presence.observe(frame, time.monotonic())
+        watches = frame.get("watches")
+        if isinstance(watches, list):
+            self._remote.watcher.observe(watches)
+
     def _on_spoke_change(self, connected: bool) -> None:
         """The spoke took or left the seat. Leaving mid-question denies it
         (the barge-in rule: nobody is going to answer), and the wait a
@@ -1582,8 +1659,8 @@ class Pipeline:
     async def _handle_turn(
         self,
         utterance,
-        player: Player,
-        mic: MicStream,
+        player: "Player",
+        mic: "MicStream",
         pending_text: str | None = None,
     ) -> None:
         # Transcription takes about a second, which is long enough that the
@@ -2122,13 +2199,13 @@ class Pipeline:
             line = raw.decode(errors="replace").strip()
             if line:
                 self._typed.append((time.monotonic(), line))
-            elif isinstance(self._wake, HotkeyWake):
+            elif self._wake is not None and hasattr(self._wake, "arm"):
                 # A bare Enter in hotkey mode is the wake signal, delivered
                 # through the one stdin reader so nothing competes for fd 0.
                 self._wake.arm()
 
     async def _run_local_command(
-        self, cmd: Command, text: str, player: Player
+        self, cmd: Command, text: str, player: "Player"
     ) -> None:
         """Speak a locally-handled turn — the pre-merge dismissal's path:
         same console and transcript shape as ``_run_turn``, just with
@@ -2677,7 +2754,7 @@ class Pipeline:
             self._record("event", "interrupted")
 
     async def _announce_timers(
-        self, fired: list[Timer], missed: bool = False
+        self, fired: list["Timer"], missed: bool = False
     ) -> None:
         """Ring, then speak each fired timer's announcement.
 
@@ -2730,13 +2807,15 @@ class Pipeline:
                 "listening" if self._state is State.LISTENING else "idle"
             )
 
-    async def _play_ring(self, player: Player) -> None:
+    async def _play_ring(self, player: "Player") -> None:
         """The timer ring: a rising two-note figure, played twice.
 
         Deliberately not the thinking chime — that tone means "answer coming",
         this one means "Ciel is about to speak although you said nothing".
         Distinct sounds keep those distinguishable by ear alone.
         """
+        from ciel.audio.input import float_to_pcm
+
         rate = self._tts.sample_rate
 
         def note(freq: float, dur: float) -> np.ndarray:
@@ -2758,12 +2837,14 @@ class Pipeline:
         except Exception:  # noqa: BLE001 - a missing ring is not a failure
             log.debug("could not play the timer ring", exc_info=True)
 
-    async def _play_chime(self, player: Player) -> None:
+    async def _play_chime(self, player: "Player") -> None:
         """A soft tone marking the end of spoken reasoning.
 
         Same voice speaks both reasoning and answer, so the ear needs some
         other boundary. 120 ms of A5 with 20 ms fades — present, not alarming.
         """
+        from ciel.audio.input import float_to_pcm
+
         rate = self._tts.sample_rate
         t = np.arange(int(rate * 0.12), dtype=np.float32) / rate
         fade = np.minimum(1.0, np.minimum(t, t[::-1]) / 0.02)
@@ -2822,7 +2903,7 @@ class Pipeline:
         alpha = 0.02 if level > self._noise_floor else 0.15
         self._noise_floor = (1 - alpha) * self._noise_floor + alpha * level
 
-    def _check_barge_in(self, frame: bytes, player: Player) -> None:
+    def _check_barge_in(self, frame: bytes, player: "Player") -> None:
         """Stop playback if the user talks over Ciel.
 
         Runs on the main frame loop, so it stays cheap — RMS against an
@@ -2852,7 +2933,7 @@ class Pipeline:
             self._barge_run = 0
             player.stop()
 
-    async def _acknowledge(self, player: Player, mic: MicStream) -> None:
+    async def _acknowledge(self, player: "Player", mic: "MicStream") -> None:
         """Speak a short acknowledgement that the wake was heard.
 
         The audible counterpart of the indicator turning green. Kept to a

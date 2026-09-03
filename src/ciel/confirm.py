@@ -57,16 +57,18 @@ import logging
 import time
 from contextlib import contextmanager
 from enum import Enum, auto
-from typing import Awaitable, Callable, Iterator
+from typing import TYPE_CHECKING, Awaitable, Callable, Iterator
 
 import numpy as np
 
-from ciel.audio.input import MicStream
-from ciel.audio.output import Player
-from ciel.audio.vad import Endpointer
 from ciel.config import Config
-from ciel.stt.base import SpeechToText
-from ciel.tts.base import TextToSpeech
+
+if TYPE_CHECKING:
+    from ciel.audio.input import MicStream
+    from ciel.audio.output import Player
+    from ciel.audio.vad import Endpointer
+    from ciel.stt.base import SpeechToText
+    from ciel.tts.base import TextToSpeech
 
 log = logging.getLogger(__name__)
 
@@ -115,14 +117,10 @@ class VoiceConfirmBroker:
         # Its own endpointer, never the pipeline's — that one's state belongs
         # to LISTENING. Injectable so tests can script utterances instead of
         # synthesizing webrtcvad-passing PCM.
-        self._endpointer = (
-            endpointer
-            if endpointer is not None
-            # The floor callable is rebound at bind() time; routing through
-            # self keeps the answer window's endpointing noise-gated with
-            # whatever estimate the pipeline currently holds.
-            else Endpointer(config.audio, noise_floor=lambda: self._noise_floor())
-        )
+        self._endpointer_given = endpointer
+        self._endpointer_built: "Endpointer | None" = None
+        """Built on first use (the hub never needs one, and its module
+        pulls in the VAD library the hub need not have)."""
         self._lock = asyncio.Lock()
         self._cancelled = asyncio.Event()
         self._phase = _Phase.IDLE
@@ -147,6 +145,21 @@ class VoiceConfirmBroker:
         self._tts: TextToSpeech | None = None
         self._noise_floor: Callable[[], float | None] = lambda: None
         self._record: Callable[[str, str], None] | None = None
+
+    @property
+    def _endpointer(self) -> "Endpointer":
+        if self._endpointer_given is not None:
+            return self._endpointer_given
+        if self._endpointer_built is None:
+            from ciel.audio.vad import Endpointer
+
+            # The floor callable is rebound at bind() time; routing through
+            # self keeps the answer window's endpointing noise-gated with
+            # whatever estimate the pipeline currently holds.
+            self._endpointer_built = Endpointer(
+                self._config.audio, noise_floor=lambda: self._noise_floor()
+            )
+        return self._endpointer_built
 
     # ── pipeline-side wiring ─────────────────────────────────────────────────
 

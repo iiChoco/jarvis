@@ -79,6 +79,7 @@ SAMPLES: dict[str, dict] = {
     "confirm.request": {"confirm_id": "c1", "text": "Run it?", "deadline_wall": 9.0},
     "tool.request": {"rpc_id": "r1", "tool": "shell", "args": {"cmd": "ls"}},
     "tool.cancel": {"rpc_id": "r1"},
+    "event.ack": {"publish_id": "p-mac-1"},
     "deliver.speak": {"event_id": "e1", "text": "Meeting in ten."},
     "timers.sync": {"timers": []},
 }

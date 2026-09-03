@@ -30,7 +30,9 @@ from claude_agent_sdk import create_sdk_mcp_server
 from ciel.brain.tools.actions import ACTION_TOOLS, bind_journal
 from ciel.brain.tools.grants import GRANT_TOOLS
 from ciel.brain.tools.grants import bind_config as bind_grants
-from ciel.brain.tools.location import LOCATION_TOOLS
+from ciel.brain.tools.location import LOCATION_TOOLS, bind_locator
+from ciel.brain.tools.mac import MAC_TOOLS, bind_mac
+from ciel.brain.tools.mail import MAIL_TOOLS, bind_mail
 from ciel.brain.tools.memory import MEMORY_TOOLS, bind_store
 from ciel.brain.tools.messages import MESSAGE_TOOLS, SEND_TOOLS
 from ciel.brain.tools.messages import bind_client as bind_messages
@@ -38,9 +40,10 @@ from ciel.brain.tools.oura import OURA_TOOLS, bind_oura
 from ciel.brain.tools.projects import PROJECT_TOOLS, bind_projects
 from ciel.brain.tools.screen import SCREEN_TOOLS, bind_screen
 from ciel.brain.tools.timers import TIMER_TOOLS, bind_timers
-from ciel.brain.tools.watch import WATCH_TOOLS
+from ciel.brain.tools.watch import WATCH_TOOLS, bind_watcher
 from ciel.config import Config, MCPServerConfig
 from ciel.journal import ActionJournal
+from ciel.mail import SmtpSender
 from ciel.memory.store import MemoryStore
 from ciel.messages import MessagesClient
 from ciel.oura import OuraClient, build_auth
@@ -55,7 +58,7 @@ SERVER_NAME = "ciel"
 TOOLS = [
     *MEMORY_TOOLS, *MESSAGE_TOOLS, *ACTION_TOOLS, *PROJECT_TOOLS,
     *SCREEN_TOOLS, *TIMER_TOOLS, *WATCH_TOOLS, *GRANT_TOOLS, *OURA_TOOLS,
-    *LOCATION_TOOLS,
+    *LOCATION_TOOLS, *MAIL_TOOLS,
 ]
 
 
@@ -83,6 +86,7 @@ def _external_server(entry: MCPServerConfig) -> dict[str, Any] | None:
 
 def build_tool_server(
     config: Config,
+    remote: Any | None = None,
 ) -> tuple[
     dict[str, Any],
     list[str],
@@ -99,6 +103,12 @@ def build_tool_server(
     brain can hook its recorder up to the same instance this registry's tool
     reads), and the timer service (so the pipeline can poll it for due
     announcements — the tools only *arm* timers; the pipeline speaks them).
+
+    ``remote`` is the hub's ``RemoteBindings``: with it, everything
+    Mac-bound — the screen, Messages, location, the work watcher — binds
+    the wire's duck type instead of the local implementation, and the
+    Mac tools (the user's shell and files, from a brain elsewhere) are
+    registered. None is the single process and the spoke.
     """
     store: MemoryStore | None = None
     journal: ActionJournal | None = None
@@ -137,7 +147,7 @@ def build_tool_server(
         tools = [t for t in tools if t not in ACTION_TOOLS]
 
     if config.screen.enabled:
-        bind_screen(config.screen)
+        bind_screen(config.screen, remote.screen if remote is not None else None)
     else:
         # Same reasoning as memory: an always-refusing tool wastes turns.
         tools = [t for t in tools if t not in SCREEN_TOOLS]
@@ -155,6 +165,9 @@ def build_tool_server(
         # tool wastes turns. The pipeline binds the watcher after it builds
         # the queue (the bind-late pattern memory's context provider uses).
         tools = [t for t in tools if t not in WATCH_TOOLS]
+    elif remote is not None:
+        # The watches live on the Mac; the hub's registry is the wire.
+        bind_watcher(remote.watcher)
 
     if config.grants.enabled:
         # The path is the loader's default, not derived from state_dir:
@@ -184,9 +197,32 @@ def build_tool_server(
         # bind-late pattern); off, the tool would only ever answer
         # unavailable — same reasoning as memory.
         tools = [t for t in tools if t not in LOCATION_TOOLS]
+    elif remote is not None:
+        bind_locator(remote.locator)
+
+    if config.mail.armed:
+        # Ciel's own address. The gate for the tool lives in agent.py's
+        # confirm set; here it only needs its relay.
+        bind_mail(
+            SmtpSender(
+                config.mail.smtp_host, config.mail.smtp_port,
+                config.mail.smtp_user, config.mail.token, config.mail.copy_to,
+            ),
+            config.mail,
+        )
+    else:
+        if config.mail.enabled:
+            log.warning(
+                "[mail] is enabled but address or token is missing — "
+                "send_as_ciel is off"
+            )
+        # Same reasoning as memory: an always-unavailable tool wastes turns.
+        tools = [t for t in tools if t not in MAIL_TOOLS]
 
     if config.messages.enabled:
-        bind_messages(MessagesClient(config.messages))
+        bind_messages(
+            remote.messages if remote is not None else MessagesClient(config.messages)
+        )
         if not config.messages.allow_send:
             # Reading without sending is a coherent setup and the safer default,
             # so the send tool is withheld rather than left to fail at call
@@ -194,6 +230,20 @@ def build_tool_server(
             tools = [t for t in tools if t not in SEND_TOOLS]
     else:
         tools = [t for t in tools if t not in MESSAGE_TOOLS]
+
+    if remote is not None and (config.shell.enabled or config.files.enabled):
+        # The user's Mac from the hub: the shell when the shell is on,
+        # the files when files are on — the same switches, the same
+        # guards, one machine over.
+        bind_mac(remote.mac, config.shell)
+        mac_tools = [
+            t for t in MAC_TOOLS
+            if (t.name == "run_on_mac" and config.shell.enabled)
+            or (t.name != "run_on_mac" and config.files.enabled)
+        ]
+        tools = [*tools, *mac_tools]
+    else:
+        tools = [t for t in tools if t not in MAC_TOOLS]
 
     servers: dict[str, Any] = {}
     allowed: list[str] = []

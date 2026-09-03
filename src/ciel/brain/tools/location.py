@@ -46,6 +46,11 @@ def _text(message: str) -> dict[str, Any]:
 async def where_am_i(args: dict[str, Any]) -> dict[str, Any]:
     if _locator is None:
         return _text("Location is not available right now.")
+    describe_now = getattr(_locator, "describe_now", None)
+    if describe_now is not None:
+        # The hub's locator is the Mac's, one hop away: it reads and
+        # describes in one round trip, with the Mac's places config.
+        return _text(await describe_now(_FRESH_S))
     try:
         fix = await asyncio.to_thread(_locator.current, _FRESH_S)
     except Exception:  # noqa: BLE001 - a broken source is a sentence, not a crash

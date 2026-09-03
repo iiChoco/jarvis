@@ -10,9 +10,20 @@ requires-python = ">=3.12"
 dependencies = [
     # Brain — authenticates via Claude subscription OAuth, not an API key.
     "claude-agent-sdk>=0.1.0",
+    # Shared arithmetic (the wire's ring tones, the confirm broker's RMS).
+    "numpy>=2.1",
+]
+
+# The room's half and the brain's half. Everything the microphone and
+# the Mac need lives in the `spoke` group; the hub's own extras in `hub`.
+# `spoke` is a default group, so a plain `uv sync` on this Mac installs
+# exactly what it always did; a server runs
+# `uv sync --no-default-groups --group hub --extra discord --extra web`
+# and never sees a sound device or a pyobjc wheel.
+[dependency-groups]
+spoke = [
     # Audio I/O
     "sounddevice>=0.5.1",
-    "numpy>=2.1",
     # Endpointing: knowing when the user stopped talking
     "webrtcvad-wheels>=2.0.14",
     # Speech-to-text, local. mlx-whisper is the default engine (Metal GPU);
@@ -45,6 +56,10 @@ dependencies = [
     # Location Services permission for the Python that runs Ciel.
     "pyobjc-framework-CoreLocation>=10.1",
 ]
+hub = [
+    # The wire server (the Chart, the spoke's seat).
+    "aiohttp>=3.10",
+]
 
 [project.optional-dependencies]
 # Better-sounding TTS than macOS `say`. Optional so v1 runs with zero downloads.
@@ -73,6 +88,7 @@ requires = ["uv_build>=0.12.1,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.uv]
+default-groups = ["spoke"]
 # Ciel targets macOS. Restricting resolution to darwin also sidesteps
 # openwakeword's Linux-only tflite-runtime dependency, which has no wheels for
 # Python 3.12+ — and we run openWakeWord under onnxruntime anyway, since the

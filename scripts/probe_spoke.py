@@ -203,6 +203,38 @@ def make_spoke(*, stt="hello there.", connected=True, complete_after=None,
     s._reported = None
     s._watcher = None
     s.reload_requested = False
+
+    class _Outbox:
+        def __init__(self):
+            self.acked_ids = []
+            self.resends = 0
+
+        def acked(self, publish_id):
+            self.acked_ids.append(publish_id)
+
+        def resend(self):
+            self.resends += 1
+            return 0
+
+    class _Beat:
+        def __init__(self):
+            self.beats = 0
+
+        def beat(self, *, force=False):
+            self.beats += 1
+            return True
+
+    class _Exec:
+        def __init__(self):
+            self.frames = []
+
+        def handle(self, frame):
+            self.frames.append(frame)
+
+    s._publish = _Outbox()
+    s._heartbeat = _Beat()
+    s._executor = _Exec()
+    s._watchers = []
     return s
 
 
@@ -311,7 +343,12 @@ async def probe_hub_down() -> None:
     await settle()
     check("the second time is a chime", s._player.played[-1] == "<pcm>" and len(s._player.played) == 2)
     s._on_connect({"type": "hello", "muted": False})
-    check("reconnecting resets the notice", not s._hub_lost_said)
+    check("reconnecting resets the notice, resends the outbox, beats at once",
+          not s._hub_lost_said and s._publish.resends == 1 and s._heartbeat.beats == 1)
+    s._on_frame({"type": "tool.request", "rpc_id": "r1", "tool": "screen.capture", "args": {}})
+    s._on_frame({"type": "event.ack", "publish_id": "p-mac-1"})
+    check("tool requests go to the executor, event acks to the outbox",
+          s._executor.frames[0]["rpc_id"] == "r1" and s._publish.acked_ids == ["p-mac-1"])
 
     s = make_spoke()
     s._on_frame({"type": "turn.begin", "turn_id": "t3", "lane": "voice"})

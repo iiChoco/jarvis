@@ -33,10 +33,25 @@ log = logging.getLogger(__name__)
 # Bound at startup, same pattern as the memory store: the SDK's @tool
 # decorator wants plain module-level functions.
 _config: ScreenConfig | None = None
+_capturer: Any | None = None
+"""On the hub: the Mac's screen, over the wire (``RemoteScreen``). None
+means capture here — the single process, or the spoke's executor."""
 
 
 class _PermissionMissing(Exception):
     """Screen Recording permission has not been granted to this process."""
+
+
+async def capture_displays(max_edge: int) -> list[bytes]:
+    """Every display as JPEG bytes, on a worker thread — the spoke's
+    executor calls this on the hub's behalf. Raises the permission
+    error as a sentence, so it crosses the wire as words."""
+    try:
+        return await asyncio.to_thread(_capture_sync, max_edge)
+    except _PermissionMissing:
+        raise RuntimeError(
+            "macOS Screen Recording permission is not granted on the Mac"
+        ) from None
 
 
 def _capture_sync(max_edge: int) -> list[bytes]:
@@ -100,7 +115,10 @@ async def look_at_screen(args: dict[str, Any]) -> dict[str, Any]:
     max_edge = _config.max_edge if _config else 1568
 
     try:
-        images = await asyncio.to_thread(_capture_sync, max_edge)
+        if _capturer is not None:
+            images = await _capturer.capture(max_edge)
+        else:
+            images = await asyncio.to_thread(_capture_sync, max_edge)
     except _PermissionMissing:
         return {"content": [{"type": "text", "text": (
             "You cannot see the screen: macOS Screen Recording permission is "
@@ -110,11 +128,11 @@ async def look_at_screen(args: dict[str, Any]) -> dict[str, Any]:
             "Recording — and that it takes effect after Ciel restarts. For "
             "now, ask them to describe what they're looking at."
         )}]}
-    except Exception:
-        log.exception("screen capture failed")
+    except Exception as exc:  # noqa: BLE001 - a failure is a sentence for the model
+        log.warning("screen capture failed: %s", exc)
         return {"content": [{"type": "text", "text": (
-            "The screen capture failed. Ask the user to describe what "
-            "they're looking at instead."
+            f"The screen capture failed ({exc}). Ask the user to describe "
+            "what they're looking at instead."
         )}]}
 
     if not images:
@@ -138,12 +156,14 @@ async def look_at_screen(args: dict[str, Any]) -> dict[str, Any]:
     return {"content": content}
 
 
-def bind_screen(config: ScreenConfig) -> None:
-    """Attach the config this tool captures with."""
-    global _config
+def bind_screen(config: ScreenConfig, capturer: Any | None = None) -> None:
+    """Attach the config this tool captures with — and, on the hub, the
+    remote capturer that does it on the Mac."""
+    global _config, _capturer
     _config = config
+    _capturer = capturer
 
 
 SCREEN_TOOLS = [look_at_screen]
 
-__all__ = ["SCREEN_TOOLS", "bind_screen", "look_at_screen"]
+__all__ = ["SCREEN_TOOLS", "bind_screen", "capture_displays", "look_at_screen"]

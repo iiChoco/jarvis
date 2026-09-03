@@ -34,6 +34,10 @@ from ciel.remote.web import Admission, WebLink
 log = logging.getLogger(__name__)
 
 
+class RpcUnavailable(RuntimeError):
+    """A tool call could not reach the Mac, or the Mac did not answer."""
+
+
 class HubServer(WebLink):
     """``WebLink`` with the spoke seat."""
 
@@ -48,6 +52,14 @@ class HubServer(WebLink):
         """(turn_id, n) → the sentence's playback receipt."""
         self._delivered: dict[str, asyncio.Future[bool]] = {}
         """event_id → the delivery's receipt."""
+        self._rpc: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        """rpc_id → the tool call's result frame."""
+        self._rpc_seq = 0
+        self.on_event: Callable[[dict[str, Any]], bool] | None = None
+        """A published event from the spoke's watchers: the queue's push.
+        Returns whether it was new; either way the publish is acked."""
+        self.on_presence: Callable[[dict[str, Any]], None] | None = None
+        """The spoke's heartbeat, raw — the presence view folds it in."""
         self.spoke_listening = False
         """The spoke's last reported listening state — a window is open."""
         self.spoke_speaking = False
@@ -112,6 +124,33 @@ class HubServer(WebLink):
             timeout,
         )
 
+    async def rpc(
+        self, tool: str, args: dict[str, Any], timeout: float
+    ) -> dict[str, Any]:
+        """One tool call on the spoke: ``tool.request`` down, its
+        ``tool.result`` back. Returns the result frame (``ok``, and
+        ``content`` or ``error``); raises :class:`RpcUnavailable` when
+        there is no spoke, it left mid-call, or nothing came back in
+        ``timeout`` — the caller turns that into words for the model."""
+        if not self.spoke_connected:
+            raise RpcUnavailable("the Mac is not connected")
+        self._rpc_seq += 1
+        rpc_id = f"r{self._rpc_seq}"
+        fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._rpc[rpc_id] = fut
+        try:
+            self.send_spoke({
+                "type": "tool.request", "rpc_id": rpc_id, "tool": tool,
+                "args": args, "timeout_s": timeout,
+            })
+            try:
+                return await asyncio.wait_for(fut, timeout)
+            except asyncio.TimeoutError:
+                self.send_spoke({"type": "tool.cancel", "rpc_id": rpc_id})
+                raise RpcUnavailable(f"the Mac did not answer in {timeout:.0f}s")
+        finally:
+            self._rpc.pop(rpc_id, None)
+
     async def _await_receipt(
         self, table: dict, key: Any, frame: dict[str, Any], timeout: float
     ) -> bool:
@@ -130,10 +169,13 @@ class HubServer(WebLink):
             table.pop(key, None)
 
     def _fail_waits(self) -> None:
-        """Every open wait resolves False: the spoke is gone."""
+        """Every open wait resolves: the spoke is gone."""
         for fut in list(self._played.values()) + list(self._delivered.values()):
             if not fut.done():
                 fut.set_result(False)
+        for fut in list(self._rpc.values()):
+            if not fut.done():
+                fut.set_exception(RpcUnavailable("the Mac disconnected mid-call"))
 
     # ── the door, extended ───────────────────────────────────────────────────
 
@@ -206,6 +248,23 @@ class HubServer(WebLink):
                 fut = self._delivered.get(frame["event_id"])
                 if fut is not None and not fut.done():
                     fut.set_result(frame["ok"])
+            elif kind == "tool.result":
+                fut = self._rpc.get(frame["rpc_id"])
+                if fut is not None and not fut.done():
+                    fut.set_result(frame)
+            elif kind == "event.publish":
+                # At-least-once from the publisher: the queue's own dedupe
+                # absorbs a resend, and the ack goes back either way so
+                # the outbox can let it go.
+                if self.on_event is not None:
+                    try:
+                        self.on_event(frame["event"])
+                    except Exception:  # noqa: BLE001 - a bad event is logged, still acked
+                        log.exception("published event refused")
+                self._send_to(ws, {"type": "event.ack", "publish_id": frame["publish_id"]})
+            elif kind == "presence":
+                if self.on_presence is not None:
+                    self.on_presence(frame)
             elif kind == "turn.cancel":
                 if self.on_turn_cancel is not None:
                     self.on_turn_cancel(frame["turn_id"], frame.get("reason") or "")
@@ -228,4 +287,4 @@ class HubServer(WebLink):
             log.debug("spoke frame handling failed", exc_info=True)
 
 
-__all__ = ["HubServer"]
+__all__ = ["HubServer", "RpcUnavailable"]

@@ -104,7 +104,10 @@ class GmailSender:
         )
         try:
             with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_S) as response:
-                return json.loads(response.read().decode("utf-8"))
+                raw = response.read().decode("utf-8")
+                # Gmail answers some calls (an empty filter list, a batch
+                # modify) with 204 and no body; that is success, not JSON.
+                return json.loads(raw) if raw.strip() else {}
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:200]
             raise GmailUnavailable(f"Gmail answered {exc.code}: {detail}") from exc

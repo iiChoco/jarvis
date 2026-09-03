@@ -469,6 +469,11 @@ class ShellConfig:
     at the deadline. Matches ``wake_timeout_ms`` because it is the same social
     contract: a question waits about this long for an answer."""
 
+    command_timeout_s: float = 120.0
+    """How long a command run on the Mac from the hub may take before the
+    spoke kills it. The SDK's own Bash tool has its own clock; this one is
+    for ``run_on_mac``, which the hub awaits over the wire."""
+
     max_command_display_chars: int = 120
     """Commands longer than this are truncated in the spoken prompt. The point
     of reading a command aloud is that you hear what is about to run, but past
@@ -974,6 +979,62 @@ class SectionsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MailConfig:
+    """Ciel's own email address (``mail.py``, tool in ``brain/tools/mail.py``).
+
+    Where the Gmail connector lets Ciel act *as the user*, this is mail *as
+    Ciel*: an address on a domain onboarded with Cloudflare Email Service,
+    sent through its SMTPS relay with an API token. The brain gets one tool,
+    ``send_as_ciel``, behind the spoken-yes gate like every other send; the
+    section watcher's alarm borrows the same relay when it has no relay of
+    its own. Replies to the address arrive wherever the domain's Email
+    Routing forwards them — the owner's inbox, typically under a label."""
+
+    enabled: bool = False
+    """Off by default. On without ``address`` and ``token`` warns at
+    startup and arms nothing."""
+
+    address: str = ""
+    """Ciel's address, e.g. ``ciel@example.com`` — the From on everything
+    sent here. Its domain must be onboarded for Email Sending on the
+    account the token belongs to, or the relay answers 550."""
+
+    owner: str = ""
+    """Where "email me" goes: the user's own inbox, which must be a
+    verified destination address on the Cloudflare account (relaying to
+    those is free on every plan; anywhere else needs Workers Paid). Also
+    the default recipient of the section watcher's alarm."""
+
+    copy_to: str = ""
+    """An address that silently receives a copy (Bcc) of everything sent
+    from Ciel's address — the tool and the section alarm alike — so the
+    user has a record of what Ciel said in their own inbox without the
+    recipient seeing it. On Cloudflare's free tier this too must be a
+    verified destination address. Empty keeps no copy."""
+
+    smtp_host: str = "smtp.mx.cloudflare.net"
+    """The relay. Cloudflare's speaks implicit TLS only."""
+
+    smtp_port: int = 465
+    """SMTPS; there is no STARTTLS on 587."""
+
+    smtp_user: str = "api_token"
+    """The login name — for Cloudflare, literally this; the token is the
+    password."""
+
+    token: str = ""
+    """A Cloudflare API token with the Email Sending: Edit permission. A
+    credential: ``CIEL_MAIL_TOKEN`` in the launch environment is the
+    tidier home. Anyone holding it can send as any address on the domain."""
+
+    @property
+    def armed(self) -> bool:
+        """Enabled *and* able to send — the one test the tool registry,
+        the gate, the prompt, and the watcher all make, so they agree."""
+        return self.enabled and bool(self.address and self.token)
+
+
+@dataclass(frozen=True, slots=True)
 class LocationConfig:
     """Where the user is (``location.py``) — from what this machine can see.
 
@@ -1228,6 +1289,12 @@ class HubConfig:
     abandoning the turn. Generous: a long sentence through Piper plus a
     slow machine is tens of seconds; only a dead socket takes minutes."""
 
+    presence_stale_s: float = 30.0
+    """How old the spoke's last heartbeat may be before the hub reads the
+    room as empty. Three beats at the spoke's default cadence: one
+    missed beat is a hiccup, three is a spoke that stopped listening,
+    and Vigil must not speak to it."""
+
     confirm_timeout_s: float = 45.0
     """The hub-side deadline for one spoken answer from the spoke — the
     spoke speaks the question and listens for its own ``[shell]``
@@ -1278,6 +1345,10 @@ class SpokeConfig:
 
     hello_timeout_s: float = 5.0
     """How long to wait for the hub's hello after connecting."""
+
+    heartbeat_s: float = 10.0
+    """How often the presence report goes up when nothing changed; a
+    change (the screen locking, a watch finishing) sends at once."""
 
     def current_token(self) -> str:
         if self.token:
@@ -1668,6 +1739,7 @@ class Config:
     spoke: SpokeConfig = field(default_factory=SpokeConfig)
     oura: OuraConfig = field(default_factory=OuraConfig)
     sections: SectionsConfig = field(default_factory=SectionsConfig)
+    mail: MailConfig = field(default_factory=MailConfig)
     location: LocationConfig = field(default_factory=LocationConfig)
     grants: GrantsConfig = field(default_factory=GrantsConfig)
     commands: CommandsConfig = field(default_factory=CommandsConfig)
@@ -1710,6 +1782,7 @@ _SECTIONS = {
     "spoke": SpokeConfig,
     "oura": OuraConfig,
     "sections": SectionsConfig,
+    "mail": MailConfig,
     "location": LocationConfig,
     "grants": GrantsConfig,
     "commands": CommandsConfig,

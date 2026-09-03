@@ -530,6 +530,28 @@ be unreachable.
 `scripts/probe_confirm_wire.py` drive each half with fakes and a fake
 other half.
 
+**The hub needs no Mac in it.** Everything Mac-bound reaches the machine
+over the same socket. The brain's tools for the screen, Messages, the
+location, and background watches bind the wire on the hub and run on
+the spoke; the calendar store (EventKit), the locator, and the work
+watcher run *on the spoke* and publish their events up, acked one by
+one and resent after a reconnect; presence is a heartbeat — the raw
+lock-and-idle signals plus the roster of active watches — and a
+heartbeat that goes stale reads as an empty room, so Vigil never speaks
+to a spoke that stopped listening. Four tools exist only on the hub:
+`run_on_mac`, `mac_read_file`, `mac_write_file`, and `mac_list_dir` —
+the user's shell and files from a brain elsewhere, with the Mac named
+as the default target of "run this" and "open that" in the prompt. Both
+sides guard them: the hub's shell gate reads a side-effectful command
+aloud for a spoken yes and the workspace guard checks every path, and
+the spoke re-runs the classifier and the path check from its own config
+before touching anything — the deny tier is refused whatever the hub
+says, the confirm tier refused unless the hub says it asked. The
+ordinary Bash and file tools on the hub act on the hub's own workspace.
+`scripts/probe_hub_imports.py` proves the point by refusing every Mac
+and audio module and constructing the hub anyway; `probe_tool_rpc.py`
+and `probe_presence.py` drive the calls and the publishers.
+
 ## Watching things (Vigil)
 
 Off by default. Everything else Ciel says was asked for; Vigil is the
@@ -633,6 +655,44 @@ From `activity_check_after` (18:00), an activity score still at or under
 walk would fix it"). A fine day produces nothing. Scores appear once the
 ring syncs through the phone; the watcher rescans every half hour and on
 wake from sleep. Any threshold set to 0 switches that check off.
+
+## Ciel's own email address
+
+Off by default. With `[mail]` set, Ciel has an address of its own —
+`ciel@example.com`, say — and one tool, `send_as_ciel`, that sends from it.
+The Gmail connector sends *as you*; this sends *as Ciel*, and the prompt
+teaches the difference: a note you asked Ciel to send you, a message on
+its own behalf, anything a reader should see as coming from an assistant
+goes here; mail in your name and voice goes through your own tool. The
+send sits behind the same spoken confirmation as every other one ("Send
+an email from my own address to ..., subject ... — okay?") and is absent
+from the Witness observers, so an unattended turn can never use it.
+
+Sending runs through Cloudflare Email Service's SMTPS relay, which needs
+the domain on Cloudflare DNS and onboarded for Email Sending (it adds the
+SPF/DKIM/DMARC records itself) and an API token with the *Email Sending:
+Edit* permission. Relaying to the account's verified destination
+addresses — yours — is free on every plan; mailing anyone else needs the
+Workers Paid plan. Inbound mail to the address is Email Routing's job:
+forward it to your inbox, with a filter on `to:` / `from:` the address to
+give it a label of its own.
+
+```toml
+[mail]
+enabled = true
+address = "ciel@example.com"
+owner = "you@gmail.com"     # where "email me" goes; a verified destination
+copy_to = "you@work.edu"    # optional: a silent Bcc of everything Ciel sends
+token = "..."               # or CIEL_MAIL_TOKEN in the environment
+```
+
+`copy_to` gives you a record of Ciel's outgoing mail in an inbox of your
+choosing: the relay Bcc's it on every message, tool and alarm alike, and
+the recipient never sees it. A refused copy is logged, not fatal; a
+refused recipient is a failed send.
+
+The section watcher's alarm borrows this relay and address when it has
+none of its own, so one token serves both.
 
 ## A spot in a section (the signup site)
 
