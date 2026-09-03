@@ -208,7 +208,8 @@ def probe_doctor() -> None:
           rows["bind"][1] and rows["token"][1])
     check("a missing state dir fails the state check", not rows["state"][1])
     cfg = replace(Config(), state_dir=tmp)
-    cfg2 = replace(cfg, hub=replace(HubConfig(), bind="203.0.113.7", token=""))
+    cfg2 = replace(cfg, hub=replace(HubConfig(), bind="203.0.113.7", token="",
+                                    token_file=tmp / "no-such-token"))
     rows = {r[0]: r for r in doctor.run(cfg2)}
     check("an address this machine lacks fails the bind check",
           not rows["bind"][1] and "NOT an address" in rows["bind"][2])
