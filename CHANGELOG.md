@@ -2,6 +2,95 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-02 — two processes: the room and the brain (phase 2)
+
+**Why.** Phase 2 of the hub-and-spoke move, the riskiest cut: split
+Ciel into the process that must be in the room and the process that
+needn't be, both still on this Mac, so the second can leave later with
+nothing but an address changing. `ciel local` is untouched and remains
+the rollback.
+
+**What.**
+
+- *The pipeline in two roles* (`pipeline.py`): ``Pipeline(config,
+  role="hub")`` builds no audio — no STT, TTS, wake, endpointer, or
+  gate — and runs ``_run_hub`` instead of the frame loop: the same
+  ladder (``pick_next``) on a tenth-of-a-second tick or the server's
+  stir, the same enactments. The frame loop's dispatch blocks moved
+  into ``_enact``, its idle reload-and-maintenance block into
+  ``_idle_housekeeping``, shared byte-for-byte by both loops; the
+  audio-owning turn became ``self._turn``. The voice lane on the hub is
+  ``_WireSink``: sentences go down as ``turn.sentence`` frames and the
+  sink awaits each ``turn.played`` receipt, so a stopped sentence
+  abandons the turn (brain interrupted, confirm cancelled) exactly as
+  the player's False does. Timers and Vigil nudges become
+  ``deliver.speak`` with a receipt the budget hangs on; mute on the hub
+  touches no sentinel and stops no player — it broadcasts, and the
+  spoke's report comes back the other way.
+- *The ladder's voice rank* (`schedule.py`): ``Source.VOICE`` —
+  an utterance the spoke already endpointed and transcribed outranks
+  every queue but timers, from any state but BUSY; never true in the
+  single process.
+- *The hub server* (`hub/server.py`): ``WebLink`` with the spoke's
+  seat. One seat (a second spoke replaces the first); spoke says are
+  voice turns, not chart turns; ``turn.played`` and ``deliver.result``
+  resolve the sink's waits; ``confirm.answer`` goes to the broker;
+  ``voice.state`` feeds the snapshot; a spoke that leaves fails every
+  open wait and tells the pipeline, which cancels a pending question.
+- *The spoke* (`spoke/frontend.py`, `spoke/client.py`): the frame
+  loop's state machine with the thinking taken out — wake, gate, STT,
+  the Cauchy hold, the dismissal-before-merge, barge-in, follow-up,
+  the ack filler, the chime, the HUD, the mute sentinel — sending
+  ``say`` and playing what comes back. ``confirm.request`` is spoken
+  and, when it asks, listened for with the broker's own endpointer;
+  the answer (or the window's timeout, as an empty one) goes back.
+  The client speaks first, holds says until acked, resends after a
+  reconnect, backs off. A hub that is down is said once, then a chime
+  per swallowed utterance.
+- *The broker's spoke origin* (`confirm.py`): the remote choreography
+  with ``listen=`` on the lines that expect an answer, the spoken
+  lane's ``you-confirm`` label (the answer was spoken here — presence
+  evidence), an empty answer read as "no answer", and
+  ``[hub].confirm_timeout_s`` as the hub-side deadline.
+- *The catalog* (`wire.py`): ``turn.played``, ``voice.state``,
+  ``confirm.cancel``, ``n`` on sentences, ``listen`` on requests; the
+  replay ring now holds only the idempotent broadcasts (rows, state,
+  muted, agents, timers.sync) — a replayed sentence would be spoken
+  twice.
+- *Config and entry*: ``[spoke]`` (``hub``, ``token``/``token_file``,
+  ``client_id``, backoff); ``[hub].speak_timeout_s`` and
+  ``confirm_timeout_s``; ``ciel hub`` / ``ciel spoke`` / ``ciel local``
+  in ``__main__``, the role carried through a reload.
+
+**Deferred, on purpose.** The spoke's local command fast path and
+timer ringing (resilience, phase 5); the typed lane on the spoke's
+terminal; presence, tool RPC, and the Mac watchers as publishers
+(phase 3 — both processes are on the Mac, so the hub still reads them
+directly).
+
+**Probes.** `probe_hub_arbiter.py`, 44: the seat, the snapshot and the
+voice rank, a full voice turn's frames and golden rows, barge-in through
+an unfinished receipt and through ``turn.cancel``, the spoke leaving
+mid-sentence and never receipting, confirm requests through the sink,
+timers and nudges as deliveries with and without a spoke, mute both
+ways. `probe_spoke.py`, 36: a turn end to end with the follow-up window
+after, the gate, the hold, the dismissal, barge-in, the hub down (said
+once, then a chime), a confirmation answered and one timed out, a
+delivery rung and receipted, mute from both sides, the state reports,
+the ack filler. `probe_confirm_wire.py`, 13: the spoke origin's labels,
+``listen``, the empty answer, the hub deadline, cancel within a second,
+a late answer ignored, a dead sink. `probe_ladder` 17, `probe_wire` 69,
+`probe_turns` and `probe_vigil` adjusted for the new signatures; the
+whole non-hardware suite green (963 checks). Live: the real hub process
+(isolated state, brain and all) driven by a scripted spoke over a real
+socket — "Four, sir." as sentence 1 between ``turn.begin`` and
+``turn.end``, 2.6 s to first speech — which also caught the one bug the
+probes had not: a ``continue`` in the hub loop that had become a
+``return`` during the extraction, ending the loop after its first
+enactment (``probe_hub_arbiter`` now drives the loop itself). Still
+owed: the two-process daily driver with a real spoke, kill -9 each
+side, sleep/wake.
+
 ## 2026-09-02 — the wire gets a catalog; the Chart reaches the tailnet (phase 1)
 
 **Why.** Phase 1 of the hub-and-spoke move: grow the hub server in

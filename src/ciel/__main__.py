@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from ciel.config import Config, load_config
 from ciel.pipeline import Pipeline
@@ -20,6 +21,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="ciel",
         description="Ciel — a local-first voice assistant.",
+    )
+    parser.add_argument(
+        "role",
+        nargs="?",
+        choices=["local", "hub", "spoke"],
+        default="local",
+        help=(
+            "local: everything in one process (default); hub: the brain, "
+            "memory, Vigil, and the text lanes, served over the wire; "
+            "spoke: the microphone and the speakers, as a client of the hub"
+        ),
     )
     parser.add_argument(
         "--wake",
@@ -136,9 +148,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.new:
         config.session_file.unlink(missing_ok=True)
 
-    pipeline = Pipeline(config)
+    if args.role == "spoke":
+        from ciel.spoke.frontend import Spoke
+
+        app: Any = Spoke(config)
+    else:
+        app = Pipeline(config, role=args.role)
     try:
-        asyncio.run(pipeline.run())
+        asyncio.run(app.run())
     except KeyboardInterrupt:
         print("\nbye")
         return 130
@@ -148,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
             raise
         return 1
 
-    if pipeline.reload_requested:
+    if app.reload_requested:
         # Replace this process with a fresh one running the new code — a real
         # restart in everything but who typed it. execv never returns; the
         # same interpreter, arguments, and environment carry over, and the

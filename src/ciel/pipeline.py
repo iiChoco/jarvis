@@ -23,6 +23,12 @@ and confirmations travel the same road), and **Chart** (the web GUI — a
 local coordinate window onto the whole conversation: a loopback page that
 shows every lane live, takes typed turns of its own, and holds the mute
 switch for rooms that must stay quiet).
+
+The same class runs in two roles. ``local`` is all of the above in one
+process. ``hub`` builds no audio at all: the voice lane's turns arrive
+from the spoke (``ciel spoke``, the room's half) over the wire and its
+sentences go back the same way — see ``_WireSink`` and ``_run_hub`` —
+while every text lane, Vigil, and the maintenance slot run unchanged.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ import logging
 import math
 import random
 import re
+import secrets
 import sys
 import time
 from collections import deque
@@ -56,6 +63,7 @@ from ciel.confirm import VoiceConfirmBroker
 from ciel.messages import MessagesClient, MessagesUnavailable
 from ciel.remote.discord import DiscordLink, RemoteUnavailable
 from ciel.remote.web import WebIndicator, WebLink
+from ciel.hub.server import HubServer
 from ciel.proactive.calendar import CalendarWatcher
 from ciel.proactive.gcal import GoogleCalendarWatcher
 from ciel.proactive.location import LocationWatcher
@@ -409,6 +417,143 @@ class _VoiceSink:
         await self._ack_done()
 
 
+class _WireSink:
+    """Delivery for the hub's voice lane: the spoke's speakers, one hop
+    away. Sentences go down the wire as ``turn.sentence`` frames and
+    the spoke reports each one played (or stopped), so generation is
+    paced by real speech exactly as the in-process voice sink paces it
+    by the player — and a barge-in, reported as a sentence that did not
+    complete, aborts the stream the same way. The ack filler, the
+    thinking chime, and the follow-up window are the spoke's own; what
+    stays here is the accounting the turn skeleton reads: the flags,
+    the first-speech stamp, the indicator, the abandon.
+
+    Confirmations travel the same socket: the broker's remote sink for
+    origin ``spoke`` speaks the question through the spoke and opens
+    its answer window (``listen``), and the answer comes back to
+    ``broker.answer`` through the server's hook.
+    """
+
+    def __init__(self, pipeline: "Pipeline", server: HubServer, turn_id: str) -> None:
+        self._p = pipeline
+        self._server = server
+        self.turn_id = turn_id
+        self.confirm_send = self._confirm_send
+        self._n = 0
+        self._confirms = 0
+        self._started = 0.0
+        self._first_spoken: float | None = None
+        self._prev_kind: str | None = None
+        self._ended = False
+
+    def gate(self) -> bool:
+        return not self._p._interrupted
+
+    async def begin(self, started: float) -> None:
+        self._started = started
+        self._p._interrupted = False
+        self._server.send_spoke({
+            "type": "turn.begin", "turn_id": self.turn_id, "lane": "voice",
+        })
+
+    async def _say(self, kind: str, sentence: str) -> bool:
+        p = self._p
+        self._n += 1
+        ok = await self._server.speak(
+            self.turn_id, self._n, kind, sentence, p._config.hub.speak_timeout_s
+        )
+        if self._first_spoken is None:
+            self._first_spoken = time.monotonic() - self._started
+        p._spoke = True
+        p._conversed = True
+        p._brain_conversed = True
+        p._indicator.set_state("thinking")
+        if not ok:
+            # Stopped (barge-in), or nothing came back: the spoke left,
+            # or its device died. Both abandon; the record differs.
+            await p._abandon_playback(not self._server.spoke_connected)
+            return False
+        return True
+
+    async def escalation(self) -> bool:
+        p = self._p
+        if self._first_spoken is None:
+            line = "Give me a moment. I want to think this through properly."
+            print(f"  ciel: {line}")
+            p._record("ciel", line)
+            p._indicator.set_state("speaking")
+            if not await self._say("reply", line):
+                return False
+        p._indicator.set_state("thinking")
+        return True
+
+    async def thinking(self, sentence: str) -> bool:
+        spoken = self._p._config.brain.speak_thinking
+        self._p._indicator.set_state("reasoning" if spoken else "thinking")
+        self._prev_kind = "thinking"
+        if not spoken:
+            return True
+        return await self._say("thinking", sentence)
+
+    async def reply(self, sentence: str) -> bool:
+        self._p._indicator.set_state("speaking")
+        self._prev_kind = "reply"
+        return await self._say("reply", sentence)
+
+    async def finish(self, started: float) -> None:
+        # The non-exception path includes a barge-in (the stream broke
+        # after an unfinished receipt): the end says so, and the spoke
+        # closes its turn accordingly.
+        self._end("interrupted" if self._p._interrupted else "done")
+        if self._first_spoken is None:
+            return
+        reconnect = self._p._brain.last_reconnect_s
+        log.info(
+            "turn (spoke): %.2fs to first speech (%.2fs reconnect, %.2fs model), "
+            "%.2fs total, $%.4f",
+            self._first_spoken,
+            reconnect,
+            max(0.0, self._first_spoken - reconnect),
+            time.monotonic() - started,
+            self._p._brain.last_turn_cost_usd,
+        )
+
+    async def play_reply(self, reply: str) -> None:
+        """A locally-handled command's spoken reply, through the spoke."""
+        await self._say("reply", reply)
+
+    async def apologize(self) -> None:
+        """The spoken apology after a failed turn, best-effort."""
+        with contextlib.suppress(Exception):
+            await self._server.speak(
+                self.turn_id, self._n + 1, "reply",
+                "Sorry, something went wrong there.",
+                self._p._config.hub.speak_timeout_s,
+            )
+
+    async def cleanup(self) -> None:
+        if not self._ended:
+            self._end("interrupted" if self._p._interrupted else "failed")
+
+    def _end(self, status: str) -> None:
+        self._ended = True
+        self._server.send_spoke({
+            "type": "turn.end", "turn_id": self.turn_id, "status": status,
+        })
+
+    async def _confirm_send(self, text: str, *, listen: bool = False) -> None:
+        self._confirms += 1
+        sent = self._server.send_spoke({
+            "type": "confirm.request",
+            "confirm_id": f"{self.turn_id}:{self._confirms}",
+            "text": text,
+            "deadline_wall": time.time() + self._p._config.hub.confirm_timeout_s,
+            "listen": listen,
+        })
+        if not sent:
+            raise RuntimeError("no spoke to ask")
+
+
 class IdleSchedule:
     """Arms Closure and rotation when a spoken conversation ends.
 
@@ -514,18 +659,27 @@ def rehydrate_schedule(
 class Pipeline:
     """Runs Ciel until stopped."""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, role: str = "local") -> None:
         self._config = config
-        self._stt: SpeechToText = build_stt(config.stt)
-        self._tts: TextToSpeech = build_tts(config)
-        self._wake: WakeDetector = build_wake_detector(config.wake)
+        self._role = role
+        """``local`` is the single process — today's Ciel, the rollback
+        at every commit. ``hub`` is the same pipeline with no microphone
+        anywhere: the audio machinery is never built, the voice lane's
+        turns arrive from the spoke over the wire and its sentences go
+        back the same way, and the main loop is the ladder on a tick
+        instead of on a frame."""
+        hub = role == "hub"
+        self._stt: SpeechToText | None = None if hub else build_stt(config.stt)
+        self._tts: TextToSpeech | None = None if hub else build_tts(config)
+        self._wake: WakeDetector | None = None if hub else build_wake_detector(config.wake)
         # The lambda defers to the running noise-floor estimate (tracked in
         # the frame loop) so endpointing in a noisy room demands speech
         # louder than the room — see Endpointer._clears_floor.
-        self._endpointer = Endpointer(
-            config.audio, noise_floor=lambda: self._noise_floor
+        self._endpointer: Endpointer | None = (
+            None if hub
+            else Endpointer(config.audio, noise_floor=lambda: self._noise_floor)
         )
-        self._speaker = build_speaker_gate(config.voice)
+        self._speaker = None if hub else build_speaker_gate(config.voice)
 
         # Custom tools (memory today, whatever lands in the registry later) are
         # assembled before the brain, because the memory index they expose has
@@ -545,9 +699,17 @@ class Pipeline:
         # Discord link, plus a *view* — every transcript row and state
         # change is teed into it. Created before the indicator so the tee
         # below can include it.
-        self._web_link: WebLink | None = (
-            WebLink(config.web, config.hub) if config.web.enabled else None
-        )
+        self._web_link: WebLink | None
+        if hub:
+            # The hub's socket is the spoke's door; the Chart rides along
+            # whether or not config asked for it.
+            if not config.web.enabled:
+                log.info("hub: the wire server is on regardless of [web].enabled")
+            self._web_link = HubServer(config.web, config.hub)
+        else:
+            self._web_link = (
+                WebLink(config.web, config.hub) if config.web.enabled else None
+            )
         if self._web_link is not None:
             self._web_link.on_mute = self._set_muted
             self._web_link.on_restart = self._request_restart
@@ -574,17 +736,36 @@ class Pipeline:
         self._player: Player | None = None
         """The run() player, held for exactly one cross-cutting need: the
         mute switch stopping a sentence already in the air."""
+        self._mic: MicStream | None = None
+        """The run() microphone, for the drains the enactments do."""
+        self._turn: asyncio.Task[None] | None = None
+        """The turn in flight — audio-owning, re-raised via result()."""
 
-        indicator = build_indicator(config.ui)
-        self._indicator: Indicator = (
-            indicator
-            if self._web_link is None
-            else TeeIndicator(indicator, WebIndicator(self._web_link))
-        )
+        if hub:
+            # No HUD: the spoke draws its own from the state frames the
+            # wire indicator broadcasts to every client.
+            assert self._web_link is not None
+            self._indicator: Indicator = WebIndicator(self._web_link)
+        else:
+            indicator = build_indicator(config.ui)
+            self._indicator = (
+                indicator
+                if self._web_link is None
+                else TeeIndicator(indicator, WebIndicator(self._web_link))
+            )
         # The broker exists even when the shell is disabled — it's inert until
         # someone calls ask(), and the brain only builds a ShellGuard around
         # it when config.shell.enabled says to.
         self._confirm = VoiceConfirmBroker(config)
+        if hub:
+            # The spoke's frames land here: its answers on the broker, its
+            # barge-ins on the abandon path, its mute switch on ours.
+            server = self._web_link
+            assert isinstance(server, HubServer)
+            server.on_confirm_answer = self._confirm.answer
+            server.on_turn_cancel = self._on_turn_cancel
+            server.on_spoke_mute = lambda muted: self._set_muted(muted, from_spoke=True)
+            server.on_spoke_change = self._on_spoke_change
         # Bound methods, not strings: the brain re-reads these at every
         # connect, so a rotated session's prompt carries whatever the last
         # reflection wrote.
@@ -781,13 +962,32 @@ class Pipeline:
         """The arbiter's view of this instant, frozen. Deadline arithmetic
         happens here (the missed-timer sweep flag, the policy-poll clock)
         so ``pick_next`` stays a pure membership test."""
+        if self._role == "hub":
+            # The spoke's state machine, as last reported: a turn running
+            # here is BUSY; otherwise its open listening window is what
+            # keeps the quiet lanes off the slot.
+            server = self._web_link
+            assert isinstance(server, HubServer)
+            state = (
+                State.BUSY if self._state is State.BUSY
+                else State.LISTENING if server.spoke_listening
+                else State.WAITING
+            )
+            speaking = server.spoke_speaking
+            voice_pending = server.voice_pending
+        else:
+            assert self._endpointer is not None
+            state = self._state
+            speaking = self._endpointer.speaking
+            voice_pending = False
         return Snapshot(
-            state=self._state,
+            state=state,
             confirm_active=self._confirm.active,
-            endpointer_speaking=self._endpointer.speaking,
+            endpointer_speaking=speaking,
             held_thought=self._pending_text is not None,
             timers_due=self._timers is not None
             and (self._timer_missed_sweep or self._timers.any_due()),
+            voice_pending=voice_pending,
             typed_pending=bool(self._typed),
             web_pending=self._web_link is not None and self._web_link.pending,
             remote_pending=self._remote_link is not None
@@ -798,6 +998,10 @@ class Pipeline:
         )
 
     async def run(self) -> None:
+        if self._role == "hub":
+            await self._run_hub()
+            return
+        assert self._tts is not None and self._stt is not None
         await self._startup()
 
         # The mute gate rides inside the player: one choke point silences
@@ -807,10 +1011,11 @@ class Pipeline:
             self._config.audio, self._tts.sample_rate, muted=lambda: self._muted
         )
         self._player = player
-        turn: asyncio.Task[None] | None = None
+        self._turn = None
 
         try:
             async with MicStream(self._config.audio) as mic, player:
+                self._mic = mic
                 self._confirm.bind(
                     player=player,
                     mic=mic,
@@ -833,9 +1038,7 @@ class Pipeline:
                         self._config.timers.missed_grace_s
                     )
                     if missed:
-                        await self._announce_timers(
-                            missed, player, mic, missed=True
-                        )
+                        await self._announce_timers(missed, missed=True)
 
                 # Re-stamped here, on the eve of the first frame: the value
                 # from __init__ is minutes stale after model warm-up and the
@@ -886,281 +1089,13 @@ class Pipeline:
                     # The blocks below only *enact* the pick; nothing is
                     # consumed until its block claims it.
                     source = pick_next(self._loop_snapshot())
-
-                    # Enacted above the state dispatch, not inside BUSY: a
-                    # turn abandoned by barge-in leaves BUSY while its hook
-                    # can still be pending, and a pending confirmation that
-                    # stops receiving frames never resolves.
-                    if source is Source.CONFIRM:
-                        # A typed line while a question is pending is an
-                        # answer — but only if it arrived *after* the question
-                        # was put. A line typed earlier (while the turn was
-                        # still busy) is the user's next request, and consuming
-                        # it would eat that request and let a stray "yes"/"no"
-                        # in it silently decide the gated action. Predating
-                        # lines stay queued and become the next turn.
-                        asked = self._confirm.asked_at
-                        if self._typed and asked is not None:
-                            ts, line = self._typed[0]
-                            if ts >= asked and self._confirm.answer(line):
-                                self._typed.popleft()
-                        if self._web_link is not None and asked is not None:
-                            # A GUI message answers like a typed line, not
-                            # like a Discord text: the chart binds loopback,
-                            # so its user is at the machine and heard — or
-                            # saw, as a ciel-confirm row — the question.
-                            # Same predating rule as the keyboard.
-                            item = self._web_link.peek()
-                            if (
-                                item is not None
-                                and item[0] >= asked
-                                and self._confirm.answer(item[1])
-                            ):
-                                self._web_link.pop()
-                        if (
-                            self._remote_link is not None
-                            and self._confirm.remote_active
-                            and self._confirm.remote_origin == "discord"
-                            and asked is not None
-                        ):
-                            # An owner text answers a *Discord-origin*
-                            # question, under the keyboard's predating rule.
-                            # Spoken-origin questions never accept remote
-                            # answers (see remote_active), and web-origin
-                            # ones don't either (see remote_origin): a yes
-                            # to a question the answerer never saw is not
-                            # an answer.
-                            item = self._remote_link.peek()
-                            if (
-                                item is not None
-                                and item[0] >= asked
-                                and self._confirm.answer(item[1])
-                            ):
-                                self._remote_link.pop()
-                        self._confirm.feed(frame)
-                        continue
-
-                    if source is Source.TIMERS:
-                        # A due timer speaks the moment nothing else owns the
-                        # audio (the arbiter's quiet rule). Awaited inline,
-                        # like the wake acknowledgement: announcements are
-                        # seconds long, and the mic is drained after so
-                        # Ciel's own voice isn't transcribed as a turn.
-                        # First poll after a nap grace-filters what came due
-                        # mid-sleep instead of announcing it stale.
-                        sweep, self._timer_missed_sweep = self._timer_missed_sweep, False
-                        fired = (
-                            self._timers.pop_missed(self._config.timers.missed_grace_s)
-                            if sweep
-                            else self._timers.pop_due()
-                        )
-                        if fired:
-                            await self._announce_timers(
-                                fired, player, mic, missed=sweep
-                            )
-                        continue
-
-                    if source is Source.TYPED:
-                        # The keyboard takes the turn, but never *steals* one
-                        # (the arbiter's quiet rule: not over a running turn,
-                        # not mid-utterance, not over a held thought).
-                        if self._maintenance is not None and not self._maintenance.done():
-                            # Same hastening the wake path does: the typed
-                            # turn serializes on the brain's lock, and an
-                            # unhurried reflection would hold it for seconds.
-                            self._unattended_hastened = True
-                            await self._brain.interrupt()
-                        self._state = State.BUSY
-                        self._barge_run = 0
-                        _ts, line = self._typed.popleft()
-                        turn = asyncio.create_task(
-                            self._handle_typed_turn(line)
-                        )
-                        continue
-
-                    if source is Source.WEB:
-                        # The GUI claims the turn slot under the keyboard's
-                        # rules, not the phone's: a chart is the user *at*
-                        # the machine, so it may take a turn out of a
-                        # follow-up window. Queued bursts coalesce into one
-                        # turn, the texting-cadence reasoning.
-                        if self._maintenance is not None and not self._maintenance.done():
-                            # Same hastening as the typed lane: the web turn
-                            # serializes on the brain's lock.
-                            self._unattended_hastened = True
-                            await self._brain.interrupt()
-                        self._state = State.BUSY
-                        self._barge_run = 0
-                        batch = self._web_link.pop_batch()
-                        assert batch is not None  # pending was just checked
-                        line, _channel = batch
-                        turn = asyncio.create_task(self._handle_web_turn(line))
-                        continue
-
-                    if source is Source.REMOTE:
-                        # The Discord lane claims the turn slot — a user
-                        # lane, so it outranks Vigil, but only from WAITING
-                        # (the arbiter's rule: the room outranks the phone).
-                        # Everything queued right now coalesces into one
-                        # turn (people text in bursts; three turns for one
-                        # thought answers the greeting with a paragraph).
-                        if self._maintenance is not None and not self._maintenance.done():
-                            # Same hastening as the typed lane: the remote
-                            # turn serializes on the brain's lock.
-                            self._unattended_hastened = True
-                            await self._brain.interrupt()
-                        self._state = State.BUSY
-                        self._barge_run = 0
-                        # Coalesces the head run of same-channel messages;
-                        # a DM and a server mention never fuse into one
-                        # turn — different audiences, different replies.
-                        batch = self._remote_link.pop_batch()
-                        assert batch is not None  # pending was just checked
-                        line, channel = batch
-                        turn = asyncio.create_task(
-                            self._handle_remote_turn(line, channel)
-                        )
-                        continue
-
-                    if source is Source.VIGIL:
-                        # Vigil: a pending event gets its policy decision.
-                        # Last in line — the user always outranks the
-                        # machine — and stricter than the timer lane on
-                        # purpose: WAITING only, never into a live listening
-                        # window; the held-notes path covers those moments.
-                        # The frame-rate cost is the snapshot's booleans;
-                        # presence and policy run at most once per
-                        # policy_poll_s.
-                        self._next_policy_check = (
-                            time.monotonic()
-                            + self._config.proactive.policy_poll_s
-                        )
-                        if self._hold_sentinel.exists():
-                            # The emergency brake (see __init__): events wait,
-                            # nothing is dropped, and the engagement is logged
-                            # once rather than every poll.
-                            if not self._hold_engaged:
-                                self._hold_engaged = True
-                                log.info(
-                                    "vigil holding — remove %s to resume",
-                                    self._hold_sentinel,
-                                )
-                            continue
-                        if self._hold_engaged:
-                            self._hold_engaged = False
-                            log.info("vigil hold lifted")
-                        # The event is *peeked*, not popped: only an enacted
-                        # decision claims it (begin), so a busy turn slot
-                        # simply leaves it queued — no pop-and-push churn
-                        # rewriting the state file every poll, no event
-                        # rotating to the back for being unlucky.
-                        decision, event = self._decide_proactive()
-                        if event is not None and decision is not None:
-                            if decision.action == "speak" and self._muted:
-                                # The nudge earned a voice the room must not
-                                # hear. Held instead of spoken-silently or
-                                # dropped: it rides into the next turn on
-                                # whichever lane that arrives — the
-                                # held-notes contract.
-                                self._events.begin(event)
-                                self._events.hold(event)
-                            elif decision.action == "speak":
-                                if self._maintenance is not None and not self._maintenance.done():
-                                    # Same hastening as the typed lane: the
-                                    # proactive turn serializes on the
-                                    # brain's lock.
-                                    self._unattended_hastened = True
-                                    await self._brain.interrupt()
-                                self._events.begin(event)
-                                self._state = State.BUSY
-                                self._barge_run = 0
-                                turn = asyncio.create_task(
-                                    self._run_proactive_turn(event, player, mic)
-                                )
-                            elif decision.action in ("message", "note"):
-                                # No audio involved, so these run in the
-                                # maintenance slot — never as the
-                                # audio-owning `turn`. Slot busy: the event
-                                # stays peeked-not-claimed, retried next
-                                # poll.
-                                if self._maintenance is None or self._maintenance.done():
-                                    self._events.begin(event)
-                                    runner = (
-                                        self._run_proactive_message(event)
-                                        if decision.action == "message"
-                                        else self._run_proactive_note(event)
-                                    )
-                                    self._maintenance = asyncio.create_task(runner)
-                            elif decision.action == "hold":
-                                self._events.begin(event)
-                                self._events.hold(event)
-                            else:
-                                self._events.begin(event)
-                                self._events.drop(event, time.time())
+                    if await self._enact(source, frame):
                         continue
 
                     if self._state is State.WAITING:
-                        # Reload only from idle: never yank the process out
-                        # from under a conversation in progress. Triggered by
-                        # a source change or by the user asking for one.
-                        source_changed = (
-                            self._watcher is not None and self._watcher.changed
-                        )
-                        if source_changed or self._reload_pending:
-                            if source_changed:
-                                print(f"\nsource changed ({self._watcher.changed.name}) — reloading")
-                            else:
-                                print("\nreload requested — reloading")
-                            # Let maintenance land first: re-exec'ing while
-                            # rotate() is mid-connect leaves a half-built SDK
-                            # subprocess behind. Bounded — a hung task is
-                            # cancelled rather than blocking the reload.
-                            if self._maintenance is not None and not self._maintenance.done():
-                                try:
-                                    await asyncio.wait_for(self._maintenance, timeout=10.0)
-                                except (asyncio.TimeoutError, asyncio.CancelledError):
-                                    self._maintenance.cancel()
-                            try:
-                                await player.play(self._tts.stream("Reloading."))
-                            except Exception:  # noqa: BLE001
-                                log.debug("could not announce the reload", exc_info=True)
-                            # Those awaits kept the loop serving sockets: a
-                            # turn that landed meanwhile is already
-                            # receipted (the web lane acks at arrival), so
-                            # re-exec'ing now would void a delivered line.
-                            # Serve it instead; the flags stay set and the
-                            # reload re-fires from the next idle frame.
-                            if (
-                                self._typed
-                                or (
-                                    self._web_link is not None
-                                    and self._web_link.pending
-                                )
-                                or (
-                                    self._remote_link is not None
-                                    and self._remote_link.pending
-                                )
-                            ):
-                                continue
+                        if await self._idle_housekeeping():
                             self.reload_requested = True
                             break
-
-                        # Idle is when maintenance runs — Closure shortly
-                        # after a conversation ends, rotation when the thread
-                        # has been silent past the resume window. Same
-                        # only-from-idle reasoning as the reload above.
-                        if self._maintenance is not None and self._maintenance.done():
-                            self._maintenance = None  # _run_* swallow their errors
-                        if self._maintenance is None:
-                            due = self._schedule.due(time.monotonic())
-                            if due == "reflect":
-                                self._maintenance = asyncio.create_task(
-                                    self._run_reflection()
-                                )
-                            elif due == "rotate":
-                                self._maintenance = asyncio.create_task(
-                                    self._run_rotation()
-                                )
 
                         # Only sampled here: while idle and silent, what the
                         # microphone hears is the room itself.
@@ -1193,7 +1128,7 @@ class Pipeline:
                                 # silently forgetting they spoke.
                                 self._state = State.BUSY
                                 self._barge_run = 0
-                                turn = asyncio.create_task(
+                                self._turn = asyncio.create_task(
                                     self._handle_turn(None, player, mic, pending_text=pending)
                                 )
                             else:
@@ -1203,15 +1138,15 @@ class Pipeline:
                         if utterance is not None:
                             self._state = State.BUSY
                             self._barge_run = 0
-                            turn = asyncio.create_task(
+                            self._turn = asyncio.create_task(
                                 self._handle_turn(utterance, player, mic)
                             )
 
                     elif self._state is State.BUSY:
                         self._check_barge_in(frame, player)
-                        if turn is not None and turn.done():
-                            turn.result()  # surface any exception from the turn
-                            turn = None
+                        if self._turn is not None and self._turn.done():
+                            self._turn.result()  # surface any exception from the turn
+                            self._turn = None
                             if self._continue_listening:
                                 # The utterance ended mid-thought; go straight
                                 # back to listening. No drain — nothing was
@@ -1235,10 +1170,412 @@ class Pipeline:
                 self._stdin_task.cancel()
             if self._maintenance is not None and not self._maintenance.done():
                 self._maintenance.cancel()
-            if turn is not None and not turn.done():
-                turn.cancel()
+            if self._turn is not None and not self._turn.done():
+                self._turn.cancel()
             self._player = None
+            self._mic = None
             await self._shutdown()
+
+    async def _enact(self, source: Source, frame: bytes | None) -> bool:
+        """Enact one arbitration of the ladder. True when the pick claimed
+        this round — the caller skips its state machine — False for NONE.
+        ``frame`` is the mic frame a pending confirmation is fed; the hub
+        has none, its confirmations listen through the spoke."""
+
+        # Enacted above the state dispatch, not inside BUSY: a
+        # turn abandoned by barge-in leaves BUSY while its hook
+        # can still be pending, and a pending confirmation that
+        # stops receiving frames never resolves.
+        if source is Source.CONFIRM:
+            # A typed line while a question is pending is an
+            # answer — but only if it arrived *after* the question
+            # was put. A line typed earlier (while the turn was
+            # still busy) is the user's next request, and consuming
+            # it would eat that request and let a stray "yes"/"no"
+            # in it silently decide the gated action. Predating
+            # lines stay queued and become the next turn.
+            asked = self._confirm.asked_at
+            if self._typed and asked is not None:
+                ts, line = self._typed[0]
+                if ts >= asked and self._confirm.answer(line):
+                    self._typed.popleft()
+            if self._web_link is not None and asked is not None:
+                # A GUI message answers like a typed line, not
+                # like a Discord text: the chart binds loopback,
+                # so its user is at the machine and heard — or
+                # saw, as a ciel-confirm row — the question.
+                # Same predating rule as the keyboard.
+                item = self._web_link.peek()
+                if (
+                    item is not None
+                    and item[0] >= asked
+                    and self._confirm.answer(item[1])
+                ):
+                    self._web_link.pop()
+            if (
+                self._remote_link is not None
+                and self._confirm.remote_active
+                and self._confirm.remote_origin == "discord"
+                and asked is not None
+            ):
+                # An owner text answers a *Discord-origin*
+                # question, under the keyboard's predating rule.
+                # Spoken-origin questions never accept remote
+                # answers (see remote_active), and web-origin
+                # ones don't either (see remote_origin): a yes
+                # to a question the answerer never saw is not
+                # an answer.
+                item = self._remote_link.peek()
+                if (
+                    item is not None
+                    and item[0] >= asked
+                    and self._confirm.answer(item[1])
+                ):
+                    self._remote_link.pop()
+            if frame is not None:
+                self._confirm.feed(frame)
+            return True
+
+        if source is Source.TIMERS:
+            # A due timer speaks the moment nothing else owns the
+            # audio (the arbiter's quiet rule). Awaited inline,
+            # like the wake acknowledgement: announcements are
+            # seconds long, and the mic is drained after so
+            # Ciel's own voice isn't transcribed as a turn.
+            # First poll after a nap grace-filters what came due
+            # mid-sleep instead of announcing it stale.
+            sweep, self._timer_missed_sweep = self._timer_missed_sweep, False
+            fired = (
+                self._timers.pop_missed(self._config.timers.missed_grace_s)
+                if sweep
+                else self._timers.pop_due()
+            )
+            if fired:
+                await self._announce_timers(fired, missed=sweep)
+            return True
+
+        if source is Source.VOICE:
+            # The spoke already heard the room: the utterance arrives
+            # whole, and takes the slot as the state machine's own
+            # turns do in the single process — first among the lanes.
+            server = self._web_link
+            assert isinstance(server, HubServer)
+            if self._maintenance is not None and not self._maintenance.done():
+                self._unattended_hastened = True
+                await self._brain.interrupt()
+            self._state = State.BUSY
+            self._barge_run = 0
+            item = server.pop_voice()
+            assert item is not None  # pending was just checked
+            self._turn = asyncio.create_task(self._handle_voice_wire_turn(item[1]))
+            return True
+
+        if source is Source.TYPED:
+            # The keyboard takes the turn, but never *steals* one
+            # (the arbiter's quiet rule: not over a running turn,
+            # not mid-utterance, not over a held thought).
+            if self._maintenance is not None and not self._maintenance.done():
+                # Same hastening the wake path does: the typed
+                # turn serializes on the brain's lock, and an
+                # unhurried reflection would hold it for seconds.
+                self._unattended_hastened = True
+                await self._brain.interrupt()
+            self._state = State.BUSY
+            self._barge_run = 0
+            _ts, line = self._typed.popleft()
+            self._turn = asyncio.create_task(
+                self._handle_typed_turn(line)
+            )
+            return True
+
+        if source is Source.WEB:
+            # The GUI claims the turn slot under the keyboard's
+            # rules, not the phone's: a chart is the user *at*
+            # the machine, so it may take a turn out of a
+            # follow-up window. Queued bursts coalesce into one
+            # turn, the texting-cadence reasoning.
+            if self._maintenance is not None and not self._maintenance.done():
+                # Same hastening as the typed lane: the web turn
+                # serializes on the brain's lock.
+                self._unattended_hastened = True
+                await self._brain.interrupt()
+            self._state = State.BUSY
+            self._barge_run = 0
+            batch = self._web_link.pop_batch()
+            assert batch is not None  # pending was just checked
+            line, _channel = batch
+            self._turn = asyncio.create_task(self._handle_web_turn(line))
+            return True
+
+        if source is Source.REMOTE:
+            # The Discord lane claims the turn slot — a user
+            # lane, so it outranks Vigil, but only from WAITING
+            # (the arbiter's rule: the room outranks the phone).
+            # Everything queued right now coalesces into one
+            # turn (people text in bursts; three turns for one
+            # thought answers the greeting with a paragraph).
+            if self._maintenance is not None and not self._maintenance.done():
+                # Same hastening as the typed lane: the remote
+                # turn serializes on the brain's lock.
+                self._unattended_hastened = True
+                await self._brain.interrupt()
+            self._state = State.BUSY
+            self._barge_run = 0
+            # Coalesces the head run of same-channel messages;
+            # a DM and a server mention never fuse into one
+            # turn — different audiences, different replies.
+            batch = self._remote_link.pop_batch()
+            assert batch is not None  # pending was just checked
+            line, channel = batch
+            self._turn = asyncio.create_task(
+                self._handle_remote_turn(line, channel)
+            )
+            return True
+
+        if source is Source.VIGIL:
+            # Vigil: a pending event gets its policy decision.
+            # Last in line — the user always outranks the
+            # machine — and stricter than the timer lane on
+            # purpose: WAITING only, never into a live listening
+            # window; the held-notes path covers those moments.
+            # The frame-rate cost is the snapshot's booleans;
+            # presence and policy run at most once per
+            # policy_poll_s.
+            self._next_policy_check = (
+                time.monotonic()
+                + self._config.proactive.policy_poll_s
+            )
+            if self._hold_sentinel.exists():
+                # The emergency brake (see __init__): events wait,
+                # nothing is dropped, and the engagement is logged
+                # once rather than every poll.
+                if not self._hold_engaged:
+                    self._hold_engaged = True
+                    log.info(
+                        "vigil holding — remove %s to resume",
+                        self._hold_sentinel,
+                    )
+                return True
+            if self._hold_engaged:
+                self._hold_engaged = False
+                log.info("vigil hold lifted")
+            # The event is *peeked*, not popped: only an enacted
+            # decision claims it (begin), so a busy turn slot
+            # simply leaves it queued — no pop-and-push churn
+            # rewriting the state file every poll, no event
+            # rotating to the back for being unlucky.
+            decision, event = self._decide_proactive()
+            if event is not None and decision is not None:
+                if decision.action == "speak" and self._muted:
+                    # The nudge earned a voice the room must not
+                    # hear. Held instead of spoken-silently or
+                    # dropped: it rides into the next turn on
+                    # whichever lane that arrives — the
+                    # held-notes contract.
+                    self._events.begin(event)
+                    self._events.hold(event)
+                elif decision.action == "speak":
+                    if self._maintenance is not None and not self._maintenance.done():
+                        # Same hastening as the typed lane: the
+                        # proactive turn serializes on the
+                        # brain's lock.
+                        self._unattended_hastened = True
+                        await self._brain.interrupt()
+                    self._events.begin(event)
+                    self._state = State.BUSY
+                    self._barge_run = 0
+                    self._turn = asyncio.create_task(
+                        self._run_proactive_turn(event)
+                    )
+                elif decision.action in ("message", "note"):
+                    # No audio involved, so these run in the
+                    # maintenance slot — never as the
+                    # audio-owning `turn`. Slot busy: the event
+                    # stays peeked-not-claimed, retried next
+                    # poll.
+                    if self._maintenance is None or self._maintenance.done():
+                        self._events.begin(event)
+                        runner = (
+                            self._run_proactive_message(event)
+                            if decision.action == "message"
+                            else self._run_proactive_note(event)
+                        )
+                        self._maintenance = asyncio.create_task(runner)
+                elif decision.action == "hold":
+                    self._events.begin(event)
+                    self._events.hold(event)
+                else:
+                    self._events.begin(event)
+                    self._events.drop(event, time.time())
+            return True
+        return False
+
+    async def _idle_housekeeping(self) -> bool:
+        """The idle slot's two duties — a pending reload, then maintenance
+        (Closure, rotation). Returns True when the loop should exit to be
+        re-exec'd. Shared by the frame loop and the hub's tick."""
+        # Reload only from idle: never yank the process out
+        # from under a conversation in progress. Triggered by
+        # a source change or by the user asking for one.
+        source_changed = (
+            self._watcher is not None and self._watcher.changed
+        )
+        if source_changed or self._reload_pending:
+            if source_changed:
+                print(f"\nsource changed ({self._watcher.changed.name}) — reloading")
+            else:
+                print("\nreload requested — reloading")
+            # Let maintenance land first: re-exec'ing while
+            # rotate() is mid-connect leaves a half-built SDK
+            # subprocess behind. Bounded — a hung task is
+            # cancelled rather than blocking the reload.
+            if self._maintenance is not None and not self._maintenance.done():
+                try:
+                    await asyncio.wait_for(self._maintenance, timeout=10.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    self._maintenance.cancel()
+            if self._player is not None and self._tts is not None:
+                try:
+                    await self._player.play(self._tts.stream("Reloading."))
+                except Exception:  # noqa: BLE001
+                    log.debug("could not announce the reload", exc_info=True)
+            # Those awaits kept the loop serving sockets: a
+            # turn that landed meanwhile is already
+            # receipted (the web lane acks at arrival), so
+            # re-exec'ing now would void a delivered line.
+            # Serve it instead; the flags stay set and the
+            # reload re-fires from the next idle frame.
+            if (
+                self._typed
+                or (
+                    self._web_link is not None
+                    and self._web_link.pending
+                )
+                or (
+                    self._remote_link is not None
+                    and self._remote_link.pending
+                )
+            ):
+                return False
+            return True
+
+        # Idle is when maintenance runs — Closure shortly
+        # after a conversation ends, rotation when the thread
+        # has been silent past the resume window. Same
+        # only-from-idle reasoning as the reload above.
+        if self._maintenance is not None and self._maintenance.done():
+            self._maintenance = None  # _run_* swallow their errors
+        if self._maintenance is None:
+            due = self._schedule.due(time.monotonic())
+            if due == "reflect":
+                self._maintenance = asyncio.create_task(
+                    self._run_reflection()
+                )
+            elif due == "rotate":
+                self._maintenance = asyncio.create_task(
+                    self._run_rotation()
+                )
+        return False
+
+    async def _run_hub(self) -> None:
+        """The hub's main loop: the ladder on a tick, no microphone anywhere.
+
+        Wakes on the server's stir (a frame arrived, a client came or
+        went) or every tenth of a second for the clocks — timers, the
+        policy poll, the maintenance deadlines — then does exactly what
+        the frame loop does between frames: a snapshot, a pick, one
+        enactment. The spoke's state machine is in the snapshot by
+        report; its turns arrive whole as voice says.
+        """
+        server = self._web_link
+        assert isinstance(server, HubServer)
+        await self._startup()
+        self._confirm.bind_record(self._record)
+        self._stdin_task = asyncio.create_task(self._read_stdin())
+        self._announce_ready()
+        if self._timers is not None:
+            missed = self._timers.pop_missed(self._config.timers.missed_grace_s)
+            if missed:
+                await self._announce_timers(missed, missed=True)
+        self._last_wall = time.time()
+        try:
+            while True:
+                try:
+                    await asyncio.wait_for(server.stir.wait(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    pass
+                server.stir.clear()
+
+                now_wall = time.time()
+                if now_wall - self._last_wall > _SLEEP_GAP_S:
+                    self._on_wake_from_sleep(now_wall - self._last_wall)
+                self._last_wall = now_wall
+                if now_wall >= self._next_agents_push:
+                    self._next_agents_push = now_wall + 1.0
+                    server.note_agents(self._active_agents())
+
+                source = pick_next(self._loop_snapshot())
+                if await self._enact(source, None):
+                    continue
+
+                if self._state is State.BUSY:
+                    if self._turn is not None and self._turn.done():
+                        self._turn.result()
+                        self._turn = None
+                        self._enter_waiting()
+                elif self._state is State.WAITING:
+                    if await self._idle_housekeeping():
+                        self.reload_requested = True
+                        log.info("hub loop ending for a reload")
+                        break
+        finally:
+            log.info("hub loop ended (reload=%s)", self.reload_requested)
+            self._confirm.cancel("shutting down")
+            self._confirm.unbind()
+            if self._stdin_task is not None and not self._stdin_task.done():
+                self._stdin_task.cancel()
+            if self._maintenance is not None and not self._maintenance.done():
+                self._maintenance.cancel()
+            if self._turn is not None and not self._turn.done():
+                self._turn.cancel()
+            await self._shutdown()
+
+    async def _handle_voice_wire_turn(self, text: str) -> None:
+        """One spoken turn that arrived from the spoke — the voice lane
+        with the room one hop away. The guard ``_handle_turn`` keeps
+        around the STT prelude lives here instead: a failed turn is
+        logged, marked, and apologized for through the spoke."""
+        server = self._web_link
+        assert isinstance(server, HubServer)
+        sink = _WireSink(self, server, secrets.token_urlsafe(6))
+        try:
+            await self._run_turn(
+                TurnRequest(lane="voice", text=text, arrival_wall=time.time()),
+                sink,
+            )
+        except Exception:
+            log.exception("turn failed")
+            self._indicator.set_state("error")
+            self._record("event", "turn failed")
+            await sink.apologize()
+
+    def _on_turn_cancel(self, turn_id: str, reason: str) -> None:
+        """The spoke barged in between sentences (during a sentence, the
+        unfinished receipt already abandons the turn)."""
+        if self._state is not State.BUSY or self._interrupted:
+            return
+        log.debug("spoke cancelled turn %s (%s)", turn_id, reason or "no reason")
+        asyncio.get_running_loop().create_task(self._abandon_playback(False))
+
+    def _on_spoke_change(self, connected: bool) -> None:
+        """The spoke took or left the seat. Leaving mid-question denies it
+        (the barge-in rule: nobody is going to answer), and the wait a
+        sink has open resolves on its own (the server fails it)."""
+        notice = "spoke connected" if connected else "spoke disconnected"
+        print(f"\n  [{notice}]", flush=True)
+        self._record("event", notice)
+        if not connected:
+            self._confirm.cancel("spoke gone")
 
     # ── one conversational turn ──────────────────────────────────────────────
 
@@ -1496,12 +1833,18 @@ class Pipeline:
             )
             await sink.begin(started)
             async with AsyncExitStack() as stack:
-                if spec.confirm_origin is not None:
+                confirm_origin = spec.confirm_origin
+                if confirm_origin is None and self._role == "hub":
+                    # The hub's own voice lane: the question is spoken
+                    # by the spoke and answered in the room, through
+                    # the same remote choreography.
+                    confirm_origin = "spoke"
+                if confirm_origin is not None:
                     # Confirmations route over the lane: the person who
                     # must say yes is wherever their reply lands.
                     stack.enter_context(
                         self._confirm.remote(
-                            sink.confirm_send, origin=spec.confirm_origin
+                            sink.confirm_send, origin=confirm_origin
                         )
                     )
                 if req.lane == "discord":
@@ -1618,7 +1961,7 @@ class Pipeline:
         self._record("ciel", reply)
         if req.lane == "voice":
             self._indicator.set_state("speaking")
-            assert isinstance(sink, _VoiceSink)
+            assert isinstance(sink, (_VoiceSink, _WireSink))
             await sink.play_reply(reply)
         elif req.lane == "discord":
             await sink.confirm_send(reply)
@@ -1681,8 +2024,11 @@ class Pipeline:
                 })
         return agents
 
-    def _set_muted(self, muted: bool) -> None:
-        """Move the mute switch — from the GUI, or the sentinel poll.
+    def _set_muted(self, muted: bool, *, from_spoke: bool = False) -> None:
+        """Move the mute switch — from the GUI, the sentinel poll, or (on
+        the hub) the spoke's report. The hub touches no sentinel and
+        stops no player: those are the spoke's, and the ``muted``
+        broadcast below is how it learns a Chart flipped the switch.
 
         Muted, the machine holds its tongue and its name: no sound leaves
         the speakers (the Player's gate) and the wake word is not watched
@@ -1695,13 +2041,14 @@ class Pipeline:
         if muted == self._muted:
             return
         self._muted = muted
-        try:
-            if muted:
-                self._mute_sentinel.touch()
-            else:
-                self._mute_sentinel.unlink(missing_ok=True)
-        except OSError:
-            log.debug("could not persist mute state", exc_info=True)
+        if self._role != "hub":
+            try:
+                if muted:
+                    self._mute_sentinel.touch()
+                else:
+                    self._mute_sentinel.unlink(missing_ok=True)
+            except OSError:
+                log.debug("could not persist mute state", exc_info=True)
         if muted and self._player is not None:
             # Whatever is mid-sentence stops now: the switch was flipped
             # because the room needs silence, not silence-after-this-line.
@@ -1899,9 +2246,7 @@ class Pipeline:
         )
         return decision, event
 
-    async def _run_proactive_turn(
-        self, event: ProactiveEvent, player: Player, mic: MicStream
-    ) -> None:
+    async def _run_proactive_turn(self, event: ProactiveEvent) -> None:
         """One unattended turn over an event the policy approved for speech.
 
         The brain composes under the Witness rule (suppress + unattended:
@@ -1923,11 +2268,25 @@ class Pipeline:
             return  # already routed (declined, held, timed out, hastened)
         try:
             self._indicator.set_state("speaking")
-            await self._play_ring(player)
             print(f"  ciel (proactive): {reply}", flush=True)
             self._record("ciel", f"[proactive] {reply}")
-            completed = await player.play(self._tts.stream(reply))
-            if not completed and player.device_lost:
+            if self._role == "hub":
+                # Rung and spoken by the spoke at its idle; its receipt
+                # is the "reached the room" fact the budget hangs on.
+                server = self._web_link
+                assert isinstance(server, HubServer)
+                completed = await server.deliver(
+                    event.id, reply, {"ring": True, "source": event.source},
+                    self._config.hub.speak_timeout_s,
+                )
+                device_lost = not completed
+            else:
+                player = self._player
+                assert player is not None and self._tts is not None
+                await self._play_ring(player)
+                completed = await player.play(self._tts.stream(reply))
+                device_lost = player.device_lost
+            if not completed and device_lost:
                 # Nothing reached the room — the notification did not
                 # happen. No budget charge, and the note is still owed.
                 self._record("event", "proactive: audio output lost")
@@ -2318,11 +2677,7 @@ class Pipeline:
             self._record("event", "interrupted")
 
     async def _announce_timers(
-        self,
-        fired: list[Timer],
-        player: Player,
-        mic: MicStream,
-        missed: bool = False,
+        self, fired: list[Timer], missed: bool = False
     ) -> None:
         """Ring, then speak each fired timer's announcement.
 
@@ -2330,9 +2685,33 @@ class Pipeline:
         sentence the timer was armed with. The ring comes first because an
         assistant that starts talking out of nowhere startles — a familiar
         tone buys the half-second of "that's the timer" before the words.
+        On the hub the spoke does the ringing and the speaking, one
+        delivery per timer; a timer with no spoke to ring is one event
+        row, not a lost loop.
         """
         self._indicator.set_state("speaking")
         try:
+            if self._role == "hub":
+                server = self._web_link
+                assert isinstance(server, HubServer)
+                for timer in fired:
+                    text = announcement(timer)
+                    if missed:
+                        text = f"While I was off, a {timer.kind} went off. {text}"
+                    print(f"\n  ciel ({timer.kind}): {text}", flush=True)
+                    self._record("ciel", f"[{timer.kind}] {text}")
+                    ok = await server.deliver(
+                        f"timer:{timer.id}", text,
+                        {"ring": True, "kind": timer.kind},
+                        self._config.hub.speak_timeout_s,
+                    )
+                    if not ok:
+                        self._record(
+                            "event", f"{timer.kind} announcement did not reach the room"
+                        )
+                return
+            player, mic = self._player, self._mic
+            assert player is not None and mic is not None and self._tts is not None
             await self._play_ring(player)
             for timer in fired:
                 text = announcement(timer)
@@ -2345,7 +2724,8 @@ class Pipeline:
             log.exception("timer announcement failed")
         finally:
             # Ciel's own voice was captured while the speakers were live.
-            mic.drain()
+            if self._mic is not None:
+                self._mic.drain()
             self._indicator.set_state(
                 "listening" if self._state is State.LISTENING else "idle"
             )
@@ -2540,8 +2920,10 @@ class Pipeline:
 
     def _enter_waiting(self) -> None:
         self._state = State.WAITING
-        self._endpointer.reset()
-        self._wake.reset()
+        if self._endpointer is not None:
+            self._endpointer.reset()
+        if self._wake is not None:
+            self._wake.reset()
         self._followup_until = None
         self._pending_text = None  # a held thought never outlives listening
         self._indicator.set_state("idle")
@@ -2634,6 +3016,10 @@ class Pipeline:
             log.exception("rotation failed")
 
     def _announce_ready(self) -> None:
+        if self._role == "hub":
+            assert self._web_link is not None
+            print(f"\nHub ready. Wire: {self._web_link.url}/ws — run `ciel spoke` for the room.")
+            return
         mode = self._config.wake.mode
         if mode == "wakeword":
             # The model may be a pretrained NAME ("hey_jarvis") or a PATH to
@@ -2658,12 +3044,16 @@ class Pipeline:
         # seconds to start; do them together so startup is bounded by the
         # slowest one, not their sum.
         startup = [
-            self._warm_up_stt(),
-            self._warm_up_tts(),
-            self._wake.start(),
             self._indicator.start(),
             self._brain.connect(self._mcp_servers, self._custom_tools),
         ]
+        if self._role != "hub":
+            assert self._wake is not None
+            startup += [
+                self._warm_up_stt(),
+                self._warm_up_tts(),
+                self._wake.start(),
+            ]
         if self._speaker is not None:
             startup.append(self._speaker.warm_up())
         if self._watcher is not None:
@@ -2696,6 +3086,7 @@ class Pipeline:
         """
         from ciel.stt.local_whisper import WhisperSTT
 
+        assert self._stt is not None
         try:
             await self._stt.warm_up()
             return
@@ -2715,6 +3106,7 @@ class Pipeline:
         because of that is acceptable; losing the ability to speak at all is
         not, and `say` is always present on macOS.
         """
+        assert self._tts is not None
         try:
             await self._tts.warm_up()
             return
@@ -2729,12 +3121,12 @@ class Pipeline:
 
     async def _shutdown(self) -> None:
         closers = [
-            self._stt.close(),
-            self._tts.close(),
-            self._wake.close(),
             self._brain.close(),
             self._indicator.close(),
         ]
+        for component in (self._stt, self._tts, self._wake):
+            if component is not None:
+                closers.append(component.close())
         if self._speaker is not None:
             closers.append(self._speaker.close())
         if self._watcher is not None:

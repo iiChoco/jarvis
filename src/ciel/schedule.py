@@ -20,6 +20,10 @@ The order, and why (each entry outranks everything below it):
    SDK subprocess; nothing else matters until it resolves.
 2. **Due timers** — "the rice is done" tolerates no queueing behind a
    conversation that hasn't started yet.
+2½. **A spoken turn already heard** — the hub's voice lane: the spoke
+   endpointed and transcribed an utterance and sent it up; the user's
+   own words outrank every queue. Never true in the single process,
+   where the state machine starts spoken turns directly.
 3. **The keyboard, then the web page** — the user at the machine, in
    tier order; both may claim a turn out of a follow-up window but
    never mid-utterance and never over a held partial thought.
@@ -54,6 +58,7 @@ class Source(Enum):
 
     CONFIRM = auto()
     TIMERS = auto()
+    VOICE = auto()
     TYPED = auto()
     WEB = auto()
     REMOTE = auto()
@@ -77,6 +82,7 @@ class Snapshot:
     endpointer_speaking: bool = False
     held_thought: bool = False
     timers_due: bool = False
+    voice_pending: bool = False
     typed_pending: bool = False
     web_pending: bool = False
     remote_pending: bool = False
@@ -98,6 +104,11 @@ def pick_next(s: Snapshot) -> Source:
     )
     if s.timers_due and quiet:
         return Source.TIMERS
+    if s.voice_pending and s.state is not State.BUSY:
+        # The spoke already did the listening: the utterance is whole.
+        # Not the quiet rule — a held thought is the spoke's own affair,
+        # and this text is what it resolved to.
+        return Source.VOICE
     if s.typed_pending and quiet:
         return Source.TYPED
     if s.web_pending and quiet:

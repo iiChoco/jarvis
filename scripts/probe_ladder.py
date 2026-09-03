@@ -52,6 +52,21 @@ def main() -> int:
         pick_next(Snapshot(state=W, **all_but_confirm)) is Source.TIMERS,
     )
     check(
+        "a spoken turn already heard outranks every queue but timers",
+        pick_next(
+            Snapshot(state=W, voice_pending=True, typed_pending=True,
+                     web_pending=True, remote_pending=True, vigil_ready=True)
+        ) is Source.VOICE
+        and pick_next(Snapshot(state=W, timers_due=True, voice_pending=True))
+        is Source.TIMERS,
+    )
+    check(
+        "the voice lane claims from a listening window, never over a turn",
+        pick_next(Snapshot(state=L, voice_pending=True, held_thought=True))
+        is Source.VOICE
+        and pick_next(Snapshot(state=B, voice_pending=True)) is Source.NONE,
+    )
+    check(
         "the keyboard outranks the page, the phone, and the machine",
         pick_next(
             Snapshot(state=W, typed_pending=True, web_pending=True,

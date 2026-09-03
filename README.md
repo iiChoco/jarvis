@@ -489,6 +489,47 @@ frame it saw, and the server replays only what was missed, so the
 screen never blanks and re-fills. `scripts/probe_wire.py` drives the
 codec, the ring, the door, and a real socket on loopback.
 
+## Two processes: hub and spoke
+
+Optional. Everything above runs as one process (`ciel`, or `ciel local`),
+and that stays the way to run Ciel on one Mac. The split exists for the
+day the brain moves to a machine that never sleeps: `ciel hub` is the
+brain, memory, Vigil, the Discord lane, the Chart, and timers'
+bookkeeping — everything that is judgment or a text lane — served over
+the same socket the Chart uses; `ciel spoke` is the microphone and the
+speakers — the wake word, the endpointer, the speaker gate, STT, TTS,
+barge-in, the follow-up window, the HUD, the mute sentinel — as one more
+client of that socket. What the spoke hears goes up as text; what it
+says comes down as text, one sentence at a time, each one receipted so
+the hub's generation stays paced to real speech and a barge-in aborts it
+exactly as before.
+
+```bash
+ciel hub      # in one terminal (or a launchd agent)
+ciel spoke    # in another
+```
+
+```toml
+[spoke]
+hub = "ws://127.0.0.1:8765/ws"   # the hub's socket; a tailnet address once it moves
+```
+
+Both on this machine, nothing else changes: the same config file, the
+same `~/.ciel`, the same lanes. A confirm-tier question in a spoken turn
+is spoken by the spoke and answered in the room; timers and Vigil nudges
+ring through the spoke at its idle; the mute switch flows both ways
+(the spoke owns the sentinel, the hub owns the Chart's switch, and each
+tells the other). A spoke that loses the hub says so once and chimes
+after; a hub that loses its spoke abandons the sentence it was speaking
+and denies any question it was asking, the barge-in rule. Not yet on the
+spoke, on purpose: the command grammar's fast path and local timer
+ringing — both come back in the resilience phase, for a hub that might
+be unreachable.
+
+`scripts/probe_hub_arbiter.py`, `scripts/probe_spoke.py`, and
+`scripts/probe_confirm_wire.py` drive each half with fakes and a fake
+other half.
+
 ## Watching things (Vigil)
 
 Off by default. Everything else Ciel says was asked for; Vigil is the

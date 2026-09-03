@@ -1222,9 +1222,64 @@ class HubConfig:
     out by the broker, and a replayed banner would invite an answer to
     nothing."""
 
+    speak_timeout_s: float = 120.0
+    """How long the hub waits for the spoke to report one sentence (or
+    one delivery) played before treating the spoke as gone and
+    abandoning the turn. Generous: a long sentence through Piper plus a
+    slow machine is tens of seconds; only a dead socket takes minutes."""
+
+    confirm_timeout_s: float = 45.0
+    """The hub-side deadline for one spoken answer from the spoke — the
+    spoke speaks the question and listens for its own ``[shell]``
+    window, then reports; this only catches a spoke that never reports
+    at all. Text lanes keep ``[discord].confirm_timeout_s``."""
+
     def current_token(self) -> str:
         """The token to check against: the field, else the file, else
         empty (which, off loopback, means mint one)."""
+        if self.token:
+            return self.token
+        try:
+            return self.token_file.read_text().strip()
+        except OSError:
+            return ""
+
+
+@dataclass(frozen=True, slots=True)
+class SpokeConfig:
+    """The spoke — the audio front end as a client of the hub.
+
+    ``ciel spoke`` owns the microphone, the wake word, the endpointer,
+    the speaker gate, STT, TTS, the player, the HUD, and the mute
+    sentinel; everything it hears goes up the wire as text, everything
+    it says comes down as text. The brain, memory, Vigil, Discord, and
+    the Chart live in ``ciel hub``. Both on this machine for now; the
+    hub moves to a server later and this section is what repoints."""
+
+    hub: str = "ws://127.0.0.1:8765/ws"
+    """The hub's socket. Loopback while both run here; the tailnet
+    address (``ws://100.x.y.z:8765/ws``) once the hub is elsewhere."""
+
+    token: str = ""
+    """The hub token, when the hub is off loopback. Prefer
+    ``CIEL_SPOKE_TOKEN`` in the environment or ``token_file``."""
+
+    token_file: Path = field(
+        default_factory=lambda: Path.home() / ".ciel" / "hub.token"
+    )
+    """Where to read the token — the hub's own minted file when both run
+    on this machine, so nothing needs pasting."""
+
+    client_id: str = "mac"
+    """How this spoke names itself in the hub's log."""
+
+    reconnect_max_s: float = 8.0
+    """The ceiling of the reconnect backoff (starts at half a second)."""
+
+    hello_timeout_s: float = 5.0
+    """How long to wait for the hub's hello after connecting."""
+
+    def current_token(self) -> str:
         if self.token:
             return self.token
         try:
@@ -1610,6 +1665,7 @@ class Config:
     discord: DiscordConfig = field(default_factory=DiscordConfig)
     web: WebConfig = field(default_factory=WebConfig)
     hub: HubConfig = field(default_factory=HubConfig)
+    spoke: SpokeConfig = field(default_factory=SpokeConfig)
     oura: OuraConfig = field(default_factory=OuraConfig)
     sections: SectionsConfig = field(default_factory=SectionsConfig)
     location: LocationConfig = field(default_factory=LocationConfig)
@@ -1651,6 +1707,7 @@ _SECTIONS = {
     "discord": DiscordConfig,
     "web": WebConfig,
     "hub": HubConfig,
+    "spoke": SpokeConfig,
     "oura": OuraConfig,
     "sections": SectionsConfig,
     "location": LocationConfig,

@@ -108,6 +108,18 @@ CATALOG: dict[str, FrameSpec] = {
     "turn.cancel": FrameSpec(
         "c2h", required={"turn_id": "str"}, optional={"reason": "str"}
     ),
+    # The spoke's playback receipt: sentence ``n`` of ``turn_id`` finished
+    # (``completed``) or was stopped — barge-in, or a dead device. The
+    # hub's voice sink awaits one per sentence, which is what keeps
+    # generation paced to speech and lets a barge-in abort the stream.
+    "turn.played": FrameSpec(
+        "c2h", required={"turn_id": "str", "n": "int", "completed": "bool"}
+    ),
+    # The spoke's state machine, for the hub's ladder: whether a
+    # listening window is open and whether speech is in hand right now.
+    "voice.state": FrameSpec(
+        "c2h", required={"listening": "bool", "speaking": "bool"}
+    ),
     "confirm.answer": FrameSpec(
         "c2h", required={"confirm_id": "str", "text": "str"}
     ),
@@ -147,7 +159,7 @@ CATALOG: dict[str, FrameSpec] = {
     ),
     "turn.sentence": FrameSpec(
         "h2c", required={"turn_id": "str", "kind": "str", "text": "str"},
-        optional={"seq": "int"},
+        optional={"seq": "int", "n": "int"},
     ),
     "turn.end": FrameSpec(
         "h2c", required={"turn_id": "str", "status": "str"},
@@ -155,8 +167,9 @@ CATALOG: dict[str, FrameSpec] = {
     ),
     "confirm.request": FrameSpec(
         "h2c", required={"confirm_id": "str", "text": "str", "deadline_wall": "num"},
-        optional={"seq": "int"},
+        optional={"seq": "int", "listen": "bool"},
     ),
+    "confirm.cancel": FrameSpec("h2c", required={"confirm_id": "str"}),
     "tool.request": FrameSpec(
         "h2c", required={"rpc_id": "str", "tool": "str", "args": "dict"},
         optional={"timeout_s": "num"},
@@ -170,14 +183,14 @@ CATALOG: dict[str, FrameSpec] = {
 }
 
 BROADCAST_TYPES = frozenset({
-    "row", "state", "muted", "agents", "confirm",
-    "turn.begin", "turn.sentence", "turn.end", "confirm.request",
-    "deliver.speak", "timers.sync",
+    "row", "state", "muted", "agents", "confirm", "timers.sync",
 })
 """The frames that carry a seq and live in the replay ring: everything
-the hub says to *every* client. Private replies (ack, pong, error) and
-addressed requests (tool.*) are not replayable — a tool request replayed
-to a spoke that already answered it would run the tool twice."""
+the hub says to *every* client, all of it idempotent to re-see. Private
+replies (ack, pong, error) and addressed requests (turn.*, confirm.*,
+tool.*, deliver.*) are not replayable — a sentence replayed to a spoke
+that already spoke it would be said twice, a tool request replayed to
+one that already answered would run the tool twice."""
 
 # WebSocket close codes in the application range. A client reads the
 # code to decide what to do next: 4401 means "ask the user for the

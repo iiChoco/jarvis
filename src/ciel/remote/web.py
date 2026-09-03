@@ -284,6 +284,9 @@ class WebLink:
         empty for a while still resumes."""
         self._peers: dict[Any, tuple[str, str]] = {}
         """ws → (role, client_id), for the log lines."""
+        self.stir = asyncio.Event()
+        """Set on every inbound frame and every client change — the
+        hub's arbiter waits on it instead of polling the queues."""
         self._queue: deque[tuple[float, str, None]] = deque()
         """Inbound turns awaiting the frame loop, oldest first:
         ``(arrival, text, None)`` — the Discord deque's shape, with the
@@ -595,6 +598,7 @@ class WebLink:
             return ws
 
         queue, resumed = self._welcome(ws, verdict)
+        self.stir.set()
         writer = asyncio.create_task(self._write_frames(ws, queue))
         self._writers.add(writer)
         writer.add_done_callback(self._writers.discard)
@@ -618,8 +622,13 @@ class WebLink:
             self._clients.pop(ws, None)
             self._peers.pop(ws, None)
             writer.cancel()
+            self._client_left(ws)
             log.debug("web client left (%d open)", len(self._clients))
         return ws
+
+    def _client_left(self, ws: Any) -> None:
+        """A socket is gone — the hub server's hook (the spoke seat)."""
+        return None
 
     def _welcome(
         self, ws: Any, verdict: Admission
@@ -680,6 +689,7 @@ class WebLink:
             except wire.WireError as exc:
                 log.debug("web frame refused by the catalog: %s", exc)
                 return
+            self.stir.set()
             kind = frame.get("type")
             if kind == "hello":
                 # A second hello mid-session: nothing to renegotiate —
