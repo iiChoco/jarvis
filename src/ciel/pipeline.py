@@ -978,7 +978,13 @@ class Pipeline:
                 and config.messages.enabled
                 and config.messages.allow_send
             ):
-                self._owner_messages = MessagesClient(config.messages)
+                # On the hub the text goes through the spoke's Messages.app;
+                # when the spoke is away, _run_proactive_message falls to
+                # Discord (the away ladder inverts with the Mac asleep).
+                self._owner_messages = (
+                    self._remote.messages if self._remote is not None
+                    else MessagesClient(config.messages)
+                )
             away_armed = self._owner_messages is not None or (
                 self._remote_link is not None
                 and self._remote_link.armed
@@ -1561,6 +1567,16 @@ class Pipeline:
                 if now_wall >= self._next_agents_push:
                     self._next_agents_push = now_wall + 1.0
                     server.note_agents(self._active_agents())
+                    if self._timers is not None:
+                        # The spoke's mirror: the whole set, once a second,
+                        # deduped at the server — the alarm clock must not
+                        # depend on this machine being reachable.
+                        server.note_timers([
+                            {"id": t.id, "kind": t.kind, "due_at": t.due_at,
+                             "label": t.label, "duration_s": t.duration_s,
+                             "pending": t.pending}
+                            for t in self._timers.active()
+                        ])
 
                 source = pick_next(self._loop_snapshot())
                 if await self._enact(source, None):
@@ -2560,12 +2576,23 @@ class Pipeline:
         if reply is None:
             return  # already routed (declined, held, timed out, hastened)
         try:
-            if self._owner_messages is not None:
+            imessage_reachable = self._owner_messages is not None and (
+                self._role != "hub"
+                or (isinstance(self._web_link, HubServer) and self._web_link.spoke_connected)
+            )
+            if imessage_reachable:
+                assert self._owner_messages is not None
                 await self._owner_messages.send(
                     self._config.proactive.owner_handle, reply
                 )
-            elif self._remote_link is not None:
+            elif self._remote_link is not None and self._remote_link.can_send:
+                # The Mac is asleep (no spoke), so the phone's iMessage
+                # can't be reached through it: Discord carries the text.
                 await self._remote_link.send(reply)
+            elif self._owner_messages is not None:
+                await self._owner_messages.send(
+                    self._config.proactive.owner_handle, reply
+                )
             else:  # unreachable behind the assert; kept for the type story
                 raise MessagesUnavailable("no away outlet armed")
             print(f"  ciel (texted): {reply}", flush=True)

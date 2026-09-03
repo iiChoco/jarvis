@@ -2,6 +2,39 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-03 — what survives a hub that is away (phase 5, part one)
+
+**Why.** The split deferred the resilience it needed: a timer must ring
+whether or not a server is reachable, a reconnect must not double a
+turn, and the away text must find the user when the Mac is asleep.
+
+**What.**
+
+- *The timer mirror* (`spoke/timers.py`): the hub broadcasts
+  ``timers.sync`` (deduped at the server, once a second alongside the
+  agents roster); the spoke mirrors it, persisted, and rings a timer
+  itself only when the hub can't — the link down at the due moment, or
+  the hub silent past ``grace_s`` (a wedged hub). What the spoke rang is
+  remembered by id, and a late ``deliver.speak`` for it is receipted
+  without a sound. Offline, the grammar runs on the spoke: ``set_timer``
+  arms a local timer in the mirror, ``cancel_timer`` and ``list_timers``
+  answer from it in the hub's wording, ``reload`` restarts the room.
+- *Say ids* (`spoke/client.py`, `hub/server.py`): every ``say`` carries
+  one; the hub keeps the last 256 and queues each once, so the ledger's
+  resend after a reconnect is acked but never doubled.
+- *The away ladder* (`pipeline.py`): on the hub the owner's iMessage is
+  the spoke's, so ``_run_proactive_message`` sends it while the spoke is
+  seated and falls to Discord when it isn't.
+- *The doctor* (`hub/doctor.py`, ``ciel hub --check``): the token, the
+  bind address (a bind test — the tailnet address is not on the
+  hostname's records), the brain's login by the CLI's own word, ``npx``
+  for the connectors that need it, the state directory.
+
+**Probes.** `probe_backfill.py`: the mirror's every rule and its
+persistence, the say-id dedupe, the broadcast dedupe, the away ladder
+both ways and with Discord down, the doctor's rows. `probe_spoke` grows
+the offline grammar, the local ring, and the silent re-delivery.
+
 ## 2026-09-03 — the hub leaves the Mac (phase 4, in progress)
 
 **Why.** The point of the whole move: the brain on a machine that never
@@ -318,7 +351,13 @@ and that is the narrow thing worth automating.
   return instead of ignoring it: a refused copy is a warning, a refused
   recipient is a failed send.
 
-**Probes.** `probe_sections.py` grows to 73 checks: cookie-file
+- *Self-knowledge* (`prompt.py`, `agent.py`): the watcher ran below the
+  brain and the brain didn't know — asked "are you watching for a spot?",
+  Ciel would honestly say no. `sections_watch_line` now tells the Watching
+  section which sections are watched, how often, and every outlet that
+  fires on an opening, and that enrolling stays the user's act.
+
+**Probes.** `probe_sections.py` grows to 78 checks: cookie-file
 precedence over the seed, the self-heal spawn and its cooldown,
 `auto_refresh` off never spawning a browser, the sender's raw message and
 default recipient and From, the alarm's count and distinct subjects, and its off

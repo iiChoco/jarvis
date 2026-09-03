@@ -20,6 +20,7 @@ import contextlib
 import json
 import logging
 import random
+import secrets
 from typing import Any, Callable
 
 from ciel import wire
@@ -98,7 +99,9 @@ class HubClient:
         Returns whether it could be sent *now*; a held say still goes
         the moment the socket is back."""
         self._say_seq += 1
-        frame = {"type": "say", "text": text, "lane": lane, "seq": self._say_seq}
+        # The id is what makes the resend safe: the hub queues each id once.
+        frame = {"type": "say", "text": text, "lane": lane, "seq": self._say_seq,
+                 "say_id": secrets.token_urlsafe(9)}
         self._unacked[self._say_seq] = frame
         return self.send(frame)
 

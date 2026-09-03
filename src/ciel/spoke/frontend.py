@@ -54,6 +54,8 @@ from ciel.schedule import State
 from ciel.spoke.client import HubClient
 from ciel.spoke.executor import Executor
 from ciel.spoke.publisher import Heartbeat, PublishQueue
+from ciel.spoke.timers import TimerMirror
+from ciel.timers import spoken_clock, spoken_duration
 from ciel.stt import SpeechToText, build_stt
 from ciel.tts.base import TextToSpeech
 from ciel.ui.indicator import Indicator, build_indicator
@@ -174,6 +176,10 @@ class Spoke:
             interval_s=config.spoke.heartbeat_s,
             idle_threshold_s=config.proactive.presence_idle_s,
         )
+        self._timers = TimerMirror(config.state_dir / "spoke-timers.json")
+        """The hub's timers, mirrored, plus any armed here offline — the
+        alarm clock that never depends on a server (spoke/timers.py)."""
+        self._ringing = False
         self._mute_sentinel = config.state_dir / "mute"
         self._muted = self._mute_sentinel.exists()
         self._next_mute_check = 0.0
@@ -244,6 +250,14 @@ class Spoke:
                         on_disk = self._mute_sentinel.exists()
                         if on_disk != self._muted:
                             self._set_muted(on_disk)
+                        # The mirror's own ringing: only what the hub can't.
+                        if (
+                            self._state is State.WAITING
+                            and not self._delivering and not self._ringing
+                        ):
+                            due = self._timers.due(now_wall, hub_connected=self._link.connected)
+                            if due:
+                                asyncio.create_task(self._ring_locally(due))
 
                     if self._confirm is not None:
                         # A question is out; the room's answer is what
@@ -260,6 +274,8 @@ class Spoke:
                                 await player.play(self._tts.stream("Reloading."))
                             self.reload_requested = True
                             break
+                        if self.reload_requested:
+                            break  # a spoken "reload" with the hub away
                         if self._delivering:
                             continue  # the room is Ciel's for a moment
                         self._track_noise_floor(frame)
@@ -420,6 +436,15 @@ class Spoke:
             if not heard and not pending:
                 log.debug("nothing intelligible in %.2fs of audio", len(utterance) / SAMPLE_RATE)
                 return
+            if heard and self._config.commands.enabled and not self._link.connected:
+                # The hub is down: the grammar runs here, against the
+                # mirror. Everything else waits for the hub, as it should.
+                cmd = match_command(heard)
+                if cmd is not None and cmd.kind in ("set_timer", "cancel_timer", "list_timers", "reload"):
+                    self._pending_text = None
+                    print(f"\n  you: {heard}", flush=True)
+                    await self._offline_command(cmd)
+                    return
             if heard and self._config.commands.enabled:
                 cmd = match_command(heard)
                 if cmd is not None and cmd.kind == "dismiss":
@@ -542,9 +567,15 @@ class Spoke:
             if self._confirm is not None and self._confirm[0] == frame["confirm_id"]:
                 self._confirm = None
         elif kind == "deliver.speak":
-            asyncio.create_task(self._deliver(
-                frame["event_id"], frame["text"], frame.get("meta") or {}
-            ))
+            event_id = frame["event_id"]
+            if event_id.startswith("timer:") and self._timers.rung_already(event_id[6:]):
+                # Already rung here while the hub was away: receipted, silent.
+                log.info("timer %s already rung locally — receipting silently", event_id)
+                self._link.send({"type": "deliver.result", "event_id": event_id, "ok": True})
+                return
+            asyncio.create_task(self._deliver(event_id, frame["text"], frame.get("meta") or {}))
+        elif kind == "timers.sync":
+            self._timers.sync(list(frame.get("timers") or []))
         elif kind == "state":
             state = frame["state"]
             if state == "idle" and self._state is State.LISTENING:
@@ -659,6 +690,62 @@ class Spoke:
                 "listening" if self._state is State.LISTENING else "idle"
             )
             self._link.send({"type": "deliver.result", "event_id": event_id, "ok": ok})
+
+    async def _ring_locally(self, due: list) -> None:
+        """A timer the hub could not ring: the ring, the announcement,
+        the same words the hub would have used."""
+        assert self._player is not None and self._mic is not None
+        self._ringing = True
+        try:
+            self._indicator.set_state("speaking")
+            with contextlib.suppress(Exception):
+                await self._player.play(_one(ring_pcm(self._tts.sample_rate)))
+            for timer in due:
+                text = self._timers.announcement(timer)
+                print(f"\n  ciel ({timer.kind}, local): {text}", flush=True)
+                self._timers.mark_rung(timer.id, time.time())
+                with contextlib.suppress(Exception):
+                    await self._player.play(self._tts.stream(text))
+        finally:
+            self._ringing = False
+            self._mic.drain()
+            self._indicator.set_state("idle")
+
+    async def _offline_command(self, cmd: Any) -> None:
+        """The grammar's local branch, hub down: timers against the mirror,
+        the reload as the room's own re-exec."""
+        assert self._player is not None
+        now = time.time()
+        if cmd.kind == "reload":
+            self.reload_requested = True
+            reply = "Reloading."
+        elif cmd.kind == "set_timer":
+            self._timers.set_local(cmd.seconds, now)
+            reply = f"{spoken_duration(cmd.seconds)} timer — starting now. The hub is away, so I'll ring it myself."
+        elif cmd.kind == "cancel_timer":
+            active = self._timers.active(now)
+            if not active:
+                reply = "No timers are running."
+            else:
+                cancelled = self._timers.cancel(now)
+                reply = (
+                    f"You have {len(active)} timers running — tell me which one to cancel."
+                    if cancelled is None else
+                    f"Cancelled the {spoken_duration(cancelled.duration_s)} timer."
+                    if cancelled.kind != "alarm" else
+                    f"Cancelled the {spoken_clock(cancelled.due_at)} alarm."
+                )
+        else:
+            reply = self._timers.listing(now)
+        print(f"  ciel (local): {reply}", flush=True)
+        self._indicator.set_state("speaking")
+        with contextlib.suppress(Exception):
+            await self._player.play(self._tts.stream(reply))
+        self._spoke = True
+        if cmd.kind == "reload":
+            # The loop exits on the next frame from WAITING; a spoken reply
+            # first, so the room hears it before the re-exec.
+            self._state = State.WAITING
 
     async def _hub_lost_notice(self) -> None:
         """Once in words, then a chime — the resilience contract."""

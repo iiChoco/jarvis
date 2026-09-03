@@ -552,6 +552,22 @@ ordinary Bash and file tools on the hub act on the hub's own workspace.
 and audio module and constructing the hub anyway; `probe_tool_rpc.py`
 and `probe_presence.py` drive the calls and the publishers.
 
+**When the hub is away.** The alarm clock never depends on the server:
+the hub broadcasts its timer set, the spoke keeps a mirror
+(`~/.ciel/spoke-timers.json`) and rings a timer itself when the hub
+can't — the link down at the due moment, or the hub silent about it
+past a short grace — and a timer rung here is receipted silently if the
+hub later delivers it, so nothing rings twice. With the hub down the
+command grammar runs on the spoke: "ten minute timer" arms a local
+timer, "cancel the timer" and "what timers are running" answer from the
+mirror, "reload" restarts the room. Every spoken turn carries an id, so
+a resend after a reconnect is never queued twice. On the hub, an away
+text goes through the Mac's iMessage while the spoke is seated and
+falls to Discord when it isn't. `ciel hub --check` is the doctor: the
+token, the bind address, the brain's login, the connectors' runtime,
+the state directory — one line each. `scripts/probe_backfill.py` drives
+all of it.
+
 **The Chart from anywhere.** With the hub on a server, the page can
 also sit behind a public name through a Cloudflare Tunnel: `cloudflared`
 on the server carries the hostname to the hub's tailnet socket, so the

@@ -55,6 +55,12 @@ class HubServer(WebLink):
         self._rpc: dict[str, asyncio.Future[dict[str, Any]]] = {}
         """rpc_id → the tool call's result frame."""
         self._rpc_seq = 0
+        self._timers_sent: list[dict[str, Any]] | None = None
+        """The last timer set broadcast, so an unchanged poll costs nothing."""
+        self._say_ids: deque[str] = deque(maxlen=256)
+        """Recent say ids from the spoke: a resend after a reconnect is
+        acked but not queued again — at-least-once on the wire, exactly
+        once in the turn queue."""
         self.on_event: Callable[[dict[str, Any]], bool] | None = None
         """A published event from the spoke's watchers: the queue's push.
         Returns whether it was new; either way the publish is acked."""
@@ -88,6 +94,14 @@ class HubServer(WebLink):
 
     def pop_voice(self) -> tuple[float, str, None] | None:
         return self._voice.popleft() if self._voice else None
+
+    def note_timers(self, timers: list[dict[str, Any]]) -> None:
+        """The hub's timer set, for the spoke's mirror — broadcast (it is
+        idempotent and rides the replay ring) when it changes."""
+        if timers == self._timers_sent:
+            return
+        self._timers_sent = [dict(t) for t in timers]
+        self._broadcast({"type": "timers.sync", "timers": timers})
 
     def send_spoke(self, frame: dict[str, Any]) -> bool:
         """One private frame to the seated spoke; False when the seat is
@@ -237,6 +251,12 @@ class HubServer(WebLink):
                 if lane != "voice":
                     log.debug("spoke say on lane %r ignored (voice only)", lane)
                     return
+                say_id = frame.get("say_id")
+                if isinstance(say_id, str) and say_id:
+                    if say_id in self._say_ids:
+                        log.debug("say %s already queued — a resend, ignored", say_id)
+                        return
+                    self._say_ids.append(say_id)
                 if len(text) > self._config.max_inbound_chars:
                     text = text[: self._config.max_inbound_chars]
                 self._voice.append((time.monotonic(), text, None))

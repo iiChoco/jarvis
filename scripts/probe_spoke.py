@@ -235,6 +235,9 @@ def make_spoke(*, stt="hello there.", connected=True, complete_after=None,
     s._heartbeat = _Beat()
     s._executor = _Exec()
     s._watchers = []
+    from ciel.spoke.timers import TimerMirror
+    s._timers = TimerMirror(tmp / "spoke-timers.json", grace_s=20.0)
+    s._ringing = False
     return s
 
 
@@ -464,6 +467,56 @@ async def probe_mute_and_state() -> None:
     )
 
 
+async def probe_offline() -> None:
+    print("\nthe hub away: the mirror and the grammar")
+    s = make_spoke(stt="ten minute timer", connected=False)
+    s._state = State.BUSY
+    await s._handle_utterance(UTT)
+    await settle()
+    check(
+        "an offline 'ten minute timer' arms a local timer and is answered here",
+        s._link.says == [] and len(s._timers.active(0.0)) == 1
+        and s._player.played[-1].startswith("10 minute timer — starting now"),
+    )
+    s._stt = FakeSTT("what timers are running")
+    await s._handle_utterance(UTT)
+    await settle()
+    check("the offline listing answers from the mirror",
+          s._player.played[-1].startswith("Your 10 minute timer with"))
+    s._stt = FakeSTT("cancel the timer")
+    await s._handle_utterance(UTT)
+    await settle()
+    check("the offline cancel clears it",
+          s._player.played[-1] == "Cancelled the 10 minute timer." and s._timers.active(0.0) == [])
+    s._stt = FakeSTT("what time is it?")
+    await s._handle_utterance(UTT)
+    await settle()
+    check("anything else still goes to the ledger and the loss is said",
+          s._link.says == [("what time is it?", "voice")]
+          and "I can't reach the hub" in s._player.played[-1])
+
+    s = make_spoke()
+    s._on_frame({"type": "timers.sync", "timers": [
+        {"id": "t1", "kind": "timer", "due_at": 5.0, "label": "", "duration_s": 60.0, "pending": False}
+    ]})
+    check("timers.sync fills the mirror", [x.id for x in s._timers.active(0.0)] == ["t1"])
+    s._state = State.WAITING
+    due = s._timers.due(100.0, hub_connected=False)
+    await s._ring_locally(due)
+    check(
+        "the mirror rings a due timer itself: ring, announcement, rung, mic drained",
+        s._player.played == ["<pcm>", "Your 1 minute timer is done."]
+        and s._timers.rung_already("t1") and s._mic.drains == 1,
+    )
+    s._on_frame({"type": "deliver.speak", "event_id": "timer:t1", "text": "Your 1 minute timer is done.", "meta": {"ring": True}})
+    await settle()
+    check(
+        "the hub's late delivery of the same timer is receipted silently",
+        len(s._player.played) == 2
+        and s._link.of("deliver.result") == [{"type": "deliver.result", "event_id": "timer:t1", "ok": True}],
+    )
+
+
 async def probe_ack_filler() -> None:
     print("\nthe ack filler")
     s = make_spoke(ack=True)
@@ -488,6 +541,7 @@ async def main() -> None:
     await probe_confirm()
     await probe_delivery()
     await probe_mute_and_state()
+    await probe_offline()
     await probe_ack_filler()
     print(f"\nall {len(CHECKS)} checks passed")
 

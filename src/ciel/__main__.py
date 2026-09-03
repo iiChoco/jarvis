@@ -62,6 +62,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--new", action="store_true", help="start a fresh conversation, ignoring the last one"
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    parser.add_argument(
+        "--check", action="store_true",
+        help="hub only: verify the token, bind address, brain login, and connectors, then exit",
+    )
     return parser.parse_args(argv)
 
 
@@ -147,6 +151,11 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger().setLevel(_log_level(config.log_level))
     if args.new:
         config.session_file.unlink(missing_ok=True)
+
+    if args.check:
+        from ciel.hub.doctor import report
+
+        return report(config)
 
     if args.role == "spoke":
         from ciel.spoke.frontend import Spoke
