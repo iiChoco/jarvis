@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "chart-echo",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "--no-sync", "python", "scripts/probe_web.py", "--live", "--port", "8799"],
+      "port": 8799
+    },
+    {
+      "name": "chart-echo-token",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "--no-sync", "python", "scripts/probe_web.py", "--live", "--port", "8798", "--require-token", "probe-token"],
+      "port": 8798
+    }
+  ]
+}
