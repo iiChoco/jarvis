@@ -469,6 +469,11 @@ class ShellConfig:
     at the deadline. Matches ``wake_timeout_ms`` because it is the same social
     contract: a question waits about this long for an answer."""
 
+    command_timeout_s: float = 120.0
+    """How long a command run on the Mac from the hub may take before the
+    spoke kills it. The SDK's own Bash tool has its own clock; this one is
+    for ``run_on_mac``, which the hub awaits over the wire."""
+
     max_command_display_chars: int = 120
     """Commands longer than this are truncated in the spoken prompt. The point
     of reading a command aloud is that you hear what is about to run, but past
@@ -826,6 +831,212 @@ class OuraConfig:
         the system prompt, and the watcher all make, so they agree."""
         return self.enabled and (self.authorized() or bool(self.token))
 
+
+@dataclass(frozen=True, slots=True)
+class SectionsConfig:
+    """Watching the course section-signup site for an open spot
+    (``sections.py``, watcher in ``proactive/sections.py``).
+
+    Berkeley's *sections* app (sections.datastructur.es for CS 61B) fills
+    sections first-come-first-served, and a dropped spot is gone in
+    minutes. This watcher polls the site's ``refresh_state`` API and,
+    when a watched section stops being full, files an importance-3 event
+    — spoken immediately if you're around, texted if you're away and the
+    messaging outlet is armed. Read-only: it never joins a section.
+
+    The site only shows sections to a signed-in browser, and its Canvas
+    OAuth can't be automated, so setup is: sign in once in a browser,
+    copy the ``Cookie`` request header from any ``/api/`` call in
+    DevTools' Network tab into ``cookie`` here, then run
+    ``uv run scripts/probe_sections.py --live`` to list section ids and
+    pick the ones for ``watch``. When the cookie eventually expires, the
+    watcher's health streak files a note saying so."""
+
+    enabled: bool = False
+    """Off by default, like every watcher that earns unprompted speech."""
+
+    url: str = "https://sections.datastructur.es"
+    """The deployment to watch — other courses run the same app under
+    other names."""
+
+    cookie: str = ""
+    """The browser's ``Cookie`` header for the site, as a *seed*. A session
+    credential: anyone holding it is signed in as you there, so prefer
+    ``CIEL_SECTIONS_COOKIE`` in the launch environment if you'd rather it
+    not live in the config file. Whenever ``cookie_file`` holds a value it
+    wins over this — the refresh job (below) writes there, and the site's
+    session slides its own two-hour expiry forward on every poll, so a
+    continuously-running watcher never needs this touched again."""
+
+    cookie_file: Path = field(
+        default_factory=lambda: Path.home() / ".ciel" / "sections-cookie"
+    )
+    """Where the live cookie lives once the refresh job is set up — the
+    same owner-only-file pattern as the Oura tokens. The site's session
+    dies only after two hours with no request, i.e. an overnight sleep;
+    ``scripts/refresh_sections_cookie.py`` re-mints it through a browser
+    profile that still holds a bCourses login and writes it here, and the
+    watcher reads it fresh on every scan, so a refresh in that other
+    process is picked up on the next poll with no reload."""
+
+    watch: tuple[str, ...] = ()
+    """Section ids worth interrupting for, as the probe's listing prints
+    them (``watch = ["12", "31"]``). Empty watches nothing — this filter
+    is the consent, and "any section anywhere" is a notification storm,
+    not a wish. Also the brain's self-knowledge: a non-empty list puts the
+    watch in the system prompt whether or not this process runs it, so
+    the hub (``enabled = false``, the watcher on the spoke) still answers
+    "are you watching?" with a yes."""
+
+    poll_s: float = 30.0
+    """How often the site is asked. Spots race by in minutes, so the
+    default leans quick; one small JSON read per poll keeps that
+    neighborly."""
+
+    auto_refresh: bool = False
+    """When on, a signed-out scan spawns ``refresh_cmd`` once (then waits
+    out ``refresh_cooldown_s`` before trying again) instead of only filing
+    the re-login note — self-healing the midday case where the machine was
+    off past the two-hour window. The scheduled launchd job covers the
+    ordinary overnight death; this covers the rest. Off until the refresh
+    job is actually set up, or every signed-out scan would spawn a doomed
+    browser."""
+
+    refresh_cmd: tuple[str, ...] = ()
+    """The command ``auto_refresh`` runs, argv-style
+    (``["/Users/.../python", "scripts/refresh_sections_cookie.py"]``). Its
+    job is to write a fresh cookie to ``cookie_file``; its output is
+    logged, not parsed. Empty disables the spawn even when
+    ``auto_refresh`` is on."""
+
+    refresh_cooldown_s: float = 600.0
+    """The shortest gap between two spawned refreshes. A dead cookie fails
+    every 30-second poll; without a cooldown that would launch a browser
+    every 30 seconds. Ten minutes is longer than a refresh takes and short
+    enough that a genuine re-login lands promptly."""
+
+    email_on_opening: int = 0
+    """How many emails an opening sends — an alarm, not a notice: several
+    distinct messages minutes apart make a phone buzz until it's looked
+    at, where one message is a single buzz easily missed. Sent by the
+    watcher itself the moment the event is queued, outside the speak/text
+    policy and its quiet hours on purpose: a spot is gone in minutes and
+    the user asked to be woken for it. 0 sends nothing. Needs the
+    ``[mcp.gmail]`` connector authorized — its tokens are borrowed
+    (``gmail.py``), the same way the Google Calendar watcher borrows."""
+
+    email_interval_s: float = 60.0
+    """Seconds between the alarm's messages. Each carries its own subject
+    ("1 of 5") so Gmail doesn't fold them into one thread with one
+    notification."""
+
+    email_to: str = ""
+    """Where the alarm goes. Empty means the Gmail account the connector
+    is signed in as — "email me". Anything else is pinned here by you;
+    deterministic code never chooses a recipient at send time."""
+
+    email_from: str = ""
+    """The From address — Ciel's own, e.g. ``ciel@example.com``, once that
+    is a verified "send mail as" alias on the connector's account. Empty
+    sends as the account itself. Unverified aliases are rewritten by
+    Gmail to the primary address rather than rejected."""
+
+    smtp_token: str = ""
+    """Set this and the alarm goes out as Ciel through an SMTP relay
+    instead of as you through Gmail (``mail.py``): for Cloudflare Email
+    Service, an API token with the Email Sending permission — a
+    credential, so ``CIEL_SECTIONS_SMTP_TOKEN`` in the environment is the
+    tidier home. With it, ``email_from`` (Ciel's address on the onboarded
+    domain) and ``email_to`` (a verified destination — sending there is
+    free) are both required; nothing is looked up at send time."""
+
+    smtp_host: str = "smtp.mx.cloudflare.net"
+    """The relay. Cloudflare's speaks implicit TLS only."""
+
+    smtp_port: int = 465
+    """SMTPS. The relay has no STARTTLS on 587."""
+
+    smtp_user: str = "api_token"
+    """The login name — for Cloudflare, literally this string; the token
+    is the password."""
+
+    gmail_oauth_keys: Path = field(
+        default_factory=lambda: Path.home() / ".gmail-mcp" / "gcp-oauth.keys.json"
+    )
+    """The Gmail connector's OAuth client — the same Desktop-app JSON."""
+
+    gmail_token_file: Path = field(
+        default_factory=lambda: Path.home() / ".gmail-mcp" / "credentials.json"
+    )
+    """Where the Gmail connector saved its refresh token. Read-only here."""
+
+    def current_cookie(self) -> str:
+        """The cookie to send: the live file the refresh job maintains
+        wins, the config seed is the fallback. Read fresh on every call so
+        another process's refresh needs no reload to take effect."""
+        try:
+            live = self.cookie_file.read_text().strip()
+        except OSError:
+            live = ""
+        return live or self.cookie
+
+
+@dataclass(frozen=True, slots=True)
+class MailConfig:
+    """Ciel's own email address (``mail.py``, tool in ``brain/tools/mail.py``).
+
+    Where the Gmail connector lets Ciel act *as the user*, this is mail *as
+    Ciel*: an address on a domain onboarded with Cloudflare Email Service,
+    sent through its SMTPS relay with an API token. The brain gets one tool,
+    ``send_as_ciel``, behind the spoken-yes gate like every other send; the
+    section watcher's alarm borrows the same relay when it has no relay of
+    its own. Replies to the address arrive wherever the domain's Email
+    Routing forwards them — the owner's inbox, typically under a label."""
+
+    enabled: bool = False
+    """Off by default. On without ``address`` and ``token`` warns at
+    startup and arms nothing."""
+
+    address: str = ""
+    """Ciel's address, e.g. ``ciel@example.com`` — the From on everything
+    sent here. Its domain must be onboarded for Email Sending on the
+    account the token belongs to, or the relay answers 550."""
+
+    owner: str = ""
+    """Where "email me" goes: the user's own inbox, which must be a
+    verified destination address on the Cloudflare account (relaying to
+    those is free on every plan; anywhere else needs Workers Paid). Also
+    the default recipient of the section watcher's alarm."""
+
+    copy_to: str = ""
+    """An address that silently receives a copy (Bcc) of everything sent
+    from Ciel's address — the tool and the section alarm alike — so the
+    user has a record of what Ciel said in their own inbox without the
+    recipient seeing it. On Cloudflare's free tier this too must be a
+    verified destination address. Empty keeps no copy."""
+
+    smtp_host: str = "smtp.mx.cloudflare.net"
+    """The relay. Cloudflare's speaks implicit TLS only."""
+
+    smtp_port: int = 465
+    """SMTPS; there is no STARTTLS on 587."""
+
+    smtp_user: str = "api_token"
+    """The login name — for Cloudflare, literally this; the token is the
+    password."""
+
+    token: str = ""
+    """A Cloudflare API token with the Email Sending: Edit permission. A
+    credential: ``CIEL_MAIL_TOKEN`` in the launch environment is the
+    tidier home. Anyone holding it can send as any address on the domain."""
+
+    @property
+    def armed(self) -> bool:
+        """Enabled *and* able to send — the one test the tool registry,
+        the gate, the prompt, and the watcher all make, so they agree."""
+        return self.enabled and bool(self.address and self.token)
+
+
 @dataclass(frozen=True, slots=True)
 class LocationConfig:
     """Where the user is (``location.py``) — from what this machine can see.
@@ -1014,6 +1225,144 @@ class WebConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class HubConfig:
+    """The hub's wire server — the Chart socket, reachable beyond loopback.
+
+    Codename Meridian (see ``wire.py``). Phase one of the hub-and-spoke
+    move: the same process, the same ``/ws``, but bindable to the
+    tailnet and gated by a token, so a phone on the Tailscale network
+    can open the Chart while the laptop's lid is open. Later phases put
+    the Mac spoke and the brain on opposite ends of this same socket."""
+
+    bind: str = ""
+    """The address the wire server listens on; empty means ``[web].host``
+    (loopback). Set it to the machine's Tailscale address (``100.x.y.z``)
+    to reach it from the tailnet and nowhere else — never a public
+    interface. ``0.0.0.0`` works but then list the names clients will
+    use in ``origins``, since the Origin gate can't infer them."""
+
+    token: str = ""
+    """The shared secret every non-loopback client must present in its
+    hello. A credential: prefer ``CIEL_HUB_TOKEN`` in the environment or
+    the file — this field exists so a one-off run can pin one. When both
+    are empty and the bind is not loopback, Ciel mints one into
+    ``token_file`` at start and logs where it went."""
+
+    token_file: Path = field(
+        default_factory=lambda: Path.home() / ".ciel" / "hub.token"
+    )
+    """Where the minted token lives — owner-only, and named in
+    ``FORBIDDEN_NAMES`` so the model's file tools and the shell gate both
+    refuse to read it. Paste its contents into the Chart once; the page
+    remembers it."""
+
+    require_token: bool = False
+    """Ask even loopback clients for the token. Off by default: reaching
+    a loopback port already means being at the machine, and the typed
+    lane trusts that. On is for the probe, and for a shared machine."""
+
+    origins: tuple[str, ...] = ()
+    """Extra Origin hosts the socket accepts, beyond loopback and the
+    bind address itself — the MagicDNS name (``ciel-hub.tail1234.ts.net``)
+    when the page is opened by name rather than by address. Exact host
+    match; the port must still be ``[web].port``."""
+
+    hello_timeout_s: float = 5.0
+    """How long a fresh socket may stay silent before the hub closes it:
+    the client speaks first now (its hello carries the token and the
+    resume claim), so a socket that never says hello is a port scan or
+    a page too old to know."""
+
+    resume_frames: int = 1024
+    """How many recent broadcast frames the hub keeps for resume. A
+    client that missed more than this gets a fresh hello with the
+    ``[web].history_lines`` window instead — the same catch-up the
+    Chart always had."""
+
+    resume_grace_s: float = 600.0
+    """How old a live confirm prompt may be and still be replayed to a
+    resuming client — the Discord catch-up rule: a ten-minute-old
+    question is still waited on; anything older has already been timed
+    out by the broker, and a replayed banner would invite an answer to
+    nothing."""
+
+    speak_timeout_s: float = 120.0
+    """How long the hub waits for the spoke to report one sentence (or
+    one delivery) played before treating the spoke as gone and
+    abandoning the turn. Generous: a long sentence through Piper plus a
+    slow machine is tens of seconds; only a dead socket takes minutes."""
+
+    presence_stale_s: float = 30.0
+    """How old the spoke's last heartbeat may be before the hub reads the
+    room as empty. Three beats at the spoke's default cadence: one
+    missed beat is a hiccup, three is a spoke that stopped listening,
+    and Vigil must not speak to it."""
+
+    confirm_timeout_s: float = 45.0
+    """The hub-side deadline for one spoken answer from the spoke — the
+    spoke speaks the question and listens for its own ``[shell]``
+    window, then reports; this only catches a spoke that never reports
+    at all. Text lanes keep ``[discord].confirm_timeout_s``."""
+
+    def current_token(self) -> str:
+        """The token to check against: the field, else the file, else
+        empty (which, off loopback, means mint one)."""
+        if self.token:
+            return self.token
+        try:
+            return self.token_file.read_text().strip()
+        except OSError:
+            return ""
+
+
+@dataclass(frozen=True, slots=True)
+class SpokeConfig:
+    """The spoke — the audio front end as a client of the hub.
+
+    ``ciel spoke`` owns the microphone, the wake word, the endpointer,
+    the speaker gate, STT, TTS, the player, the HUD, and the mute
+    sentinel; everything it hears goes up the wire as text, everything
+    it says comes down as text. The brain, memory, Vigil, Discord, and
+    the Chart live in ``ciel hub``. Both on this machine for now; the
+    hub moves to a server later and this section is what repoints."""
+
+    hub: str = "ws://127.0.0.1:8765/ws"
+    """The hub's socket. Loopback while both run here; the tailnet
+    address (``ws://100.x.y.z:8765/ws``) once the hub is elsewhere."""
+
+    token: str = ""
+    """The hub token, when the hub is off loopback. Prefer
+    ``CIEL_SPOKE_TOKEN`` in the environment or ``token_file``."""
+
+    token_file: Path = field(
+        default_factory=lambda: Path.home() / ".ciel" / "hub.token"
+    )
+    """Where to read the token — the hub's own minted file when both run
+    on this machine, so nothing needs pasting."""
+
+    client_id: str = "mac"
+    """How this spoke names itself in the hub's log."""
+
+    reconnect_max_s: float = 8.0
+    """The ceiling of the reconnect backoff (starts at half a second)."""
+
+    hello_timeout_s: float = 5.0
+    """How long to wait for the hub's hello after connecting."""
+
+    heartbeat_s: float = 10.0
+    """How often the presence report goes up when nothing changed; a
+    change (the screen locking, a watch finishing) sends at once."""
+
+    def current_token(self) -> str:
+        if self.token:
+            return self.token
+        try:
+            return self.token_file.read_text().strip()
+        except OSError:
+            return ""
+
+
+@dataclass(frozen=True, slots=True)
 class MCPServerConfig:
     """One external MCP server — a connector to an outside service.
 
@@ -1117,6 +1466,87 @@ class DevConfig:
     mid-conversation — and announced out loud. The previous conversation
     resumes through the session file, so the only cost is startup time.
     ``touch ~/.ciel/reload`` forces one without editing any source."""
+
+
+@dataclass(frozen=True, slots=True)
+class InterviewConfig:
+    """The interview room — codename Adjoint. A second surface on the hub's
+    web server, at ``/interview``, for the owner's friends: a voice-driven
+    mock interviewer (a fictional company, or a consulting case), with the
+    session recorded and debriefed. Isolated from Ciel proper: its own
+    accounts, its own brains with no tools, no memory, and no Mac."""
+
+    enabled: bool = False
+    """Serve the room. Off by default: it is a surface for other people,
+    and the owner turns it on where friends can reach it (the hub)."""
+
+    dir: Path = field(
+        default_factory=lambda: Path.home() / ".ciel" / "interview"
+    )
+    """Where the room keeps everything: ``interview-accounts.json``,
+    ``interview.secret``, one directory per user with one per session
+    (brief, transcript, recording, debrief), and any added cases."""
+
+    backend: Literal["agent-sdk", "api"] = "agent-sdk"
+    """Who answers: ``agent-sdk`` runs each interview on a Claude Agent SDK
+    session (the owner's subscription, like Ciel's own brain); ``api`` will
+    use the Anthropic API with a key of its own, once friends' usage is
+    worth billing separately. One class each; the room sees neither."""
+
+    model: str = "claude-opus-5"
+    effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    """Effort for the interviewer's turns. Medium: an interviewer who
+    follows up on specifics without a long pause before each question."""
+
+    debrief_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
+    """Effort for the written debrief — read, not heard, and the point of
+    the exercise, so it gets real thought."""
+
+    max_budget_usd: float = 3.0
+    """Per-session ceiling, enforced by the SDK. A ninety-minute case at
+    medium effort is well under a dollar; this catches a runaway, not a
+    long interview."""
+
+    daily_sessions_per_user: int = 4
+    max_concurrent: int = 3
+    """Live interviews at once — each is an SDK subprocess of a few hundred
+    megabytes, and the hub is a small machine. A fourth caller is told the
+    room is full."""
+
+    idle_close_s: float = 600.0
+    """A live session with no words either way for this long is ended and
+    debriefed as if the candidate had left — a closed laptop must not hold
+    a subprocess open all night."""
+
+    silence_ms: int = 2000
+    """How long the candidate must stop talking before the answer is taken
+    as finished. Four times Ciel's own window: interview answers have
+    pauses for thought, and being cut off is the failure the room most
+    needs to avoid."""
+
+    extend_ms: int = 3000
+    """Extra wait when the transcript reads mid-thought (a trailing
+    conjunction, no closing punctuation) at the silence deadline."""
+
+    max_answer_s: float = 240.0
+    """The longest one answer can run before the interviewer moves on."""
+
+    barge_grace_ms: int = 800
+    """Speech arriving this soon after an answer was taken as finished is
+    its tail — merged in silently. Later than this while the interviewer
+    is thinking or speaking is a real cut-off: the interviewer stops,
+    apologizes, and lets the candidate go on."""
+
+    piper_voice: str = "en_US-lessac-medium"
+    """The interviewer's voice, synthesized on the hub. When piper cannot
+    load, the page falls back to the browser's own voice."""
+
+    cookie_days: int = 30
+    """How long a login lasts."""
+
+    reload_max_wait_s: float = 1200.0
+    """How long a pending source reload waits for live interviews to end
+    before pausing them, debriefing, and restarting anyway."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1373,6 +1803,42 @@ class ScreenConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WorldConfig:
+    """The world state (``world.py``, codename Phase Space): one table of
+    everything Ciel currently holds to be true — the time, whether the
+    user is around, where they are, the mute switch, the armed timers
+    and watches, the rest of today's calendar, the ring's numbers — fed
+    by every producer, opening every turn, and mirrored to the Chart.
+    Nothing here is a new source of information; it is where the
+    existing sources' latest readings are kept together, with their
+    ages, so the brain can say "as of" instead of guessing."""
+
+    enabled: bool = True
+    """Off, the table is not built: turns open bare, the ``world_now``
+    tool is withheld, and the Chart's readings strip stays empty. The
+    lane notes and the tools still work — this only removes the summary."""
+
+    in_prompt: bool = True
+    """Whether the rendering opens every turn. Off keeps the table (the
+    Chart, the tool) but sends the brain nothing unasked — for measuring
+    what the block costs, or a persona that should not know the time."""
+
+    agenda_refresh_s: float = 900.0
+    """How often today's remaining calendar is re-read into the table.
+    Fifteen minutes: the calendar watcher already nudges on the events
+    themselves; this is only so "what's left today" is a sentence away.
+    On the hub the read is one RPC to the Mac, skipped while it is away.
+    0 disables the refresh (the brief still reads the agenda itself)."""
+
+    file: Path = field(default_factory=lambda: Path.home() / ".ciel" / "world.json")
+    """The table's mirror, written at most once a second when something
+    changed, read at startup — the autoreloader re-execs on every source
+    edit, and a place or a ring score should not blank for minutes each
+    time. Every fact keeps its own timestamp, so a carried-over reading
+    is shown at its true age, never as new."""
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     wake: WakeConfig = field(default_factory=WakeConfig)
@@ -1389,14 +1855,20 @@ class Config:
     messages: MessagesConfig = field(default_factory=MessagesConfig)
     discord: DiscordConfig = field(default_factory=DiscordConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    hub: HubConfig = field(default_factory=HubConfig)
+    spoke: SpokeConfig = field(default_factory=SpokeConfig)
     oura: OuraConfig = field(default_factory=OuraConfig)
+    sections: SectionsConfig = field(default_factory=SectionsConfig)
+    mail: MailConfig = field(default_factory=MailConfig)
     location: LocationConfig = field(default_factory=LocationConfig)
     grants: GrantsConfig = field(default_factory=GrantsConfig)
     commands: CommandsConfig = field(default_factory=CommandsConfig)
     screen: ScreenConfig = field(default_factory=ScreenConfig)
     timers: TimersConfig = field(default_factory=TimersConfig)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
+    world: WorldConfig = field(default_factory=WorldConfig)
     transcripts: TranscriptConfig = field(default_factory=TranscriptConfig)
+    interview: InterviewConfig = field(default_factory=InterviewConfig)
     dev: DevConfig = field(default_factory=DevConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     mcp: dict[str, MCPServerConfig] = field(default_factory=dict)
@@ -1428,14 +1900,20 @@ _SECTIONS = {
     "messages": MessagesConfig,
     "discord": DiscordConfig,
     "web": WebConfig,
+    "hub": HubConfig,
+    "spoke": SpokeConfig,
     "oura": OuraConfig,
+    "sections": SectionsConfig,
+    "mail": MailConfig,
     "location": LocationConfig,
     "grants": GrantsConfig,
     "commands": CommandsConfig,
     "screen": ScreenConfig,
     "timers": TimersConfig,
     "proactive": ProactiveConfig,
+    "world": WorldConfig,
     "transcripts": TranscriptConfig,
+    "interview": InterviewConfig,
     "dev": DevConfig,
     "ui": UIConfig,
 }

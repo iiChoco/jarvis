@@ -2,6 +2,587 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-04 — one point that says where everything is (Phase Space)
+
+**Why.** What Ciel knew about the world was scattered by producer, each
+reading owned by its one consumer: presence by the interruption policy,
+the place by the location tool, the ring's numbers by nobody once the
+nudge was filed, the mute switch by the pipeline, the timers by their
+service. The brain saw none of it unless it called a tool, and the only
+world facts glued onto a turn were the lane notes' fixed strings — it
+never knew the time of day. "What time is it", "am I at home", "how
+long is left on the timer", "is anyone around" each cost a tool call or
+a guess, and nothing could say *how old* an answer was.
+
+**What.** `world.py`, codename **Phase Space**: one table of facts, each
+a value with who reported it, when it was observed, and how long it
+stays trustworthy.
+
+- *The table.* `World.observe` records a reading; an unchanged
+  re-observation is not a change but refreshes the age; a fact past its
+  `ttl_s` is kept and rendered "last known", never dropped. Thread-safe,
+  no asyncio: producers on worker threads (the locator) write under a
+  lock, and the pipeline polls `version` once a second — the agent
+  roster's rule — to flush `~/.ciel/world.json` and hand the Chart the
+  snapshot. The file carries facts across the autoreloader's re-execs
+  at their true age.
+- *The opening block.* Every user turn and every unattended turn now
+  opens "(Now — It is 3:42 PM on Friday 4 September 2026 ...)": the
+  Mac's seat (hub), presence, place, mute and hold when set, timers and
+  watches, the rest of today's calendar, the ring — one sentence each,
+  in a fixed room-first order, with ages in the runtime's words ("4
+  minutes ago", "as of 11:42 AM", "last known, at 3:42 PM — no newer
+  reading"). Lane note first (where the reply lands), then the block
+  (what is true), then the held notes, then the words; the transcript
+  keeps only the words. A static prompt section says how to read it;
+  the `world_now` tool re-reads it mid-turn. `[world] in_prompt = false`
+  keeps the table and drops the block.
+- *The producers.* The pipeline writes mute, hold, the spoke's seat,
+  timers and watches (once a second), and presence (per turn locally,
+  per heartbeat on the hub, with `presence_stale_s` as the ttl). The
+  locator writes the place on every fix, whichever path read it. The
+  ring watcher and the `oura_summary` tool write the day's numbers
+  (`today_readings`, only the fields fetched). The sections watcher
+  writes the open-spot counts with a four-poll ttl. A refresher reads
+  today's remaining calendar every `agenda_refresh_s` (15 min), kicked
+  on a spoke connect and a wake from sleep, and skipped on the hub
+  while the Mac is away.
+- *The wire.* Two frames: `fact` (spoke → hub, last-value, no ack) and
+  `world` (hub → every client, whole table, on the replay ring); the
+  hello carries the table. The spoke's `WorldRelay` has the table's
+  `observe` signature, keeps one frame per name, is flushed from the
+  frame loop (never a producer's thread), and resends the set after a
+  reconnect. The hub stamps a fact's source with the node
+  (`sections@mac`).
+- *The Chart.* A readings strip under the header: MAC linked/away, YOU
+  here/idle/locked, PLACE, TIMERS, WATCHES, NEXT, RING, SECTIONS, VIGIL
+  held — each chip with its age, gold when it wants attention, dimmed
+  once stale, redrawn every half minute. `probe_web.py --live` plants a
+  sample table; typing "world" toggles the Mac away and a section open.
+
+**Probes.** `probe_world.py` (72): versions and the notify clock,
+freshness and "last known", every renderer's wording, the file mirror
+across a restart and against a bad file, the relay's flush and resend,
+the hub's door and its source stamp, and the turn's composition order.
+`probe_wire.py` grows two samples. The pipelines the other probes build
+by `__new__` run with no table (class defaults), so `probe_turns`'
+prompt contract is untouched. Owed: a live look at the block from a
+real turn, and the strip on the deployed hub.
+
+## 2026-09-03 — the interview room (Adjoint)
+
+**Why.** Ciel is one person's assistant, and a mock interviewer is a thing
+friends ask for. The same hub can hold both only if the second surface
+shares nothing with the first: not the Chart's queue, not the hub token,
+not the brain with the owner's memory and Mac. And a mock interviewer has
+one job Ciel's own pipeline gets wrong on purpose — waiting. A candidate
+thinks between sentences; half a second of silence is not an ending.
+
+**What.** A new package, `ciel/interview/`, served at `/interview` on the
+hub's existing aiohttp application (`WebLink.start()` mounts it when
+`[interview] enabled = true`).
+
+- *Accounts* (`accounts.py`): the owner creates every account — from an
+  admin panel on the page or `ciel interview add-user` — and passwords
+  are generated, shown once, and stored as scrypt hashes in
+  `interview-accounts.json`, which joins `interview.secret` on the
+  personal brain's forbidden list. Logins are signed cookies scoped to
+  `/interview`; five failures in fifteen minutes is a 429. Passwords can
+  also be chosen (eight characters or more) — by the owner at creation or
+  reset, and by any signed-in user for themselves, proving the old one.
+- *Three modes.* A **company** interview invents a fictional company and
+  role from the candidate's request and shows a brief with likely
+  questions; a **case** interview runs a consulting case from a file
+  library (three ship in `interview/cases/`, `ciel interview seed-cases`
+  asks the model for more) or generates one; a **technical** interview
+  poses a coding problem beside an editor (Python, C, C++, Java, Rust,
+  JavaScript, TypeScript, Go) — the interviewer *reads* the code, nothing
+  is executed. Briefs and debriefs are structured calls against JSON
+  schemas (`prompt.py`); the interviewer's speech is a conversation.
+- *The interviewer's mind* (`brain.py`): one Claude Agent SDK session
+  per interview, no tools, `setting_sources=[]`, a per-session budget,
+  behind a `Backend` protocol so an API-key backend is one class away.
+  `ScriptedBackend` runs the whole room with no model, for the dev
+  server and the probes.
+- *Voice.* The candidate speaks through the browser's speech recogniser;
+  the interviewer speaks through piper on the hub, one WAV per sentence
+  inside the `say` frame (`speaker.py`), falling back to the browser's
+  own voice when piper cannot load. The page mixes the microphone and the
+  interviewer's audio into one webm recording, uploaded in chunks over
+  the same socket.
+- *Patience* (`endpoint.py`, `session.py`): the hub owns the clock. Two
+  seconds of silence, read with `trails_off` — lifted from the pipeline
+  into `ciel/endpointing.py` so both rooms judge a pause the same way —
+  and extended once by three more when the words trail off. When the
+  room misjudges and the candidate goes on while the interviewer is
+  answering, the turn is cancelled, the interviewer says "Sorry, go on",
+  and the continuation is merged onto the answer. The interviewer
+  reaches the page through two directives on lines of their own,
+  `[[exhibit: e1]]` and `[[problem: p1]]`, lifted out of the speech
+  stream before the sentence splitter (now `brain/sentences.py`, shared
+  with Ciel's own brain) sees them.
+- *The record* (`store.py`): one directory per session under
+  `<interview dir>/users/<name>/sessions/` — brief, transcript, code,
+  recording, and a debrief written after the interview (a case debrief
+  compares the recommendation with what really happened). The page
+  replays a recording with a click-to-seek transcript.
+- *The room and the reload.* A pending source reload waits for live
+  interviews and, past `reload_max_wait_s`, pauses them gracefully
+  (debrief and all) rather than vanishing mid-question.
+- *The page* (`remote/interview.html`, `remote/interview.js`): a stub
+  page carrying the DOM contract — ids, data attributes, templates — and
+  one script that owns all behaviour. The designed page from Claude
+  Design replaces the markup and keeps the hooks.
+
+**Probes.** `probe_interview.py` with `auth` (49), `brief` (47),
+`endpoint` (17), `wire` (11), `session` (28, a whole scripted interview
+over the socket including a cut-off and a reconnect), `speaker` (4),
+`cases` (14). Live: the dev server (`ciel interview serve --dev`, the
+`interview-dev` preview) walked through a case and a technical interview
+in the browser with piper audio; the designed page walked through every
+view at desktop and phone widths. Deployed 2026-09-04: the Cloudflare
+Access bypass on `/interview` (the Chart stays behind the owner's PIN),
+piper on the arm64 hub, `[interview] enabled = true`. Owed: a spoken
+interview from a phone.
+
+## 2026-09-03 — a flapping seat is one line on the Chart
+
+**Why.** Every time the spoke takes or leaves the seat the hub records an
+event row, and a spoke that reconnects in a loop wrote "spoke connected"
+/ "spoke disconnected" down the whole page.
+
+**What.** `chart.html`'s `addRow` stacks an event onto the previous event
+row when the two say the same thing, or when both are seat notices: the
+row reads the latest text with the run's count — "spoke disconnected
+(8×)". Same rule for a repeated "turn failed". The history replayed on a
+fresh hello goes through the same door, so a reload shows the stack, not
+the spam. Browser-checked against the echo server.
+
+## 2026-09-03 — the pill wears the Chart's chip
+
+**Why.** Two status lights, two looks: the HUD in the corner was a rounded
+grey pill with a coloured dot, the Chart's header a cut-corner chip in the
+"Instrument" palette. They report the same six states and should read as
+one instrument.
+
+**What.** `ui/hud.py` redrawn in Core Animation from the page's CSS: the
+cut-corner polygon (a `CAShapeLayer` mask for the fill, a second stroking
+the same path for the border), the near-black ground tinted with the state
+colour, the six-point dot with a soft glow that breathes on the page's
+timings (3.4 s, 1.6 s while speaking), and a semibold monospace label in
+capitals at .2em tracking, in the page's hand-picked text colour per state.
+The chip sizes itself to its label and re-anchors to its corner; the window
+shadow is gone, the border is the edge. Colours, cuts, and timings are
+copied from `chart.html`, not approximated. Two PyObjC notes for next time:
+a method that takes an argument and has no trailing underscore is taken
+for a selector unless marked `@objc.python_method`; and an attributed
+string's `size()` under-reports kerned text, so the label is measured
+through its cell, or the last glyph is clipped.
+
+## 2026-09-03 — what survives a hub that is away (phase 5, part one)
+
+**Why.** The split deferred the resilience it needed: a timer must ring
+whether or not a server is reachable, a reconnect must not double a
+turn, and the away text must find the user when the Mac is asleep.
+
+**What.**
+
+- *The timer mirror* (`spoke/timers.py`): the hub broadcasts
+  ``timers.sync`` (deduped at the server, once a second alongside the
+  agents roster); the spoke mirrors it, persisted, and rings a timer
+  itself only when the hub can't — the link down at the due moment, or
+  the hub silent past ``grace_s`` (a wedged hub). What the spoke rang is
+  remembered by id, and a late ``deliver.speak`` for it is receipted
+  without a sound. Offline, the grammar runs on the spoke: ``set_timer``
+  arms a local timer in the mirror, ``cancel_timer`` and ``list_timers``
+  answer from it in the hub's wording, ``reload`` restarts the room.
+- *Say ids* (`spoke/client.py`, `hub/server.py`): every ``say`` carries
+  one; the hub keeps the last 256 and queues each once, so the ledger's
+  resend after a reconnect is acked but never doubled.
+- *The away ladder* (`pipeline.py`): on the hub the owner's iMessage is
+  the spoke's, so ``_run_proactive_message`` sends it while the spoke is
+  seated and falls to Discord when it isn't.
+- *The doctor* (`hub/doctor.py`, ``ciel hub --check``): the token, the
+  bind address (a bind test — the tailnet address is not on the
+  hostname's records), the brain's login by the CLI's own word, ``npx``
+  for the connectors that need it, the state directory.
+
+**Probes.** `probe_backfill.py`: the mirror's every rule and its
+persistence, the say-id dedupe, the broadcast dedupe, the away ladder
+both ways and with Discord down, the doctor's rows. `probe_spoke` grows
+the offline grammar, the local ring, and the silent re-delivery.
+
+## 2026-09-03 — the hub leaves the Mac (phase 4, in progress)
+
+**Why.** The point of the whole move: the brain on a machine that never
+sleeps. An Azure for Students VM (West US, arm64 — the only sizes the
+subscription's policy and quota allowed; the SDK ships an arm64 Linux
+wheel with the bundled CLI, so it works), reached over Tailscale.
+
+**What.**
+
+- `deploy/ciel-hub.service`: the hub under systemd — after the network
+  and tailscaled, restarted in five seconds, an optional
+  `~/.ciel/hub.env` for the brain's login on a box with no keychain
+  (``hub.env`` joins ``FORBIDDEN_NAMES``). `deploy/ai.ciel.spoke.plist`:
+  the room's half as a launch agent on the Mac, `ciel spoke` with
+  `--no-sync` so a launch never drops the extras.
+- The Origin gate trusts a configured name on any port: the public name
+  arrives through a proxy on 443, not on the hub's port. `probe_wire`
+  gains the case (70).
+- Public Chart: a Cloudflare Tunnel (`ciel-hub`) from the VM to the
+  hub's tailnet socket, a CNAME for the public name, and a Cloudflare
+  Access application with a one-time-PIN policy for the owner's emails
+  in front of it. The hub listens on the tailnet only; the tunnel and
+  Access are the only way in from the internet, the hub token the gate
+  behind them.
+
+**State.** VM bootstrapped (uv, Node 22, Tailscale, cloudflared), the
+repo and `~/.ciel` state copied with paths rewritten, the hub service
+active and bound to the tailnet address, Discord signed in from the VM,
+the wire driven from the Mac over the tailnet (direct, 7 ms). The
+brain's login on the VM is the interactive `claude` `/login`, not
+`setup-token` (which prints a token for an environment variable and
+stores nothing) — the plan's assumption, corrected. Remaining: the
+spoke pointed at the VM as the daily driver, the lid-closed test, the
+kill-and-restart, and the move to Hetzner before the credit runs out.
+
+## 2026-09-02 — the hub needs no Mac in it (phase 3)
+
+**Why.** Phase 3 of the hub-and-spoke move: everything the hub still
+reached into macOS for goes over the wire instead, so the hub can leave
+this machine with nothing but an address changing. Still both on the
+Mac, RPC forced on, which is how it gets proven before the move.
+
+**What.**
+
+- *Tool RPC* (`hub/server.py`, `hub/rpc.py`, `spoke/executor.py`):
+  ``tool.request`` down, ``tool.result`` back, a cancel on the hub's
+  deadline, every open call failed at once when the spoke leaves. The
+  hub binds duck types instead of implementations — ``RemoteScreen``,
+  ``RemoteMessagesClient``, ``RemoteLocator``, ``RemoteWorkWatcher``,
+  ``RemoteCalendar``, ``RemoteMac`` — so ``bind_screen``,
+  ``bind_client``, ``bind_locator``, ``bind_watcher`` just get
+  different objects (``build_tool_server(config, remote)``). The
+  spoke's executor runs the same modules the single process uses: the
+  screen capture, the Messages client, the locator, the work watcher,
+  the EventKit agenda; one task per call, failures as sentences.
+- *The Mac tools* (`brain/tools/mac.py`): ``run_on_mac``,
+  ``mac_read_file``, ``mac_write_file``, ``mac_list_dir`` — registered
+  only on the hub. ``ShellGuard`` generalized to any tool that carries
+  a command (``tool_name``, ``arg``, and a question that says where),
+  so the Mac's shell sits behind the same three tiers and the same
+  spoken yes; the workspace guard's path map gains the file tools; the
+  recorder journals the Mac's shell and writes; the prompt gains a
+  section naming the Mac as the default target. Defense in depth on
+  the spoke: the classifier and the path check re-run from *its*
+  config, the deny tier refused regardless, the confirm tier refused
+  unless the call carries the hub's ``confirmed``.
+- *Publishers* (`spoke/publisher.py`): ``PublishQueue`` is the queue
+  the Mac's watchers push into — ``event.publish`` up, held in an
+  outbox until ``event.ack``, resent after a reconnect, a local dedupe
+  keeping rescans off the wire. The spoke runs ``CalendarWatcher``,
+  ``LocationWatcher``, and ``WorkWatcher`` against it; the hub's
+  ``_on_published_event`` pushes into the real ``EventQueue``, whose
+  dedupe absorbs a resend. Portable watchers (the brief, Google's
+  calendar, the ring, the sections) stay on the hub.
+- *Presence* (`hub/rpc.py` ``PresenceView``, `spoke/publisher.py`
+  ``Heartbeat``): the spoke sends the raw signals — locked, seconds
+  since input, attended — every ``[spoke].heartbeat_s`` and at once on
+  a change, with the roster of active watches for the agents chip; the
+  hub folds them with its own conversation recency into the same
+  ``PresenceState`` the policy always read. A heartbeat older than
+  ``[hub].presence_stale_s`` is an empty room, whatever else is true.
+- *The import audit*: the audio stack (sounddevice, webrtcvad, the
+  speech models) and the Mac frameworks are imported where they are
+  built — the local role's constructor, the methods only it runs, the
+  broker's endpointer on first use — never at module level in anything
+  the hub imports. `probe_hub_imports.py` refuses all of them by name
+  in a child interpreter and constructs ``Pipeline(role="hub")``; the
+  spoke is checked to fail the same test.
+- *Config*: ``[hub].presence_stale_s``, ``[spoke].heartbeat_s``,
+  ``[shell].command_timeout_s`` (the Mac-run command's own clock);
+  ``event.ack``, ``presence.watches`` in the catalog.
+
+**Probes.** `probe_tool_rpc.py`: every remote duck type through a real
+executor over the real server, the tools bound to them end to end
+(the screen with a fake capture, the watch tool arming on the Mac, the
+four Mac tools), the quiet tier unconfirmed and the side-effect tier
+confirmed, the deny tier refused on the Mac, a command past the Mac's
+timeout killed, reads and writes inside the workspace and refused
+outside it, no spoke, a spoke that never answers (deadline, cancel),
+the spoke leaving mid-call, an unknown tool. `probe_presence.py`, 26:
+the view as a table with the stale rule, the publish queue's outbox,
+ack, resend and dedupe, the heartbeat on change, and the hub's side
+through the real server. `probe_hub_imports.py`, 2. `probe_spoke`
+grows the executor and outbox routing. Live: still both on this Mac —
+the daily driver with RPC forced on, every Mac tool and a Vigil
+speak/message/note each observed, is owed.
+
+## 2026-09-02 — two processes: the room and the brain (phase 2)
+
+**Why.** Phase 2 of the hub-and-spoke move, the riskiest cut: split
+Ciel into the process that must be in the room and the process that
+needn't be, both still on this Mac, so the second can leave later with
+nothing but an address changing. `ciel local` is untouched and remains
+the rollback.
+
+**What.**
+
+- *The pipeline in two roles* (`pipeline.py`): ``Pipeline(config,
+  role="hub")`` builds no audio — no STT, TTS, wake, endpointer, or
+  gate — and runs ``_run_hub`` instead of the frame loop: the same
+  ladder (``pick_next``) on a tenth-of-a-second tick or the server's
+  stir, the same enactments. The frame loop's dispatch blocks moved
+  into ``_enact``, its idle reload-and-maintenance block into
+  ``_idle_housekeeping``, shared byte-for-byte by both loops; the
+  audio-owning turn became ``self._turn``. The voice lane on the hub is
+  ``_WireSink``: sentences go down as ``turn.sentence`` frames and the
+  sink awaits each ``turn.played`` receipt, so a stopped sentence
+  abandons the turn (brain interrupted, confirm cancelled) exactly as
+  the player's False does. Timers and Vigil nudges become
+  ``deliver.speak`` with a receipt the budget hangs on; mute on the hub
+  touches no sentinel and stops no player — it broadcasts, and the
+  spoke's report comes back the other way.
+- *The ladder's voice rank* (`schedule.py`): ``Source.VOICE`` —
+  an utterance the spoke already endpointed and transcribed outranks
+  every queue but timers, from any state but BUSY; never true in the
+  single process.
+- *The hub server* (`hub/server.py`): ``WebLink`` with the spoke's
+  seat. One seat (a second spoke replaces the first); spoke says are
+  voice turns, not chart turns; ``turn.played`` and ``deliver.result``
+  resolve the sink's waits; ``confirm.answer`` goes to the broker;
+  ``voice.state`` feeds the snapshot; a spoke that leaves fails every
+  open wait and tells the pipeline, which cancels a pending question.
+- *The spoke* (`spoke/frontend.py`, `spoke/client.py`): the frame
+  loop's state machine with the thinking taken out — wake, gate, STT,
+  the Cauchy hold, the dismissal-before-merge, barge-in, follow-up,
+  the ack filler, the chime, the HUD, the mute sentinel — sending
+  ``say`` and playing what comes back. ``confirm.request`` is spoken
+  and, when it asks, listened for with the broker's own endpointer;
+  the answer (or the window's timeout, as an empty one) goes back.
+  The client speaks first, holds says until acked, resends after a
+  reconnect, backs off. A hub that is down is said once, then a chime
+  per swallowed utterance.
+- *The broker's spoke origin* (`confirm.py`): the remote choreography
+  with ``listen=`` on the lines that expect an answer, the spoken
+  lane's ``you-confirm`` label (the answer was spoken here — presence
+  evidence), an empty answer read as "no answer", and
+  ``[hub].confirm_timeout_s`` as the hub-side deadline.
+- *The catalog* (`wire.py`): ``turn.played``, ``voice.state``,
+  ``confirm.cancel``, ``n`` on sentences, ``listen`` on requests; the
+  replay ring now holds only the idempotent broadcasts (rows, state,
+  muted, agents, timers.sync) — a replayed sentence would be spoken
+  twice.
+- *Config and entry*: ``[spoke]`` (``hub``, ``token``/``token_file``,
+  ``client_id``, backoff); ``[hub].speak_timeout_s`` and
+  ``confirm_timeout_s``; ``ciel hub`` / ``ciel spoke`` / ``ciel local``
+  in ``__main__``, the role carried through a reload.
+
+**Deferred, on purpose.** The spoke's local command fast path and
+timer ringing (resilience, phase 5); the typed lane on the spoke's
+terminal; presence, tool RPC, and the Mac watchers as publishers
+(phase 3 — both processes are on the Mac, so the hub still reads them
+directly).
+
+**Probes.** `probe_hub_arbiter.py`, 44: the seat, the snapshot and the
+voice rank, a full voice turn's frames and golden rows, barge-in through
+an unfinished receipt and through ``turn.cancel``, the spoke leaving
+mid-sentence and never receipting, confirm requests through the sink,
+timers and nudges as deliveries with and without a spoke, mute both
+ways. `probe_spoke.py`, 36: a turn end to end with the follow-up window
+after, the gate, the hold, the dismissal, barge-in, the hub down (said
+once, then a chime), a confirmation answered and one timed out, a
+delivery rung and receipted, mute from both sides, the state reports,
+the ack filler. `probe_confirm_wire.py`, 13: the spoke origin's labels,
+``listen``, the empty answer, the hub deadline, cancel within a second,
+a late answer ignored, a dead sink. `probe_ladder` 17, `probe_wire` 69,
+`probe_turns` and `probe_vigil` adjusted for the new signatures; the
+whole non-hardware suite green (963 checks). Live: the real hub process
+(isolated state, brain and all) driven by a scripted spoke over a real
+socket — "Four, sir." as sentence 1 between ``turn.begin`` and
+``turn.end``, 2.6 s to first speech — which also caught the one bug the
+probes had not: a ``continue`` in the hub loop that had become a
+``return`` during the extraction, ending the loop after its first
+enactment (``probe_hub_arbiter`` now drives the loop itself). Still
+owed: the two-process daily driver with a real spoke, kill -9 each
+side, sleep/wake.
+
+## 2026-09-02 — the wire gets a catalog; the Chart reaches the tailnet (phase 1)
+
+**Why.** Phase 1 of the hub-and-spoke move: grow the hub server in
+place, one process still on the Mac, so the protocol every future
+client speaks — the browser Chart today, the Mac spoke and a phone
+later — is written down and enforced before anything is split. The
+win that needs no VPS: the Chart from a phone over Tailscale, with a
+door that asks for a token and a reconnect that doesn't blank the
+screen.
+
+**What.**
+
+- *The catalog* (`wire.py`, codename Meridian): every frame type in
+  each direction — the Chart's existing frames plus the ones the later
+  phases need (`turn.*`, `confirm.request`/`answer`, `tool.request`/
+  `result`/`cancel`, `event.publish`, `presence`, `deliver.*`,
+  `timers.sync`) — with required and optional fields, a codec that
+  refuses what it doesn't name (unknown types, missing fields, a
+  bool where an int belongs) and passes unknown extra fields (a newer
+  peer), versioned by `WIRE_VERSION` in both hellos.
+- *The client speaks first* (`remote/web.py`): the hello now comes
+  from the client — `role`, `token`, `client_id`, `caps`, and a resume
+  claim — and the server answers with its own. `admit` is the whole
+  auth policy as one pure function: a loopback peer is trusted by
+  reach as before (its first frame need not even be a hello — an
+  older page keeps working), every other peer must carry the hub
+  token, compared constant-time, with an `error` frame naming the
+  close code (4401, 4400, 4408) before the socket closes.
+- *Seq and resume*: every broadcast frame carries a `seq` under a
+  per-process `epoch`; a `ReplayRing` remembers the last
+  `resume_frames` of them. A reconnecting client's claim, when the
+  epoch matches and the ring still holds its seq, is answered with
+  `resumed: true` and exactly the frames it missed — no history
+  window, no blanked screen. Any other claim gets the fresh hello it
+  always got. A confirm older than `resume_grace_s` is not replayed
+  (the Discord catch-up rule: the broker has timed it out).
+- *`[hub]` config*: `bind` (the tailnet address), `token` /
+  `token_file` — minted owner-only at first start when the bind is
+  not loopback, and named in `FORBIDDEN_NAMES` — `origins` for a
+  MagicDNS name, `hello_timeout_s`, and the ring's size and grace.
+  The Origin gate accepts loopback, the bind address, and the listed
+  names — never the request's own Host header, which a DNS-rebinding
+  page would satisfy.
+- *The page* (`chart.html`): sends the hello with its remembered
+  token and resume claim, tracks the epoch and last seq in
+  sessionStorage beside the ack ledger, keeps its rows on a resumed
+  hello, and on a 4401 close shows a token form instead of a retry
+  loop. `wss://` when served over TLS, for `tailscale serve` later.
+
+**Probes.** `probe_wire.py`, 69 checks: the codec round-trips every
+catalog type and refuses each malformation; the ring's stamp and every
+resume outcome; `admit` across every peer-and-frame combination; the
+Origin gate off loopback; the welcome with planted queues; and a real
+aiohttp socket on loopback — the 4401 refusal with its error frame,
+4400 for a say before hello, 4408 after a silent hello timeout, a
+resume that replays exactly the frames a dropped socket missed, an old
+page's first say kept, a foreign Origin refused at the upgrade.
+`probe_web.py` stays at 35 (one expectation grew a seq). Live smoke
+from a phone over the tailnet is still owed — Tailscale is not yet
+installed on this machine.
+
+## 2026-09-02 — the section watcher keeps its own cookie warm
+
+**Why.** The section watcher's one soft spot was its login: the site
+authenticates through Canvas OAuth (CalNet + Duo), and a hand-pasted
+cookie felt like a daily chore. Probing it changed the picture — the
+session is a *sliding* two-hour window, so every poll refreshes it and a
+running watcher never lapses. The only real death is an overnight sleep,
+and that is the narrow thing worth automating.
+
+**What.**
+
+- *Cookie from a file, read live* (`config.py`, `sections.py`): the live
+  cookie moves to `~/.ciel/sections-cookie` (the Oura-token pattern —
+  config holds only a seed), and `current_cookie()` re-reads it on every
+  scan, so another process's refresh is picked up on the next poll with
+  no reload.
+- *The refresh job* (`scripts/refresh_sections_cookie.py`): a
+  self-contained Playwright script driving a dedicated Chrome profile
+  that holds a bCourses session (seeded once, headed, by the user —
+  CalNet and Duo stay in human hands; the script never sees a password).
+  It makes one plain HTTP check first and only launches Chrome when the
+  cookie is actually dead, then follows the OAuth redirects silently and
+  writes the fresh cookie. Runs two ways: a launchd agent each morning
+  and on wake (for when Ciel isn't up), and the watcher's own self-heal.
+- *Self-heal* (`proactive/sections.py`): a scan that comes back signed
+  out (`SectionsUnavailable.auth`) spawns `refresh_cmd` once per
+  `refresh_cooldown_s`, distinct from a network failure, which leaves the
+  cookie alone. A refresh that keeps failing (the remembered session
+  lapsed) still surfaces the ordinary re-login note.
+
+- *The email alarm* (`gmail.py`, `proactive/sections.py`): an opening
+  can also email the user ``email_on_opening`` times, ``email_interval_s``
+  apart, each with its own subject so they arrive as separate
+  notifications. Sent by the watcher the moment the event is queued —
+  outside the policy and quiet hours on purpose, since the user asked to
+  be woken for this one thing. ``GmailSender`` borrows the ``[mcp.gmail]``
+  connector's refresh token read-only (the calendar watcher's pattern);
+  the recipient defaults to the signed-in account and is otherwise pinned
+  in config, never chosen at send time; ``email_from`` sets a verified
+  send-as alias as the From. And a second sender (`mail.py`,
+  ``SmtpSender``): with ``smtp_token`` set the alarm goes out *as Ciel*
+  — ``ciel@example.com`` through Cloudflare Email Service's SMTPS relay,
+  free to the account's verified destinations — leaving the user's Gmail
+  connector untouched. ``MailUnavailable`` is the failure shape both
+  senders share.
+
+- *Ciel's own address* (`[mail]`, `brain/tools/mail.py`): the relay
+  became Ciel's, not just the watcher's. `send_as_ciel` sends from
+  `[mail] address` behind the spoken-yes gate (a describer of its own:
+  "Send an email from my own address to ..."), stays off the Witness
+  observers, and the prompt gains a section on whose voice a message is
+  in — Ciel's mail here, the user's through their own tool. The watcher's
+  alarm borrows `[mail]`'s relay, address, and owner when it has no relay
+  of its own, so one token serves both; its own `smtp_token` still wins.
+  `copy_to` Bcc's every message to an inbox of the user's — their record
+  of what Ciel sent — and the relay now reads `smtplib`'s partial-refusal
+  return instead of ignoring it: a refused copy is a warning, a refused
+  recipient is a failed send.
+
+- *Self-knowledge* (`prompt.py`, `agent.py`): the watcher ran below the
+  brain and the brain didn't know — asked "are you watching for a spot?",
+  Ciel would honestly say no. `sections_watch_line` now tells the Watching
+  section which sections are watched, how often, and every outlet that
+  fires on an opening, and that enrolling stays the user's act.
+  Keyed on the watch list, not `enabled`: on the hub the watcher runs
+  on the spoke (enabled = false there) and the brain must still know.
+
+**Probes.** `probe_sections.py` grows to 78 checks: cookie-file
+precedence over the seed, the self-heal spawn and its cooldown,
+`auto_refresh` off never spawning a browser, the sender's raw message and
+default recipient and From, the alarm's count and distinct subjects, and its off
+and unauthorized switches, the SMTP sender through a fake relay and the
+watcher's choice among the three. `probe_mail.py` (12 checks: the tool
+through a fake relay, the gate's question, the prompt's presence and absence,
+and config arming). Playwright launch, the graceful not-signed-in
+exit, the launchd load, and one live test email were verified by hand.
+
+## 2026-08-31 — the section sniper (a Vigil watcher)
+
+**Why.** CS 61B fills sections first-come-first-served on
+sections.datastructur.es and a dropped spot is gone in minutes — a race a
+poll wins and a person loses. Exactly the shape Vigil promised a new
+watcher would be: one module and one line in the pipeline; the policy,
+the away outlet, and the health streak were already waiting.
+
+**What.**
+
+- *The site as a client* (`sections.py`): one read-only call —
+  `POST /api/refresh_state` with a browser cookie (the course's Canvas
+  OAuth can't be automated; the session is borrowed, Discord-token
+  style) — parsed tolerantly into `Section`s with spots, weekly slot,
+  and the signed-in user's enrollments. A signed-out answer *raises*
+  toward re-login rather than reading as "every section vanished". The
+  API's `join_section` is deliberately not wrapped: Ciel says a spot
+  opened; taking it stays a human act.
+- *The watcher* (`proactive/sections.py`): a transition detector —
+  full → open fires importance 3 (speak now, or text the away outlet),
+  expiring in 30 minutes because a stale spot is pure disappointment;
+  still-open stays quiet; a reopening fires again. Dedupe keys bucket
+  by local hour, the deliberate trade that survives autoreloader
+  restarts mid-opening and keeps a flapping roster from burning the
+  day's three-text budget. Enrolled sections never fire. A dead cookie
+  becomes a `WatcherHealth` note pointing at the fix.
+- *Config* (`[sections]`): `url` (other courses run the same app),
+  `cookie`, `watch` (section ids — the filter is the consent), and a
+  30-second `poll_s`, the one watcher whose whole value is the race.
+
+**Probes.** `probe_sections.py` (35 checks: payload shapes including
+signed-out and broken rows, phrasing, every transition — first scans,
+flaps, enrollment, the hour bucket — the watcher's lifecycle and failure
+streak, config from TOML and environment; `--live` lists the site's
+sections with ids and open spots, which is also where `watch` ids come
+from).
+
 ## 2026-08-29 — the seams cut for the hub (phase 0)
 
 **Why.** The hub-and-spoke plan is approved: the brain, memory, Vigil,

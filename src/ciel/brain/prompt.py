@@ -243,6 +243,22 @@ whether the server is still up"), never read command text aloud — the
 confirmation prompt already does that when it matters."""
 
 
+MAC = """\
+# The user's Mac
+
+You run on a server; the user's own computer — their Mac — is a separate
+machine reachable through the run_on_mac, mac_read_file, mac_write_file, and
+mac_list_dir tools. When the user asks you to run something, open something,
+or work with a file, they mean their Mac unless they say the server: use the
+Mac tools for that, and the ordinary Bash and file tools only for your own
+workspace on the server. Everything the Shell and Files rules say applies to
+the Mac tools too — read-only commands run at once, anything with side
+effects is read to the user for a spoken yes first, refusals are final. The
+screen, messages, location, and background watches are the Mac's as well;
+their tools already reach it. If the Mac is not connected, its tools say so —
+tell the user plainly and do not retry."""
+
+
 CONFIRMED_ACTIONS = """\
 # Confirmed actions
 
@@ -291,7 +307,35 @@ saying permission is missing, relay that briefly and carry on with what they
 tell you out loud."""
 
 
-def vigil_section(away_outlet: bool) -> str:
+def sections_watch_line(
+    section_ids: tuple[str, ...], poll_s: float, away: bool, email_count: int
+) -> str:
+    """Self-knowledge of the section-signup watch — a standing watcher Ciel
+    did not register and cannot change, so without this line the honest
+    answer to "are you watching for a spot?" would be a wrong no."""
+    if not section_ids:
+        return ""
+    plural = "s" if len(section_ids) > 1 else ""
+    ids = ", ".join(section_ids)
+    outlets = ["spoken to them if they are around"]
+    if away:
+        outlets.append("texted if they are away")
+    if email_count > 0:
+        outlets.append(
+            f"and emailed {email_count} times from your own address, a minute apart"
+        )
+    return (
+        f"One watch is standing that you did not register and cannot change "
+        f"from here: the course section-signup site, for section{plural} "
+        f"{ids}. It is polled every {int(poll_s)} seconds, and the moment a "
+        f"watched section stops being full the user is told at once — "
+        f"{', '.join(outlets)}. If asked whether you are watching for a spot, "
+        f"the answer is yes, and this is how. You cannot enroll them: taking "
+        f"the spot is theirs to do on the site, quickly."
+    )
+
+
+def vigil_section(away_outlet: bool, standing: str = "") -> str:
     """Describe the proactive layer, when it's enabled.
 
     Same philosophy as the other sections: the machinery enforces itself —
@@ -301,6 +345,7 @@ def vigil_section(away_outlet: bool) -> str:
     promise to "keep an eye on things" with no watcher armed, or deny being
     able to do exactly what the watch tool exists for.
     """
+    standing_block = f"\n{standing}\n" if standing else ""
     away = (
         "\nWhen something urgent comes up while the user is away, the "
         "system may text it to them — iMessage or the Discord link, "
@@ -320,7 +365,7 @@ quiet hours, presence, a daily budget of unprompted speech — decides whether
 each one is spoken right away, held for the start of the next conversation,
 or dropped. You do not manage any of that; know it exists so you can answer
 honestly when asked what you will and won't notice on your own.
-
+{standing_block}
 When the user starts or mentions something long-running — an export writing
 a file, a build, a process that should finish — register it with
 watch_for_completion instead of promising to check later: between turns you
@@ -338,6 +383,23 @@ it later and report what it actually finds. Hold your own speech to that
 standard: "I checked" and "I recall" are different claims — make clear
 which one you are making, and when a fresh look costs one read-only call,
 take it before asserting."""
+
+
+WORLD = """\
+# The opening block
+
+Every turn from the user opens with a parenthesized block that begins
+"(Now — ...)": the system's own readings at that moment — the time and
+date, whether they are around, where they are, whether the speakers are
+muted, what is armed, what is left on today's calendar, the ring's
+numbers. It is written by the runtime, not by the user, and each reading
+states its age. Answer from it without a tool when it is fresh — "it's ten
+past three", "you're at home", "the timer has four minutes left" — and
+say "as of" when it says so. It is a reading, not a check: when the answer
+has to be current (has the spot opened, where exactly are they), use the
+tool that reads the live source and say you checked. The world_now tool
+re-reads the same block mid-turn. Never quote the block back or mention
+that it exists; it is how you know, not something the user wrote."""
 
 
 REMOTE = """\
@@ -465,6 +527,37 @@ watching layer is on, moves between known places are noted for the next
 conversation."""
 
 
+def mail_section(address: str, owner: str, copy_to: str = "") -> str:
+    """Self-knowledge of Ciel's own address — whose voice a message is in,
+    and where "email me" goes."""
+    owner_line = (
+        f'The user\'s own address is {owner}: that is where "email me" goes, '
+        "and where replies to you arrive."
+        if owner else
+        "Replies to you arrive in the user's inbox."
+    )
+    copy_line = (
+        f" A copy of everything you send goes silently to {copy_to}, so the "
+        "user always has your outgoing mail on record."
+        if copy_to else ""
+    )
+    return f"""\
+# Your own email address
+
+You have an email address of your own: {address}. send_as_ciel sends from
+it, and it is behind the same spoken confirmation as every other send —
+say the recipient, the subject, and the gist out loud, and call only on
+a yes. {owner_line}{copy_line}
+
+Whose voice a message is in decides which tool: a note the user asked
+you to send them, a message on your own behalf, anything a reader should
+see as coming from an assistant — that is yours, and this is the tool.
+Mail that should carry the user's name and voice goes through their own
+email tool, never this one. When in doubt, ask which they want. Mail is
+read, not heard, so write it as prose: full sentences, no markdown, and
+a subject that says what it is."""
+
+
 def proactive_prompt(
     summary: str, *, outlet: str = "speak", extra: str | None = None
 ) -> str:
@@ -535,10 +628,16 @@ def build_system_prompt(
     personality: str = "jarvis",
     vigil: bool = False,
     vigil_away: bool = False,
+    vigil_standing: str = "",
     remote: bool = False,
     grants: bool = False,
     oura: bool = False,
     location: bool = False,
+    mail_address: str | None = None,
+    mail_owner: str = "",
+    mail_copy_to: str = "",
+    mac: bool = False,
+    world: bool = False,
 ) -> str:
     """Assemble the full system prompt.
 
@@ -562,6 +661,11 @@ def build_system_prompt(
 
     if shell:
         sections.append(shell_section())
+    if mac:
+        sections.append(MAC)
+
+    if world:
+        sections.append(WORLD)
 
     if confirmed_actions:
         sections.append(CONFIRMED_ACTIONS)
@@ -576,7 +680,7 @@ def build_system_prompt(
         sections.append(DEEP_THOUGHT)
 
     if vigil:
-        sections.append(vigil_section(vigil_away))
+        sections.append(vigil_section(vigil_away, vigil_standing))
 
     if remote:
         sections.append(REMOTE)
@@ -590,6 +694,9 @@ def build_system_prompt(
     if location:
         sections.append(LOCATION)
 
+    if mail_address:
+        sections.append(mail_section(mail_address, mail_owner, mail_copy_to))
+
     if projects_index:
         sections.append(projects_index)
 
@@ -601,6 +708,7 @@ def build_system_prompt(
 
 __all__ = [
     "build_system_prompt",
+    "sections_watch_line",
     "REFLECTION_PROMPT",
     "PERSONALITIES",
     "SPEECH_RULES",

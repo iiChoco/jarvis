@@ -332,9 +332,19 @@ class ShellGuard:
         self,
         config: ShellConfig,
         confirm: Callable[[str], Awaitable[bool]],
+        *,
+        tool_name: str = "Bash",
+        arg: str = "command",
+        where: str = "",
     ) -> None:
         self._config = config
         self._confirm = confirm
+        self._tool_name = tool_name
+        self._arg = arg
+        self._where = f" on {where}" if where else ""
+        """The same three tiers for any tool whose call is a shell
+        command: the SDK's Bash here, or the hub's run-on-the-Mac tool,
+        whose question says where the command will run."""
 
     async def __call__(
         self,
@@ -342,10 +352,10 @@ class ShellGuard:
         tool_use_id: str | None,
         context: HookContext,
     ) -> dict[str, Any]:
-        if payload.get("tool_name") != "Bash":
+        if payload.get("tool_name") != self._tool_name:
             return {}
         tool_input = payload.get("tool_input") or {}
-        command = str(tool_input.get("command") or "")
+        command = str(tool_input.get(self._arg) or "")
 
         if tool_input.get("run_in_background"):
             # A backgrounded command outlives the confirmation that approved
@@ -368,9 +378,9 @@ class ShellGuard:
 
         limit = self._config.max_command_display_chars
         shown = command if len(command) <= limit else f"{command[:limit]}, and so on"
-        question = f"Run: {shown} — okay?"
+        question = f"Run{self._where}: {shown} — okay?"
         if reason == GLOB_CONFIRM_REASON:
-            question = f"Run: {shown} — careful, {reason} — okay?"
+            question = f"Run{self._where}: {shown} — careful, {reason} — okay?"
         try:
             approved = await self._confirm(question)
         except Exception:  # noqa: BLE001 - the hook must always return a decision
@@ -395,7 +405,7 @@ class ShellGuard:
         past the *remote* gate's worst case — two 120-second texted answer
         windows back to back — for exactly that reason.
         """
-        return {"PreToolUse": [HookMatcher(matcher="Bash", hooks=[self], timeout=600)]}
+        return {"PreToolUse": [HookMatcher(matcher=self._tool_name, hooks=[self], timeout=600)]}
 
 
 __all__ = ["ShellGuard", "classify", "deny_decision", "Tier"]

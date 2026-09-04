@@ -1,0 +1,42 @@
+# Ciel's hub as a systemd service: the brain's half, always on.
+#
+# Install on the server (Ubuntu), as the `ciel` user's own unit:
+#
+#     sudo cp deploy/ciel-hub.service /etc/systemd/system/
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now ciel-hub
+#
+# Logs: `journalctl -u ciel-hub -f`. The process re-execs itself on a
+# source change or a spoken "reload" (reload.py's execv works unchanged
+# under systemd); a crash comes back in five seconds. It waits for the
+# network and for tailscaled, because [hub].bind is the tailnet address
+# and a bind before the interface exists would fail and restart-loop
+# until it did.
+[Unit]
+Description=Ciel hub (brain, memory, Vigil, the wire)
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=ciel
+WorkingDirectory=/home/ciel/jarvis
+Environment=PATH=/home/ciel/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/ciel
+Environment=PYTHONUNBUFFERED=1
+# The brain's login. On Linux the CLI has no keychain: run `claude
+# setup-token` once (it prints a long-lived OAuth token for the
+# subscription — never an API key, which would bill per use) and put it in
+# this file, owner-only, as CLAUDE_CODE_OAUTH_TOKEN=... — the file is on
+# the model's forbidden list by name. Optional, so a box logged in through
+# `claude login` (which writes ~/.claude/.credentials.json) works without it.
+EnvironmentFile=-/home/ciel/.ciel/hub.env
+ExecStart=/home/ciel/jarvis/.venv/bin/python -m ciel hub
+Restart=always
+RestartSec=5
+# The SDK subprocess and the npx connectors are children; stop them too.
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

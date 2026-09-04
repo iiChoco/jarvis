@@ -199,6 +199,7 @@ def make_pipeline(script, *, error=None, events=None, muted=False,
     )
     p = Pipeline.__new__(Pipeline)
     p._config = cfg
+    p._role = "local"
     p._brain = FakeBrain(script, error)
     p._confirm = FakeConfirm()
     p._indicator = FakeIndicator()

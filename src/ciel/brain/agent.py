@@ -38,7 +38,8 @@ from claude_agent_sdk import (
 )
 
 from ciel.brain.permissions import FILE_TOOLS, WorkspaceGuard
-from ciel.brain.prompt import build_system_prompt
+from ciel.brain.prompt import build_system_prompt, sections_watch_line
+from ciel.brain.sentences import flush_point, split_sentences
 from ciel.brain.session import SessionStore
 from ciel.brain.recorder import ActionRecorder
 from ciel.brain.shellguard import ShellGuard
@@ -56,49 +57,6 @@ log = logging.getLogger(__name__)
 # terminated process underneath the SDK's own wrappers.
 _TRANSPORT_ERRORS = (CLIConnectionError, ProcessError, BrokenPipeError, ConnectionError)
 
-# A sentence ends at .?! followed by whitespace or a closing quote/bracket — but
-# not when the period is part of a decimal ("3.5" — the lookahead rejects it,
-# since the next character is a digit) or an ellipsis. End-of-buffer is
-# deliberately NOT a boundary: mid-stream the buffer ends at an arbitrary delta
-# cut, so "3." at a delta boundary must wait for the next delta rather than
-# split the number — the true end of a response is emitted by ask()'s tail flush
-# instead. Getting this wrong is audible: a premature split pauses mid-number.
-_BOUNDARY = re.compile(r"(?<!\.)([.!?])(?=[\s\"')\]])")
-
-# Abbreviations that end in a period without ending a sentence. The prompt
-# discourages these, but the model still produces them occasionally. Ordinary
-# words that double as abbreviations ("no", "us") don't belong here — "The
-# answer is no." is a complete sentence far more often than "No. 5" appears.
-_ABBREVIATIONS = frozenset({
-    "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc",
-    "approx", "fig", "inc", "ltd", "co", "uk",
-})
-
-# Abbreviations recognized only in their dotted spelling ("e.g.", "i.e.",
-# "a.m.", "U.S."). Their dotless forms ("eg", "am", "us") are ordinary words
-# that legitimately end sentences, so they qualify only when the trailing token
-# actually carried internal periods.
-_DOTTED_ABBREVIATIONS = frozenset({"eg", "ie", "am", "pm", "us"})
-
-# The trailing token before a sentence-final period, keeping any internal dots
-# so "e.g." is seen whole rather than as a bare "g".
-_TRAILING_WORD = re.compile(r"([A-Za-z.]+)\.$")
-
-
-def _is_real_boundary(candidate: str) -> bool:
-    """Reject boundaries that fall inside an abbreviation."""
-    match = _TRAILING_WORD.search(candidate.strip())
-    if match is None:
-        return True
-    token = match.group(1)
-    word = token.replace(".", "").lower()
-    if word in _ABBREVIATIONS:
-        return False
-    if "." in token and word in _DOTTED_ABBREVIATIONS:
-        return False
-    return True
-
-
 class Brain:
     """A conversational Claude session that yields speakable sentences."""
 
@@ -110,8 +68,12 @@ class Brain:
         journal: ActionJournal | None = None,
         projects_index_provider: "Callable[[], str | None] | None" = None,
         verify_emitter: "Callable[[str, dict], None] | None" = None,
+        mac_tools: bool = False,
     ) -> None:
         self._config = config
+        self._mac_tools = mac_tools
+        """The hub's tools onto the user's Mac are registered: their shell
+        gets the shell gate under its own name, their writes the journal."""
         self._brain_config: BrainConfig = config.brain
         # Providers, not strings: the indexes are read at every connect, so a
         # rotation picks up whatever reflection just wrote. A string would
@@ -174,6 +136,15 @@ class Brain:
         if config.shell.enabled and confirmer is not None:
             self._shell_guard = ShellGuard(config.shell, confirmer)
             log.info("shell enabled behind the voice gate")
+        # The Mac's shell, from the hub: the same tiers and the same gate,
+        # matched on the RPC tool's name, and the question says where.
+        self._mac_shell_guard: ShellGuard | None = None
+        if mac_tools and config.shell.enabled and confirmer is not None:
+            self._mac_shell_guard = ShellGuard(
+                config.shell, confirmer,
+                tool_name="mcp__ciel__run_on_mac", where="the Mac",
+            )
+            log.info("the Mac's shell enabled behind the voice gate")
 
         # Connector tools on a `confirm` list get the same gate. Both halves
         # again: names to gate AND a confirmer to gate them through. Without
@@ -194,6 +165,9 @@ class Brain:
         # rather than letting it run silently on the tool description's say-so.
         if config.messages.enabled and config.messages.allow_send:
             gated.add("mcp__ciel__send_message")
+        # Mail from Ciel's own address: outward, irreversible, same gate.
+        if config.mail.armed:
+            gated.add("mcp__ciel__send_as_ciel")
         # The capability grant is the escalation channel itself, so it gets
         # the gate before anything else does: no config changes on a bare
         # tool call, only on the user's spoken or texted yes. The revoke
@@ -226,6 +200,10 @@ class Brain:
         # journaling lives outside the guards so nothing here can grow into an
         # enforcement path.
         self._recorder: ActionRecorder | None = None
+        mac_mutators: frozenset[str] = (
+            frozenset({"mcp__ciel__run_on_mac", "mcp__ciel__mac_write_file"})
+            if mac_tools else frozenset()
+        )
         if journal is not None:
             self._recorder = ActionRecorder(
                 journal,
@@ -233,11 +211,22 @@ class Brain:
                 # off?" deserves a record — but neither files a read-back
                 # event: the grant parse-verifies its own config edit, and
                 # an unattended re-check would add a turn to observe what
-                # the tool already proved.
-                self._gated_tools | grant_tools,
+                # the tool already proved. The Mac's shell and writes are
+                # journaled like the local ones.
+                self._gated_tools | grant_tools | mac_mutators,
                 verify_emitter=verify_emitter,
                 verify_for=self._gated_tools - grant_tools,
             )
+
+    @property
+    def _away_outlet(self) -> bool:
+        """Whether an away text can reach the user — the same test the
+        vigil_away prompt flag makes, named so both sites agree."""
+        return bool(
+            self._config.proactive.owner_handle
+            and self._config.messages.enabled
+            and self._config.messages.allow_send
+        ) or bool(self._remote_armed and self._config.discord.proactive)
 
     @property
     def _remote_armed(self) -> bool:
@@ -343,6 +332,19 @@ class Brain:
                 # promises to "keep an eye on things" with no watcher armed,
                 # or denies being able to do what the watch tool exists for.
                 vigil=self._config.proactive.enabled,
+                # The standing section watch, so "are you watching for a
+                # spot?" is answered from fact rather than denied. Keyed on
+                # the watch list, not `enabled`: on the hub the watcher
+                # runs on the spoke (enabled = false here, cookie on the
+                # Mac) and the brain must still know it exists.
+                vigil_standing=sections_watch_line(
+                    self._config.sections.watch
+                    if self._config.proactive.enabled
+                    else (),
+                    self._config.sections.poll_s,
+                    self._away_outlet,
+                    self._config.sections.email_on_opening,
+                ),
                 vigil_away=bool(
                     self._config.proactive.owner_handle
                     and self._config.messages.enabled
@@ -360,6 +362,18 @@ class Brain:
                 # tool without a token, and the prompt must not promise it.
                 oura=self._config.oura.armed,
                 location=self._config.location.enabled,
+                # Ciel's own address, so "email me" and "can you email
+                # someone as yourself" get honest answers.
+                mail_address=(
+                    self._config.mail.address if self._config.mail.armed else None
+                ),
+                mail_owner=self._config.mail.owner,
+                mail_copy_to=self._config.mail.copy_to,
+                mac=self._mac_tools,
+                # The opening block exists whenever the table does and
+                # is sent; the prompt must not describe a block that
+                # never comes.
+                world=self._config.world.enabled and self._config.world.in_prompt,
             ),
             # Explicit allowlist. The Agent SDK ships the full Claude Code
             # toolset — Bash, Write, Edit — and a voice assistant that can
@@ -466,6 +480,8 @@ class Brain:
             pre.extend(self._guard.as_hooks()["PreToolUse"])
         if self._shell_guard is not None:
             pre.extend(self._shell_guard.as_hooks()["PreToolUse"])
+        if self._mac_shell_guard is not None:
+            pre.extend(self._mac_shell_guard.as_hooks()["PreToolUse"])
         if self._tool_guard is not None:
             pre.extend(self._tool_guard.as_hooks()["PreToolUse"])
         if self._recorder is not None:
@@ -801,63 +817,13 @@ class Brain:
             log.debug("could not drain the abandoned turn", exc_info=True)
 
     def _drain(self, buffer: str) -> tuple[list[str], str]:
-        """Split off every complete sentence.
-
-        Returns the finished sentences and whatever text remains unterminated,
-        which the caller keeps buffering into.
-        """
-        sentences: list[str] = []
-        start = 0
-
-        for match in _BOUNDARY.finditer(buffer):
-            end = match.end()
-            candidate = buffer[start:end]
-            if not _is_real_boundary(candidate):
-                continue
-            text = candidate.strip()
-            if text:
-                sentences.append(text)
-            start = end
-
-        if sentences:
-            return sentences, buffer[start:]
-
-        # No sentence boundary yet. Past the flush threshold, release anyway —
-        # otherwise a long run-on leaves the user in silence indefinitely.
-        limit = self._brain_config.sentence_flush_chars
-        if len(buffer) >= limit:
-            cut = self._flush_point(buffer, limit)
-            if cut > 0:
-                head = buffer[:cut].strip()
-                if head:
-                    return [head], buffer[cut:]
-
-        return [], buffer
+        """Split off every complete sentence — the shared splitter in
+        ``brain/sentences.py``, at this brain's flush threshold."""
+        return split_sentences(buffer, self._brain_config.sentence_flush_chars)
 
     @staticmethod
     def _flush_point(buffer: str, limit: int) -> int:
-        """Choose where to cut an over-long buffer.
-
-        Prefer a clause boundary — a comma, semicolon, colon, or dash. Cutting
-        at an arbitrary word break is audible: "...compared to drinking" / "none."
-        puts a pause in a place no speaker would, because the synthesizer gives
-        each chunk its own falling intonation. A clause boundary is somewhere a
-        person would naturally draw breath.
-        """
-        window = buffer[:limit]
-        # Ignore boundaries in the first third: cutting there leaves a stub too
-        # short to be worth speaking on its own ("Yes," as its own utterance).
-        earliest = limit // 3
-
-        for marker in ("; ", ", ", ": ", " — ", " - "):
-            cut = window.rfind(marker)
-            if cut > earliest:
-                return cut + len(marker)
-
-        cut = window.rfind(" ")
-        # The same guard applies to the word-break fallback, which otherwise
-        # happily returns the space after the first word.
-        return cut if cut > earliest else limit
+        return flush_point(buffer, limit)
 
 
 def _label(kind: str | None) -> str:

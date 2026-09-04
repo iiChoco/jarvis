@@ -813,7 +813,16 @@ async def run_checks(tmp: Path) -> None:
         p._tts = TurnTTS()
         p._owner_messages = TurnMessenger() if owner else None
         p._conversed = False
+        p._role = "local"
+        p._player = None
+        p._mic = None
         return p
+
+    async def run_proactive(p, ev, player, mic):
+        # The audio machinery rides on the pipeline now (the hub role
+        # has none): plant it the way run() does, then drive the turn.
+        p._player, p._mic = player, mic
+        await p._run_proactive_turn(ev)
 
     today = time.strftime("%Y-%m-%d")
 
@@ -821,7 +830,7 @@ async def run_checks(tmp: Path) -> None:
     p = make_turn_pipeline([[assistant("SKIP"), result_msg()]])
     ev = event("e2e:skip", expires=None)
     player = TurnPlayer()
-    await p._run_proactive_turn(ev, player, TurnMic())
+    await run_proactive(p, ev, player, TurnMic())
     check("SKIP spends no budget", p._events.spoken_count(today) == 0)
     check("SKIP plays nothing", player.plays == 0)
     check("SKIP is remembered as delivered", not p._events.push(event("e2e:skip")))
@@ -829,14 +838,14 @@ async def run_checks(tmp: Path) -> None:
     # A real reply: ring + sentence, budget charged, rotation re-armed.
     p = make_turn_pipeline([[assistant("Heads up. Your meeting is close."), result_msg()]])
     player = TurnPlayer()
-    await p._run_proactive_turn(event("e2e:speak"), player, TurnMic())
+    await run_proactive(p, event("e2e:speak"), player, TurnMic())
     check("a reply rings then speaks", player.plays >= 2)
     check("a spoken nudge charges the budget", p._events.spoken_count(today) == 1)
     check("a spoken nudge re-arms rotation", p._conversed is True)
 
     # HOLD: de-escalated to a held note, unspent.
     p = make_turn_pipeline([[assistant("HOLD"), result_msg()]])
-    await p._run_proactive_turn(event("e2e:hold", created=time.time()), TurnPlayer(), TurnMic())
+    await run_proactive(p, event("e2e:hold", created=time.time()), TurnPlayer(), TurnMic())
     held_now = p._events.take_held(time.time())
     check("HOLD lands in held notes", len(held_now) == 1)
     check("HOLD spends nothing", p._events.spoken_count(today) == 0)
@@ -844,14 +853,14 @@ async def run_checks(tmp: Path) -> None:
     # Timeout: the brain is interrupted, the event held.
     stall = asyncio.Event()
     p = make_turn_pipeline([[assistant("late"), result_msg()]], stall=stall, timeout=0.2)
-    await p._run_proactive_turn(event("e2e:slow", created=time.time()), TurnPlayer(), TurnMic())
+    await run_proactive(p, event("e2e:slow", created=time.time()), TurnPlayer(), TurnMic())
     check("a hung turn interrupts the brain", p._brain._client.interrupted)
     check("a hung turn holds the event", len(p._events.take_held(time.time())) == 1)
 
     # Device loss mid-delivery: held, unspent — nothing reached the room.
     p = make_turn_pipeline([[assistant("Your meeting is close."), result_msg()]])
     player = TurnPlayer(results=[True, False], lose_device=True)
-    await p._run_proactive_turn(event("e2e:dead", created=time.time()), player, TurnMic())
+    await run_proactive(p, event("e2e:dead", created=time.time()), player, TurnMic())
     check("device loss holds the event", len(p._events.take_held(time.time())) == 1)
     check("device loss spends no budget", p._events.spoken_count(today) == 0)
 

@@ -52,6 +52,11 @@ Say **"hey jarvis"**, then talk.
   visible from any app, and a local web page (the Chart) that mirrors the whole
   conversation live, takes typed turns, and holds the mute switch for rooms
   that must stay quiet.
+- **Knows what is true right now** — one table of the system's own readings
+  (the time, whether you're around, where you are, what's armed, the rest of
+  today's calendar, the ring) opens every turn with its ages, so "what time
+  is it", "you're at home", and "the timer has four minutes left" need no
+  tool, and "as of" is said when it should be.
 
 ## The protocols
 
@@ -82,6 +87,7 @@ the docs — and you — get to use.
 | **Invariant** | Long-term memory — what survives every session transformation |
 | **Closure** | End-of-conversation reflection — capturing the limit points before the session is discarded |
 | **Atlas** | Projects — durable charts of ongoing work, with an index that says which chart to open |
+| **Phase Space** | The world state (`world.py`) — one point that says where everything is right now: the time, presence, place, mute, timers, watches, the agenda, the ring; fed by every producer, opening every turn, mirrored to the Chart |
 
 Closure and Atlas together are the continuity design (the "loving partner
 protocol"): sessions are deliberately short-lived, and continuity comes from
@@ -170,9 +176,13 @@ Ciel is doing without your having to find the terminal.
 | Speaking | Blue, pulsing — talking |
 | Error | Red — the turn failed |
 
-It ignores mouse clicks, never takes focus, and follows you across Spaces. Both
-the dot and the pill's outline carry the state colour — a dark pill with only a
-small dot vanishes against a dark terminal, which is exactly where it sits.
+It ignores mouse clicks, never takes focus, and follows you across Spaces. It
+wears the Chart's state chip — the same cut-corner shape, the same six colours,
+the same breathing dot and wide-tracked capitals — so the corner of the screen
+and the browser tab read as one instrument. The dot, the border, and the tint
+over the ground all carry the state colour: a dark chip with only a small dot
+vanishes against a dark terminal, which is exactly where it sits. The chip is
+sized to its label, so it grows and shrinks a little as the word changes.
 
 ```toml
 [ui]
@@ -428,7 +438,11 @@ buttons, and the mute switch lives in the header. Next to the status
 pill, an agents chip counts everything working on your behalf right now
 — a deep-thought pass mid-flight, background watches, running timers —
 and expands into a list with live countdowns; it disappears when
-nothing is running.
+nothing is running. Under the header, a strip of readings mirrors the
+world table (Phase Space, below): whether the Mac holds the seat and
+whether you're at it, the place, the timers and watches, what's next on
+the calendar, the ring — each chip with its age, dimmed once its reading
+has gone stale.
 
 ```bash
 uv sync --extra web
@@ -462,7 +476,179 @@ before widening `host`; there is no account id here to gate on.
 **A native app later** is already provided for: the page speaks a small
 JSON protocol over one WebSocket, documented at the top of
 `src/ciel/remote/web.py` — a SwiftUI client connects to the same `/ws`
-and the server never knows the difference.
+and the server never knows the difference. The frame catalog itself —
+every type in each direction, the codec, and the resume rules — lives
+in `src/ciel/wire.py`.
+
+**From the phone, over Tailscale.** The socket can listen on the
+machine's tailnet address instead of loopback, so a phone on the same
+Tailscale network opens the Chart from anywhere — and nowhere else, since
+the address is not routable from the internet:
+
+```toml
+[hub]
+bind = "100.101.102.103"   # this machine's Tailscale address: `tailscale ip -4`
+# origins = ["ciel-hub.tail1234.ts.net"]   # only if you open the page by MagicDNS name
+```
+
+Reach is no longer identity off loopback, so every non-loopback client
+must present a token. Ciel mints one at first start into
+`~/.ciel/hub.token` (owner-only, and on the model's forbidden list by
+name) and says so in the log; open `http://100.101.102.103:8765` on the
+phone, the page asks for the token once, paste it, done — it is
+remembered per browser. Loopback keeps working exactly as before, no
+token asked. A dropped connection (a Wi-Fi handoff, a phone that
+slept) picks up where it left off: the page tells the server the last
+frame it saw, and the server replays only what was missed, so the
+screen never blanks and re-fills. `scripts/probe_wire.py` drives the
+codec, the ring, the door, and a real socket on loopback.
+
+## Two processes: hub and spoke
+
+Optional. Everything above runs as one process (`ciel`, or `ciel local`),
+and that stays the way to run Ciel on one Mac. The split exists for the
+day the brain moves to a machine that never sleeps: `ciel hub` is the
+brain, memory, Vigil, the Discord lane, the Chart, and timers'
+bookkeeping — everything that is judgment or a text lane — served over
+the same socket the Chart uses; `ciel spoke` is the microphone and the
+speakers — the wake word, the endpointer, the speaker gate, STT, TTS,
+barge-in, the follow-up window, the HUD, the mute sentinel — as one more
+client of that socket. What the spoke hears goes up as text; what it
+says comes down as text, one sentence at a time, each one receipted so
+the hub's generation stays paced to real speech and a barge-in aborts it
+exactly as before.
+
+```bash
+ciel hub      # in one terminal (or a launchd agent)
+ciel spoke    # in another
+```
+
+```toml
+[spoke]
+hub = "ws://127.0.0.1:8765/ws"   # the hub's socket; a tailnet address once it moves
+```
+
+Both on this machine, nothing else changes: the same config file, the
+same `~/.ciel`, the same lanes. A confirm-tier question in a spoken turn
+is spoken by the spoke and answered in the room; timers and Vigil nudges
+ring through the spoke at its idle; the mute switch flows both ways
+(the spoke owns the sentinel, the hub owns the Chart's switch, and each
+tells the other). A spoke that loses the hub says so once and chimes
+after; a hub that loses its spoke abandons the sentence it was speaking
+and denies any question it was asking, the barge-in rule. Not yet on the
+spoke, on purpose: the command grammar's fast path and local timer
+ringing — both come back in the resilience phase, for a hub that might
+be unreachable.
+
+`scripts/probe_hub_arbiter.py`, `scripts/probe_spoke.py`, and
+`scripts/probe_confirm_wire.py` drive each half with fakes and a fake
+other half.
+
+**The hub needs no Mac in it.** Everything Mac-bound reaches the machine
+over the same socket. The brain's tools for the screen, Messages, the
+location, and background watches bind the wire on the hub and run on
+the spoke; the calendar store (EventKit), the locator, and the work
+watcher run *on the spoke* and publish their events up, acked one by
+one and resent after a reconnect; presence is a heartbeat — the raw
+lock-and-idle signals plus the roster of active watches — and a
+heartbeat that goes stale reads as an empty room, so Vigil never speaks
+to a spoke that stopped listening. Four tools exist only on the hub:
+`run_on_mac`, `mac_read_file`, `mac_write_file`, and `mac_list_dir` —
+the user's shell and files from a brain elsewhere, with the Mac named
+as the default target of "run this" and "open that" in the prompt. Both
+sides guard them: the hub's shell gate reads a side-effectful command
+aloud for a spoken yes and the workspace guard checks every path, and
+the spoke re-runs the classifier and the path check from its own config
+before touching anything — the deny tier is refused whatever the hub
+says, the confirm tier refused unless the hub says it asked. The
+ordinary Bash and file tools on the hub act on the hub's own workspace.
+`scripts/probe_hub_imports.py` proves the point by refusing every Mac
+and audio module and constructing the hub anyway; `probe_tool_rpc.py`
+and `probe_presence.py` drive the calls and the publishers.
+
+**When the hub is away.** The alarm clock never depends on the server:
+the hub broadcasts its timer set, the spoke keeps a mirror
+(`~/.ciel/spoke-timers.json`) and rings a timer itself when the hub
+can't — the link down at the due moment, or the hub silent about it
+past a short grace — and a timer rung here is receipted silently if the
+hub later delivers it, so nothing rings twice. With the hub down the
+command grammar runs on the spoke: "ten minute timer" arms a local
+timer, "cancel the timer" and "what timers are running" answer from the
+mirror, "reload" restarts the room. Every spoken turn carries an id, so
+a resend after a reconnect is never queued twice. On the hub, an away
+text goes through the Mac's iMessage while the spoke is seated and
+falls to Discord when it isn't. `ciel hub --check` is the doctor: the
+token, the bind address, the brain's login, the connectors' runtime,
+the state directory — one line each. `scripts/probe_backfill.py` drives
+all of it.
+
+**The Chart from anywhere.** With the hub on a server, the page can
+also sit behind a public name through a Cloudflare Tunnel: `cloudflared`
+on the server carries the hostname to the hub's tailnet socket, so the
+hub still listens nowhere public, and a Cloudflare Access application
+in front of the name asks for your email before a byte reaches the
+page; the hub's own token gates the socket behind that. List the public
+name in `[hub].origins` — a configured name is trusted on any port,
+since a proxied name arrives on the proxy's port, not the hub's — and
+the page speaks `wss://` on its own when served over TLS.
+
+## The interview room (Adjoint)
+
+Off by default. A second surface on the hub's web page, at `/interview`,
+for people who are not the owner: a voice-driven mock interviewer that
+invents a company from what a candidate asks for, or runs a consulting
+case, or poses a coding problem beside an editor — then records the whole
+thing and writes a debrief. It shares the process with Ciel and nothing
+else: its own accounts, its own brains with no tools and no memory, its
+own socket, its own files.
+
+```toml
+[interview]
+enabled = true                  # the hub serves /interview
+dir = "~/.ciel/interview"       # accounts, sessions, added cases
+model = "claude-opus-5"
+effort = "medium"               # the interviewer's turns; debrief_effort = "high"
+max_budget_usd = 3.0            # per session, enforced by the SDK
+daily_sessions_per_user = 4
+max_concurrent = 3              # one model subprocess per live interview
+silence_ms = 2000               # how long a candidate may pause before the answer is taken
+extend_ms = 3000                # extra wait when the transcript trails off
+piper_voice = "en_US-lessac-medium"
+```
+
+Accounts are the owner's to make. `ciel interview add-user alice` prints
+a generated password once; the admin panel on the page does the same, and
+can reset, disable, or delete. There is no signup. Public reach is the
+Chart's Cloudflare Tunnel plus a second Access application on
+`ciel.yunhan.me/interview` with a Bypass policy, so friends reach the
+room's own login while the Chart itself stays behind the owner's PIN.
+
+Three modes. **Company**: the candidate says what they want ("PM role at
+a mid-size fintech, behavioural plus product sense"), Ciel invents the
+company, the role, and the interviewer, and shows a brief with likely
+questions before the interview begins. **Case**: a consulting case from
+the library — three ship with the code, grounded in public business
+history with the client renamed; `ciel interview seed-cases -n 5` asks
+the model for more, and `~/.ciel/interview/cases/*.json` is where they
+land — or a freshly generated one; exhibits appear on the page when the
+interviewer shares them, and the debrief compares the recommendation with
+what really happened. **Technical**: a coding problem beside an editor
+(Python, C, C++, Java, Rust, JavaScript, TypeScript, Go); the interviewer
+reads the code and asks about it. Nothing is executed.
+
+The candidate speaks through the browser's speech recogniser (Chrome,
+Edge, Safari; elsewhere a text box); the interviewer speaks through piper
+on the hub, or the browser's own voice when piper is not installed. The
+room waits two seconds of silence before taking an answer — four times
+Ciel's own window — and longer when the words trail off. When it gets
+that wrong and the candidate goes on while the interviewer is already
+answering, the interviewer stops, says "Sorry, go on", and hears the
+whole answer. Every session is recorded (microphone and interviewer
+mixed) and replayable from the page with a click-to-seek transcript.
+
+`ciel interview serve --dev` runs the room alone on loopback with a
+scripted interviewer and a `dev`/`dev` account, for working on the page;
+`scripts/probe_interview.py` covers each layer.
 
 ## Watching things (Vigil)
 
@@ -500,6 +686,49 @@ rides into the start of your next conversation, aging out after 18 hours.
 become held notes — until the file is removed; the mute switch does the
 same for anything that would have been spoken. `scripts/probe_vigil.py`
 drives every branch of "when may Ciel speak unprompted" with fakes.
+
+## What is true right now (Phase Space)
+
+On by default. Everything above produces readings — the presence probe,
+the locator, the ring, the calendar, the timers, the mute switch — and
+before this table each was read by exactly one consumer, and the brain
+by none of them: it learned the world by calling a tool, or from a
+lane's fixed note, and never knew the time of day. `world.py` is the one
+table those readings are written into, each with who reported it, when,
+and how long it stays trustworthy.
+
+**What opens a turn.** Every user turn (and every unattended Vigil turn)
+opens with one parenthesized block the runtime writes — the clock; the
+Mac's seat, on the hub; whether you're around; the place; the mute switch
+and the hold, only when set; the armed timers and watches; the rest of
+today's calendar; the ring's numbers — each reading with its age in the
+runtime's words. "As of" and "last known" are computed from timestamps,
+never narrated by the model, which is what lets Ciel say "I checked" for
+a tool result and "as of two minutes ago" for a reading here. The
+`world_now` tool re-reads the same block mid-turn. Facts, not events:
+things that *happen* stay in Vigil's one queue.
+
+**Who writes it.** The pipeline (mute, hold, the timers and watches once
+a second, presence per turn or per heartbeat, the spoke's seat), the
+locator on every fix, the ring watcher and tool on every fetch, the
+sections watcher on every scan, and a calendar refresh every fifteen
+minutes (`agenda_refresh_s`). On the hub the Mac's readings arrive as
+`fact` frames from the spoke's relay — last-value, resent after a
+reconnect — and the whole table rides to every Chart as a `world` frame
+when it changes. `~/.ciel/world.json` mirrors it across the
+autoreloader's re-execs, so a place or a ring score never blanks for
+minutes after a source edit; a carried-over reading shows its true age.
+
+```toml
+[world]
+enabled = true            # off: bare turns, no tool, no strip
+in_prompt = true          # off: the table still feeds the Chart and the tool
+agenda_refresh_s = 900.0  # 0 leaves the agenda to the brief alone
+```
+
+`scripts/probe_world.py` drives the table, the freshness rules, the
+block's wording, the file, the relay, and the hub's door with no network
+and a fixed clock.
 
 ## The ring (Oura)
 
@@ -567,6 +796,151 @@ From `activity_check_after` (18:00), an activity score still at or under
 walk would fix it"). A fine day produces nothing. Scores appear once the
 ring syncs through the phone; the watcher rescans every half hour and on
 wake from sleep. Any threshold set to 0 switches that check off.
+
+## Ciel's own email address
+
+Off by default. With `[mail]` set, Ciel has an address of its own —
+`ciel@example.com`, say — and one tool, `send_as_ciel`, that sends from it.
+The Gmail connector sends *as you*; this sends *as Ciel*, and the prompt
+teaches the difference: a note you asked Ciel to send you, a message on
+its own behalf, anything a reader should see as coming from an assistant
+goes here; mail in your name and voice goes through your own tool. The
+send sits behind the same spoken confirmation as every other one ("Send
+an email from my own address to ..., subject ... — okay?") and is absent
+from the Witness observers, so an unattended turn can never use it.
+
+Sending runs through Cloudflare Email Service's SMTPS relay, which needs
+the domain on Cloudflare DNS and onboarded for Email Sending (it adds the
+SPF/DKIM/DMARC records itself) and an API token with the *Email Sending:
+Edit* permission. Relaying to the account's verified destination
+addresses — yours — is free on every plan; mailing anyone else needs the
+Workers Paid plan. Inbound mail to the address is Email Routing's job:
+forward it to your inbox, with a filter on `to:` / `from:` the address to
+give it a label of its own.
+
+```toml
+[mail]
+enabled = true
+address = "ciel@example.com"
+owner = "you@gmail.com"     # where "email me" goes; a verified destination
+copy_to = "you@work.edu"    # optional: a silent Bcc of everything Ciel sends
+token = "..."               # or CIEL_MAIL_TOKEN in the environment
+```
+
+`copy_to` gives you a record of Ciel's outgoing mail in an inbox of your
+choosing: the relay Bcc's it on every message, tool and alarm alike, and
+the recipient never sees it. A refused copy is logged, not fatal; a
+refused recipient is a failed send.
+
+The section watcher's alarm borrows this relay and address when it has
+none of its own, so one token serves both.
+
+## A spot in a section (the signup site)
+
+Off by default, and only useful with Vigil on. Berkeley courses fill
+sections first-come-first-served on the *sections* app
+(sections.datastructur.es for CS 61B), and a dropped spot is gone in
+minutes. Watched, an opening becomes an importance-3 event the moment a
+scan sees it — spoken if you're around, texted through the away outlet if
+you're not — phrased whole: "a spot just opened in CS 61B lab section 31 —
+Tuesdays 10:00 AM to 12:00 PM at Soda 275 with Erin."
+
+The site shows sections only to a browser signed in through the course's
+Canvas OAuth, which can't be automated, so setup borrows your browser's
+session. **Two minutes:**
+
+1. Sign in at the site, open DevTools → Network, click any `/api/` request,
+   and copy the whole `Cookie` request header.
+2. Point Ciel at it and pick the sections you want:
+
+   ```toml
+   [sections]
+   enabled = true
+   cookie = "session=..."   # or CIEL_SECTIONS_COOKIE in the environment
+   watch = ["12", "31"]     # section ids, from the listing below
+   ```
+
+   `uv run scripts/probe_sections.py --live` lists every section with its
+   id, weekly slot, and open spots — the ids are what `watch` wants — and
+   marks the watched and enrolled ones.
+
+The scan is a transition detector: full → open fires, still-open stays
+quiet, a refill and reopening fires again (dedupe is bucketed by the hour,
+so a flapping roster can't burn the day's texting budget). A section the
+site says you're already enrolled in is old news and never fires. Read-only
+by construction: the client can see `join_section` in the site's API and
+deliberately doesn't call it — Ciel tells you a spot opened; taking it
+stays a human act. Polls every `poll_s` (30 s) and on wake from sleep,
+since a spot that opened mid-nap is exactly the race this watcher exists to
+win.
+
+### The email alarm
+
+A spoken nudge is one sentence and a text is one buzz; a spot that is
+gone in minutes may deserve more. `email_on_opening = 5` makes the watcher
+itself email you when a watched section opens — five distinct messages
+(each with its own subject, so Gmail doesn't fold them into one thread
+with one notification), `email_interval_s` apart. It runs alongside the
+queued event, deliberately outside the interruption policy and its quiet
+hours: the policy judges whether a moment has earned an interruption, and
+this setting is your standing answer that for this one thing it always
+has. Mail goes through the `[mcp.gmail]` connector's login (its refresh
+token is borrowed read-only, like the calendar watcher borrows the
+calendar's — `gmail.py`), to that same account unless `email_to` pins
+another, and as that account unless `email_from` names a verified "send
+mail as" alias. Or, with `smtp_token` set, the alarm goes out *as Ciel*
+through an SMTP relay instead (`mail.py`) — Cloudflare Email Service's
+`smtp.mx.cloudflare.net:465`, username `api_token`, an API token with the
+Email Sending permission as the password, `email_from` on the onboarded
+domain (`ciel@example.com`) and `email_to` a verified destination, which
+Cloudflare relays free on every plan. No usable sender: a warning at
+startup, and openings fall back to the ordinary nudge.
+
+### Keeping the cookie alive
+
+The site's session is a sliding two-hour window: every request pushes its
+expiry forward, so while Ciel is polling, the cookie *never* lapses — the
+watcher keeps itself signed in for free. It only dies after two hours with
+no request, which in practice means an overnight sleep. Reviving it means
+the Canvas OAuth login again, and that needs a live bCourses session, so it
+can't be done from a bare script (CalNet and Duo would block it, and Ciel
+will not store your password or answer your Duo prompt).
+
+The way around that is a dedicated browser profile you sign into once, which
+then holds the bCourses session (Duo's "remember this device" keeps it
+alive for days). After that, `scripts/refresh_sections_cookie.py` follows
+the OAuth round-trip silently in a headless Chrome and writes the fresh
+cookie to `~/.ciel/sections-cookie`, where the watcher reads it on the next
+poll. **One-time setup:**
+
+1. Make a small venv with Playwright (kept out of Ciel's own dependencies):
+
+   ```bash
+   uv venv ~/.ciel/sections-refresh-venv
+   VIRTUAL_ENV=~/.ciel/sections-refresh-venv uv pip install playwright
+   ```
+
+2. Sign in once, in a visible browser, and complete CalNet + Duo yourself
+   (tick "remember this device", and approve the app if Canvas asks):
+
+   ```bash
+   ~/.ciel/sections-refresh-venv/bin/python \
+       scripts/refresh_sections_cookie.py --login
+   ```
+
+3. From then on it's automatic, two ways over. A launchd agent
+   (`~/Library/LaunchAgents/es.datastructur.sections-refresh.plist`) runs
+   the script each morning and on wake — for when the cookie died overnight
+   and Ciel isn't up yet. And with `auto_refresh = true` in `[sections]`,
+   the watcher itself runs it the moment a scan comes back signed-out — for
+   when Ciel *is* up but the Mac was off past the two-hour window. Both are
+   cheap: the script makes one plain HTTP check first and only spins up
+   Chrome when the cookie is genuinely dead.
+
+When the remembered bCourses session eventually lapses (a week or two), a
+silent refresh fails, the watcher's failure streak files a note, and one
+more `--login` re-arms it. Uses Google Chrome via Playwright's
+`channel="chrome"`, so nothing but the `playwright` package is downloaded.
 
 ## Where you are (location)
 
@@ -726,6 +1100,7 @@ uv run scripts/probe_oura.py --authorize  # connect the ring (one browser approv
 uv run scripts/probe_oura.py --live   # read today from the ring for real
 uv run scripts/probe_location.py      # places, both sources, move notes
 uv run scripts/probe_location.py --live  # read where this Mac is right now
+uv run scripts/probe_world.py         # the world table: facts, freshness, the block, the relay
 uv run scripts/probe_wake_model.py ~/.ciel/models/hey_ciel.onnx  # qualify a custom wake model
 ```
 
@@ -784,4 +1159,5 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `reload.py` | Analytic Continuation — watch the source, re-exec, resume |
 | `oura.py` | The Oura client — sleep, readiness, activity; read-only |
 | `location.py` | Where the user is — Find My's cache, the Mac's Wi-Fi, named places |
+| `world.py` | Phase Space — the one table of what is true right now, with ages; opens every turn |
 | `ui/` | The status pill (`hud.py` is its own process) and the indicator tee that feeds every view |

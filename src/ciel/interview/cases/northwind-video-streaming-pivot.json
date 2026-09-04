@@ -1,0 +1,147 @@
+{
+  "slug": "northwind-video-streaming-pivot",
+  "title": "Northwind Video: mail-order discs or streaming?",
+  "type": "company",
+  "client": "Northwind Video, a subscription DVD-by-mail company",
+  "year": 2007,
+  "prompt": "Our client mails DVDs to about seven million subscribers and is the clear leader in that business. Broadband is spreading fast. The CEO wants to know whether to invest heavily in streaming films over the internet, which would cannibalise the disc business, and if so, how.",
+  "background": "The disc business is profitable and growing. Streaming licences are expensive and studios are wary. Household broadband penetration is around fifty percent and rising several points a year. A major retailer runs a rival rental chain with thousands of stores.",
+  "clarifications": [
+    {
+      "q": "What is the objective?",
+      "a": "Stay the leader in home entertainment over the next ten years; the CEO is willing to sacrifice near-term profit."
+    },
+    {
+      "q": "How do subscribers pay?",
+      "a": "A flat monthly fee for a number of discs out at a time. Churn is about four percent a month."
+    },
+    {
+      "q": "Does the client have any streaming today?",
+      "a": "A small pilot: a few thousand titles, watchable on a computer only."
+    }
+  ],
+  "exhibits": [
+    {
+      "id": "e1",
+      "title": "Household internet access and video habits",
+      "kind": "table",
+      "columns": [
+        "Year",
+        "Broadband households (M)",
+        "Share of households",
+        "Hours of online video / week"
+      ],
+      "rows": [
+        [
+          "2005",
+          "40",
+          "36%",
+          "0.5"
+        ],
+        [
+          "2006",
+          "50",
+          "44%",
+          "0.9"
+        ],
+        [
+          "2007",
+          "58",
+          "51%",
+          "1.6"
+        ],
+        [
+          "2008 (est.)",
+          "66",
+          "57%",
+          "2.5"
+        ]
+      ],
+      "note": "Industry estimates; the client's own subscribers skew toward broadband.",
+      "reveal_when": "The candidate asks about the market, technology adoption, or customer behaviour."
+    },
+    {
+      "id": "e2",
+      "title": "Unit economics per subscriber per month",
+      "kind": "table",
+      "columns": [
+        "Line",
+        "Discs by mail",
+        "Streaming (client estimate)"
+      ],
+      "rows": [
+        [
+          "Revenue",
+          "$17.00",
+          "$9.00"
+        ],
+        [
+          "Content cost",
+          "$4.50",
+          "$4.00"
+        ],
+        [
+          "Fulfilment / delivery",
+          "$5.50",
+          "$0.60"
+        ],
+        [
+          "Marketing",
+          "$3.00",
+          "$3.00"
+        ],
+        [
+          "Contribution",
+          "$4.00",
+          "$1.40"
+        ]
+      ],
+      "note": "Streaming content cost assumes today's licence terms and a limited catalogue.",
+      "reveal_when": "The candidate asks about costs, margins, or the economics of either model."
+    },
+    {
+      "id": "e3",
+      "title": "Competitive moves",
+      "kind": "table",
+      "columns": [
+        "Player",
+        "Offer",
+        "Price",
+        "Reach"
+      ],
+      "rows": [
+        [
+          "Big-box rental chain",
+          "Stores plus a new mail plan",
+          "$18/month",
+          "5,000 stores"
+        ],
+        [
+          "Cable operators",
+          "Video on demand",
+          "$4 per film",
+          "45M homes"
+        ],
+        [
+          "A large online retailer",
+          "Rumoured download store",
+          "$3-4 per film",
+          "Every broadband home"
+        ]
+      ],
+      "note": "",
+      "reveal_when": "The candidate asks about competitors or the threat of new entrants."
+    }
+  ],
+  "framework_hints": [
+    "Where is the customer going, and how fast?",
+    "Cannibalisation versus disruption by someone else",
+    "What the client has that a new entrant does not (subscribers, recommendation data, brand)"
+  ],
+  "good_answer": "Invest now: the shift to streaming is a matter of when, not whether, and the client's subscriber base, brand, and recommendation data are worth more as a bridge than as a defence. Bundle streaming into the existing subscription at no extra charge to seed usage, accept lower contribution per subscriber for several years, secure content deals early, and get onto living-room devices rather than computers.",
+  "historical_outcome": "The real company launched streaming as a free add-on to its disc plans in 2007, spent years pushing onto game consoles and set-top boxes, and by 2010 most subscribers streamed. Its store-based rival filed for bankruptcy that year. The disc business declined as expected, and the company became the largest streaming service in the world.",
+  "sources": [
+    "https://en.wikipedia.org/wiki/Netflix",
+    "https://en.wikipedia.org/wiki/Blockbuster_LLC"
+  ]
+}

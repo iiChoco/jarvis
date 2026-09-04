@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from ciel.config import Config, load_config
 from ciel.pipeline import Pipeline
@@ -20,6 +21,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="ciel",
         description="Ciel — a local-first voice assistant.",
+    )
+    parser.add_argument(
+        "role",
+        nargs="?",
+        choices=["local", "hub", "spoke"],
+        default="local",
+        help=(
+            "local: everything in one process (default); hub: the brain, "
+            "memory, Vigil, and the text lanes, served over the wire; "
+            "spoke: the microphone and the speakers, as a client of the hub"
+        ),
     )
     parser.add_argument(
         "--wake",
@@ -50,6 +62,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--new", action="store_true", help="start a fresh conversation, ignoring the last one"
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    parser.add_argument(
+        "--check", action="store_true",
+        help="hub only: verify the token, bind address, brain login, and connectors, then exit",
+    )
     return parser.parse_args(argv)
 
 
@@ -103,6 +119,13 @@ def _check_auth() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw = list(argv) if argv is not None else sys.argv[1:]
+    if raw and raw[0] == "interview":
+        # The interview room's owner tools — its own parser, because
+        # "add-user alice" shares nothing with the role flags below.
+        from ciel.interview.cli import main as interview_main
+
+        return interview_main(raw[1:])
     args = _parse_args(argv)
 
     # Line-buffer stdout even when it isn't a terminal. Under launchd (or
@@ -136,9 +159,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.new:
         config.session_file.unlink(missing_ok=True)
 
-    pipeline = Pipeline(config)
+    if args.check:
+        from ciel.hub.doctor import report
+
+        return report(config)
+
+    if args.role == "spoke":
+        from ciel.spoke.frontend import Spoke
+
+        app: Any = Spoke(config)
+    else:
+        app = Pipeline(config, role=args.role)
     try:
-        asyncio.run(pipeline.run())
+        asyncio.run(app.run())
     except KeyboardInterrupt:
         print("\nbye")
         return 130
@@ -148,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
             raise
         return 1
 
-    if pipeline.reload_requested:
+    if app.reload_requested:
         # Replace this process with a fresh one running the new code — a real
         # restart in everything but who typed it. execv never returns; the
         # same interpreter, arguments, and environment carry over, and the

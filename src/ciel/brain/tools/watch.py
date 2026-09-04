@@ -10,6 +10,7 @@ disabled, the tool answers unavailable.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -26,6 +27,14 @@ _watcher: "WorkWatcher | None" = None
 
 def _text(message: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": message}]}
+
+
+async def _settle(value: Any) -> Any:
+    """The local watcher answers at once; the hub's answers over the
+    wire. The tool treats both the same."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 @tool(
@@ -69,13 +78,18 @@ async def watch_for_completion(args: dict[str, Any]) -> dict[str, Any]:
 
     if path:
         target = Path(path).expanduser()
-        if target.exists():
+        if getattr(_watcher, "observe", None) is None and target.exists():
+            # Only the local watcher can check this machine's disk; the
+            # Mac's watcher checks its own the moment the watch is armed.
             return _text(
                 f"{target} already exists — nothing to watch. If a new "
                 "version is being written, watch a temporary name or check "
                 "it directly."
             )
-        watch = _watcher.add_file(str(target), label, timeout)
+        try:
+            watch = await _settle(_watcher.add_file(str(target), label, timeout))
+        except Exception as exc:  # noqa: BLE001 - the Mac may be unreachable
+            return _text(f"Could not arm the watch: {exc}")
         return _text(
             f"Watching for {target} (id {watch.id}, up to {timeout:.0f} "
             "minutes). The user will be told when it appears."
@@ -85,7 +99,10 @@ async def watch_for_completion(args: dict[str, Any]) -> dict[str, Any]:
         pid_int = int(pid)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return _text("pid must be a process id number.")
-    watch = _watcher.add_pid(pid_int, label, timeout)
+    try:
+        watch = await _settle(_watcher.add_pid(pid_int, label, timeout))
+    except Exception as exc:  # noqa: BLE001 - the Mac may be unreachable
+        return _text(f"Could not arm the watch: {exc}")
     return _text(
         f"Watching process {pid_int} (id {watch.id}, up to {timeout:.0f} "
         "minutes). The user will be told when it exits."

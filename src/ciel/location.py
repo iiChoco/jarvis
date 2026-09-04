@@ -257,6 +257,15 @@ class Locator:
         self._latest: Fix | None = None
         self._refreshed_at = 0.0
         self._warned: set[str] = set()
+        self._world: Any = None
+        """The world table (or the spoke's relay) the place fact goes to —
+        every path that reads a fix writes it, so the tool, the watcher,
+        and the hub's RPC all leave the same reading behind."""
+
+    def bind_world(self, world: Any) -> None:
+        """Attach the world table; ``observe`` is called from ``refresh``,
+        on whichever thread refresh runs — the table is thread-safe."""
+        self._world = world
 
     @property
     def places(self) -> dict[str, Place]:
@@ -296,6 +305,18 @@ class Locator:
             self._refreshed_at = now
             if fix is not None:
                 self._latest = fix
+        if fix is not None and self._world is not None:
+            try:
+                self._world.observe(
+                    "place",
+                    {
+                        "place": self.place_of(fix), "via": fix.source,
+                        "network": fix.network, "device": fix.device, "at": fix.at,
+                    },
+                    source="mac", observed_at=now,
+                )
+            except Exception:  # noqa: BLE001 - the table is a side channel
+                log.debug("could not record the place fact", exc_info=True)
         return fix
 
     def current(self, max_age_s: float) -> Fix | None:

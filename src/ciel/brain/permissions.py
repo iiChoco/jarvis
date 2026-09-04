@@ -62,7 +62,14 @@ _PATH_FIELDS: dict[str, tuple[str, ...]] = {
     "NotebookEdit": ("notebook_path",),
     "Glob": ("path",),
     "Grep": ("path",),
+    # The hub's tools onto the user's Mac: guarded here against the hub's
+    # config, and again on the spoke against its own.
+    "mcp__ciel__mac_read_file": ("path",),
+    "mcp__ciel__mac_write_file": ("path",),
+    "mcp__ciel__mac_list_dir": ("path",),
 }
+
+_WRITERS = frozenset({"Write", "Edit", "NotebookEdit", "mcp__ciel__mac_write_file"})
 
 # Off limits regardless of where the workspace points.
 #
@@ -91,6 +98,15 @@ FORBIDDEN_NAMES = frozenset({
     # The Oura authorization — client secret and a refresh token, same
     # arrangement: its own file so this list can name it.
     "oura.json",
+    # The hub token — the wire's shared secret; its own file for the same
+    # reason. And the hub's environment file, which holds the brain's
+    # login on a server with no keychain.
+    "hub.token", "hub.env",
+    # The interview room's accounts (password hashes for the owner's
+    # friends) and its cookie-signing secret — the one place Ciel holds
+    # other people's credentials, so named twice over: distinctive file
+    # names, and this list.
+    "interview-accounts.json", "interview.secret",
     # Agent and CLI state. `.claude` is not just settings — it holds session
     # transcripts and history from every coding session, which is a broader
     # disclosure than any single credential file.
@@ -149,7 +165,7 @@ class WorkspaceGuard:
         if tool_name not in _PATH_FIELDS:
             return {}
 
-        is_write = tool_name in {"Write", "Edit", "NotebookEdit"}
+        is_write = tool_name in _WRITERS
 
         for field in _PATH_FIELDS[tool_name]:
             raw = tool_input.get(field)

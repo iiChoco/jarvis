@@ -57,16 +57,18 @@ import logging
 import time
 from contextlib import contextmanager
 from enum import Enum, auto
-from typing import Awaitable, Callable, Iterator
+from typing import TYPE_CHECKING, Awaitable, Callable, Iterator
 
 import numpy as np
 
-from ciel.audio.input import MicStream
-from ciel.audio.output import Player
-from ciel.audio.vad import Endpointer
 from ciel.config import Config
-from ciel.stt.base import SpeechToText
-from ciel.tts.base import TextToSpeech
+
+if TYPE_CHECKING:
+    from ciel.audio.input import MicStream
+    from ciel.audio.output import Player
+    from ciel.audio.vad import Endpointer
+    from ciel.stt.base import SpeechToText
+    from ciel.tts.base import TextToSpeech
 
 log = logging.getLogger(__name__)
 
@@ -115,14 +117,10 @@ class VoiceConfirmBroker:
         # Its own endpointer, never the pipeline's — that one's state belongs
         # to LISTENING. Injectable so tests can script utterances instead of
         # synthesizing webrtcvad-passing PCM.
-        self._endpointer = (
-            endpointer
-            if endpointer is not None
-            # The floor callable is rebound at bind() time; routing through
-            # self keeps the answer window's endpointing noise-gated with
-            # whatever estimate the pipeline currently holds.
-            else Endpointer(config.audio, noise_floor=lambda: self._noise_floor())
-        )
+        self._endpointer_given = endpointer
+        self._endpointer_built: "Endpointer | None" = None
+        """Built on first use (the hub never needs one, and its module
+        pulls in the VAD library the hub need not have)."""
         self._lock = asyncio.Lock()
         self._cancelled = asyncio.Event()
         self._phase = _Phase.IDLE
@@ -148,6 +146,21 @@ class VoiceConfirmBroker:
         self._noise_floor: Callable[[], float | None] = lambda: None
         self._record: Callable[[str, str], None] | None = None
 
+    @property
+    def _endpointer(self) -> "Endpointer":
+        if self._endpointer_given is not None:
+            return self._endpointer_given
+        if self._endpointer_built is None:
+            from ciel.audio.vad import Endpointer
+
+            # The floor callable is rebound at bind() time; routing through
+            # self keeps the answer window's endpointing noise-gated with
+            # whatever estimate the pipeline currently holds.
+            self._endpointer_built = Endpointer(
+                self._config.audio, noise_floor=lambda: self._noise_floor()
+            )
+        return self._endpointer_built
+
     # ── pipeline-side wiring ─────────────────────────────────────────────────
 
     def bind(
@@ -172,6 +185,11 @@ class VoiceConfirmBroker:
         self._stt = stt
         self._tts = tts
         self._noise_floor = noise_floor
+        self._record = record
+
+    def bind_record(self, record: Callable[[str, str], None]) -> None:
+        """The hub's binding: no audio — every question here travels a
+        sink — but the transcript writer, so the exchange is recorded."""
         self._record = record
 
     def unbind(self) -> None:
@@ -259,8 +277,11 @@ class VoiceConfirmBroker:
         an unattended one: any confirm-tier tool call inside texts its
         question via ``send`` and waits for the owner's reply instead of
         speaking to a room the user is not in. ``origin`` names the lane
-        ("discord" or "web") so the pipeline can accept an answer only from
-        a lane that actually showed the question. Not a counter — remote
+        ("discord", "web", or "spoke" — the hub's voice lane, whose sink
+        speaks the question through the spoke and takes ``listen=`` to
+        know which lines expect an answer) so the pipeline can accept an
+        answer only from a lane that actually showed the question. Not a
+        counter — remote
         turns never nest (one turn slot) — but exception-safe the same
         way."""
         self._remote_send = send
@@ -417,6 +438,12 @@ class VoiceConfirmBroker:
         """
         send = self._remote_send
         assert send is not None
+        # The spoke origin is the spoken choreography carried over the
+        # wire: the question is *spoken* by the spoke and the answer is
+        # the user's voice at the machine — presence evidence, so the row
+        # keeps the spoken lane's label — and the spoke reports its own
+        # listening timeout as an empty answer, which is "no answer".
+        spoken = self._remote_origin == "spoke"
         async with self._lock:
             self._cancelled.clear()
             self._typed_answer = None  # a cancel can leave a stale one behind
@@ -424,22 +451,27 @@ class VoiceConfirmBroker:
             self._asked_at = time.monotonic()
             self._asked_at_wall = time.time()
             try:
-                if not await self._send_remote(send, question):
+                if not await self._send_remote(send, question, listen=True):
                     return False
                 attempts = 2
                 for attempt in range(attempts):
                     heard = await self._await_remote_answer()
                     if self._cancelled.is_set():
                         return False
-                    if heard is None:
+                    if heard is None or (spoken and not heard):
                         await self._send_remote(send, "No answer — skipping it.")
                         return False
-                    print(f"  you (confirm, remote): {heard}", flush=True)
+                    tag = "confirm" if spoken else "confirm, remote"
+                    print(f"  you ({tag}): {heard}", flush=True)
                     if self._record is not None:
-                        # Not "you-confirm": that row is a presence signal
-                        # (the user demonstrably *here*), and a remote
-                        # answer is evidence of exactly the opposite.
-                        self._record("you-confirm-remote", heard)
+                        # Not "you-confirm" for a text lane: that row is a
+                        # presence signal (the user demonstrably *here*),
+                        # and a remote answer is evidence of exactly the
+                        # opposite. The spoke's answer was spoken here.
+                        self._record(
+                            "you-confirm" if spoken else "you-confirm-remote",
+                            heard,
+                        )
                     verdict = yes_no(heard)
                     if verdict is True:
                         return True
@@ -447,7 +479,7 @@ class VoiceConfirmBroker:
                         await self._send_remote(send, "Okay, skipping it.")
                         return False
                     if attempt < attempts - 1:
-                        if not await self._send_remote(send, "Yes or no?"):
+                        if not await self._send_remote(send, "Yes or no?", listen=True):
                             return False
                 await self._send_remote(send, "I'll take that as a no.")
                 return False
@@ -457,17 +489,28 @@ class VoiceConfirmBroker:
                 self._asked_at_wall = None
 
     async def _send_remote(
-        self, send: Callable[[str], Awaitable[None]], text: str
+        self,
+        send: Callable[..., Awaitable[None]],
+        text: str,
+        *,
+        listen: bool = False,
     ) -> bool:
         """One line over the link, echoed and recorded like every spoken
         prompt. Returns whether it plausibly reached the user — the
         caller treats a failed *question* as unanswerable (deny) and a
-        failed closing line as cosmetic."""
-        print(f"\n  ciel (confirm, remote): {text}", flush=True)
+        failed closing line as cosmetic. ``listen`` marks a line an
+        answer is expected to; only the spoke sink is told (it must open
+        the microphone after speaking it), text lanes never needed to
+        know."""
+        tag = "confirm" if self._remote_origin == "spoke" else "confirm, remote"
+        print(f"\n  ciel ({tag}): {text}", flush=True)
         if self._record is not None:
             self._record("ciel-confirm", text)
         try:
-            await send(text)
+            if self._remote_origin == "spoke":
+                await send(text, listen=listen)
+            else:
+                await send(text)
             return True
         except Exception:  # noqa: BLE001 - a dead link means an unaskable question
             log.warning("could not text the confirmation prompt", exc_info=True)
@@ -479,7 +522,12 @@ class VoiceConfirmBroker:
         Polled like :meth:`_await_utterance`, but with nothing speech-shaped
         to extend the deadline for — a text either arrived or it didn't.
         """
-        deadline = time.monotonic() + self._config.discord.confirm_timeout_s
+        timeout = (
+            self._config.hub.confirm_timeout_s
+            if self._remote_origin == "spoke"
+            else self._config.discord.confirm_timeout_s
+        )
+        deadline = time.monotonic() + timeout
         while True:
             if self._typed_answer is not None:
                 answer, self._typed_answer = self._typed_answer, None

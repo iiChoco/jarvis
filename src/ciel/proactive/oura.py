@@ -34,6 +34,7 @@ from ciel.oura import (
     by_day,
     hours_minutes,
     main_sleep_by_day,
+    today_readings,
     weakest_contributor,
 )
 from ciel.proactive.events import EventQueue, ProactiveEvent
@@ -157,9 +158,15 @@ def activity_nudge(
 class OuraWatcher:
     """Polls today's ring summaries and nudges the queue on low scores."""
 
-    def __init__(self, config: "OuraConfig", queue: EventQueue) -> None:
+    def __init__(
+        self, config: "OuraConfig", queue: EventQueue, world: Any | None = None
+    ) -> None:
         self._config = config
         self._queue = queue
+        self._world = world
+        """The world table (``world.py``): every scan leaves the day's
+        numbers there, so "how did I sleep" can be answered from the
+        opening block of a turn without a fetch."""
         auth = build_auth(config)
         self._client: OuraClient | None = OuraClient(auth) if auth is not None else None
         self._task: asyncio.Task[None] | None = None
@@ -207,6 +214,10 @@ class OuraWatcher:
         now = time.time()
         today = datetime.date.fromtimestamp(now)
         events: list[ProactiveEvent] = []
+        readiness: list[dict[str, Any]] = []
+        sleep: list[dict[str, Any]] = []
+        sessions: list[dict[str, Any]] = []
+        activity: list[dict[str, Any]] = []
         if cfg.low_readiness > 0 or cfg.low_sleep > 0:
             readiness = self._client.daily_readiness(today, today) if cfg.low_readiness > 0 else []
             sleep = self._client.daily_sleep(today, today) if cfg.low_sleep > 0 else []
@@ -227,6 +238,10 @@ class OuraWatcher:
                 )
                 if event is not None:
                     events.append(event)
+        if self._world is not None:
+            readings = today_readings(today.isoformat(), readiness, sleep, activity, sessions)
+            if len(readings) > 1:  # more than the day itself
+                self._world.observe("oura", readings, source="oura", observed_at=now)
         return events
 
 

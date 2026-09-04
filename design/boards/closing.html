@@ -1,0 +1,645 @@
+<!doctype html>
+<!-- Ciel Interview · the closing screen. Three variants of the wait between
+     END INTERVIEW and the debrief, drawn on the Instrument (see
+     src/ciel/remote/interview.html). Shared vocabulary (.cap .chip .said
+     .progress .aperture .btn) is copied verbatim from the room; everything
+     new is prefixed .cl-. Static artboards: no JS, progress pinned at 62%. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ciel · closing screen · a / b / c</title>
+<style>
+  :root {
+    --line: rgba(140, 240, 255, .14);
+    --line-strong: rgba(140, 240, 255, .22);
+    --glass-border: rgba(160, 240, 255, .28);
+    --cyan: #a0f0ff;
+    --cyan-text: #c7f4fd;
+    --cyan-dim: rgba(160, 214, 235, .42);
+    --text: #dfe6e6;
+    --text-bright: #f7f2e7;
+    --text-dim: rgba(223, 230, 230, .65);
+    --text-faint: rgba(223, 230, 230, .34);
+    --gold: #e8c98a;
+    --gold-bright: #fdf5e5;
+    --gold-soft: #f0dbaf;
+    --gold-dim: rgba(232, 201, 138, .45);
+    --gold-line: rgba(232, 201, 138, .16);
+    --gold-rule: rgba(232, 201, 138, .5);
+    --green: #7adea8;
+    --green-text: #a6ecc7;
+    --rec: #e88a8a;
+    --serif: Georgia, "Times New Roman", serif;
+    --mono: ui-monospace, Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+    --st-ended: #8fa8b3;
+    --cut9: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
+    --cut8: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
+    --cut7: polygon(0 0, calc(100% - 7px) 0, 100% 7px, 100% 100%, 7px 100%, 0 calc(100% - 7px));
+    --cut12: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+  }
+  * { box-sizing: border-box; margin: 0; }
+  button { background: none; border: none; cursor: pointer; padding: 0; font: inherit; color: inherit; }
+
+  @keyframes br { 0%, 100% { opacity: .45; transform: scale(.88); } 50% { opacity: 1; transform: scale(1.08); } }
+  @keyframes ap1 { 0%, 100% { transform: scale(1); opacity: .55; } 50% { transform: scale(1.18); opacity: .95; } }
+  @keyframes ap2 { 0%, 100% { transform: scale(1); opacity: .5; } 40% { transform: scale(1.32); opacity: .9; } }
+  @keyframes ap3 { 0%, 100% { transform: scale(1); opacity: .35; } 60% { transform: scale(1.5); opacity: .7; } }
+
+  /* ── the canvas the artboards sit on ─────────────────────────────────── */
+  body { background: #15181b; color: #9aa3a8; font: 13px/1.5 var(--sans); padding: 56px 48px 96px; display: flex; flex-direction: column; gap: 72px; }
+  .art { display: flex; flex-direction: column; gap: 16px; }
+  .art h2 { font: 500 14px/1 var(--sans); color: #d3d9dd; letter-spacing: .01em; display: flex; align-items: baseline; gap: 14px; }
+  .art h2 small { font: 400 11px/1 var(--mono); color: #6d777d; letter-spacing: .04em; }
+  .art p { max-width: 720px; color: #7f898f; font-size: 12.5px; }
+  .art .row { display: flex; gap: 40px; align-items: flex-start; flex-wrap: wrap; }
+  .art .row .sub { display: flex; flex-direction: column; gap: 10px; }
+  .art .row .sub h3 { font: 400 11px/1 var(--mono); color: #6d777d; letter-spacing: .04em; }
+
+  /* the frame: a fixed-size slice of the room */
+  .board { position: relative; overflow: hidden; flex: none; display: flex; flex-direction: column;
+           background: radial-gradient(120% 85% at 50% -10%, #0b1922 0%, #050c11 55%, #030608 100%) #030608;
+           color: var(--text); font: 14.5px/1.55 var(--sans);
+           box-shadow: 0 30px 80px rgba(0, 0, 0, .6), 0 0 0 1px rgba(255, 255, 255, .06); }
+  .board.desk { width: 1200px; height: 800px; }
+  .board.phone { width: 375px; height: 700px; }
+  .board.detail { width: 560px; height: 340px; }
+
+  /* the projection */
+  .board .scan { position: absolute; inset: 0; z-index: 50; pointer-events: none; opacity: .3;
+                 background: repeating-linear-gradient(180deg, rgba(160, 240, 255, .05) 0 1px, transparent 1px 3px); }
+  .corner { position: absolute; z-index: 51; width: 13px; height: 13px; pointer-events: none; }
+  .corner.tl { top: 10px; left: 10px; border-left: 1px solid rgba(232, 201, 138, .6); border-top: 1px solid rgba(232, 201, 138, .6); }
+  .corner.tr { top: 10px; right: 10px; border-right: 1px solid rgba(232, 201, 138, .6); border-top: 1px solid rgba(232, 201, 138, .6); }
+  .corner.bl { bottom: 10px; left: 10px; border-left: 1px solid rgba(232, 201, 138, .35); border-bottom: 1px solid rgba(232, 201, 138, .35); }
+  .corner.br { bottom: 10px; right: 10px; border-right: 1px solid rgba(232, 201, 138, .35); border-bottom: 1px solid rgba(232, 201, 138, .35); }
+
+  /* ── vocabulary, verbatim from the room ──────────────────────────────── */
+  .cap { font: 500 9.5px/1 var(--mono); letter-spacing: .26em; text-transform: uppercase; color: var(--gold-dim); display: flex; align-items: center; gap: 12px; }
+  .cap .rule { flex: 1; height: 1px; background: var(--gold-line); }
+  .cap.cyan { color: var(--cyan-dim); }
+  .cap.cyan .rule { background: var(--line); }
+  .lbl { font: 500 9.5px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--text-faint); }
+  .said { border-left: 1px solid var(--gold-rule); padding-left: 22px; font: 400 30px/1.4 var(--serif); color: var(--text-bright); text-wrap: pretty; }
+  .chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border: 1px solid var(--line-strong);
+          clip-path: var(--cut8); font: 600 10px/1 var(--mono); letter-spacing: .2em; text-transform: uppercase;
+          color: var(--text-dim); white-space: nowrap; text-decoration: none; background: none; font-variant-numeric: tabular-nums; }
+  .chip.gold { border-color: rgba(232, 201, 138, .4); color: var(--gold); }
+  .chip .faint { color: var(--text-faint); }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 16px; border: 1px solid var(--line-strong);
+         clip-path: var(--cut9); font: 600 10px/1 var(--mono); letter-spacing: .22em; text-transform: uppercase; color: var(--text-dim); white-space: nowrap; }
+  .btn.primary { padding: 16px 34px; font-weight: 700; font-size: 11px; background: rgba(232, 201, 138, .92); color: #231b0c; border: none; }
+  .btn.gold { border-color: rgba(232, 201, 138, .55); color: var(--gold); }
+  .btn.small { padding: 6px 10px; font-size: 9px; letter-spacing: .18em; clip-path: var(--cut7); }
+  .btn.primary.small { padding: 10px 18px; font-size: 10px; }
+  .hint { font: 400 11px/1.5 var(--mono); color: var(--text-faint); }
+
+  .aperture { overflow: visible; }
+  .aperture circle { transform-box: fill-box; transform-origin: center; }
+  .aperture .c-outer { stroke: rgba(232, 201, 138, .35); }
+  .aperture .c-mid { stroke: rgba(160, 240, 255, .5); }
+  .aperture .c-core { fill: rgba(232, 201, 138, .85); }
+
+  .progress { display: flex; flex-direction: column; gap: 10px; }
+  .progress .bar { position: relative; height: 1px; background: rgba(232, 201, 138, .18); overflow: visible; }
+  .progress .fill { position: absolute; left: 0; top: 0; height: 1px; width: 0; background: var(--gold); box-shadow: 0 0 8px rgba(232, 201, 138, .6); transition: width .4s ease; }
+  .progress .head { position: absolute; top: -4px; width: 9px; height: 9px; margin-left: -5px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 12px var(--gold); transition: left .4s ease; }
+  .progress .line { display: flex; align-items: center; justify-content: space-between; gap: 12px; font: 500 9.5px/1 var(--mono); letter-spacing: .22em; text-transform: uppercase; color: var(--gold-soft); }
+  .progress .line .pct { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+  .progress .line .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 9px var(--gold); animation: br 1.4s ease-in-out infinite; margin-right: 8px; }
+  .progress .line .what { display: inline-flex; align-items: center; }
+  /* the boards are still: the estimate is pinned */
+  .progress[data-p="62"] .fill { width: 62%; }
+  .progress[data-p="62"] .head { left: 62%; }
+
+  /* header, as the live room leaves it */
+  header { display: flex; align-items: center; gap: 14px; padding: 14px 28px; border-bottom: 1px solid var(--line); flex: none; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand .wordmark { font: 400 18px/1 var(--serif); letter-spacing: .24em; color: #f3efe6; }
+  .brand .sub { font: 500 9.5px/1 var(--mono); letter-spacing: .26em; color: rgba(160, 214, 235, .5); }
+  .spacer { flex: 1; }
+
+  /* ── the closing screen ──────────────────────────────────────────────── */
+  /* the state chip, settled to "ended" */
+  .cl-state { display: inline-flex; align-items: center; gap: 8px; padding: 6px 13px 6px 10px; border: 1px solid rgba(143, 168, 179, .42);
+              background: rgba(143, 168, 179, .1); clip-path: var(--cut8); font: 600 10px/1 var(--mono); letter-spacing: .22em;
+              text-transform: uppercase; color: #b6c6cd; white-space: nowrap; }
+  .cl-state .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--st-ended); }
+
+  .cl-stage { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 48px; min-height: 0; }
+  .cl-inner { width: 100%; max-width: 640px; display: flex; flex-direction: column; gap: 28px; }
+
+  /* the aperture, breathing slowly: the room's keyframes at a resting pace */
+  .cl-breathe .c-outer { animation: ap3 6.6s ease-in-out infinite; }
+  .cl-breathe .c-mid { animation: ap2 5.1s ease-in-out infinite; }
+  .cl-breathe .c-core { animation: ap1 3.3s ease-in-out infinite; }
+
+  /* the recording, no longer blinking */
+  .cl-rec { display: flex; align-items: center; gap: 10px; font: 500 10px/1 var(--mono); letter-spacing: .22em; text-transform: uppercase; color: var(--text-faint); }
+  .cl-rec .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--rec); opacity: .7; flex: none; }
+  .cl-rec .sep { color: rgba(223, 230, 230, .2); }
+
+  /* a — the held breath */
+  .cl-a .cl-inner { align-items: center; text-align: center; max-width: 620px; gap: 32px; }
+  .cl-a .cl-mark { width: 88px; height: 88px; }
+  .cl-quote { font: 400 24px/1.45 var(--serif); color: rgba(247, 242, 231, .78); text-wrap: pretty; max-width: 560px; }
+  .cl-quote::before { content: "\201C"; color: var(--gold-dim); }
+  .cl-quote::after { content: "\201D"; color: var(--gold-dim); }
+  .cl-by { display: block; margin-top: 12px; font: 500 9.5px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--text-faint); }
+  .cl-a .cap { justify-content: center; }
+  .cl-a .progress { width: 420px; }
+  .cl-facts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+
+  /* b — the ledger closes */
+  .cl-b .cl-inner { max-width: 760px; gap: 26px; }
+  .cl-ledger { display: flex; flex-direction: column; gap: 14px; }
+  .cl-row { display: grid; grid-template-columns: 50px 1fr; gap: 14px; }
+  .cl-row .t { font: 400 11px/1.7 var(--mono); color: var(--text-faint); }
+  .cl-row[data-speaker="interviewer"] .x { border-left: 1px solid var(--gold-rule); padding-left: 14px; font: 400 15px/1.55 var(--serif); color: var(--text-bright); text-wrap: pretty; }
+  .cl-row[data-speaker="candidate"] .x { padding-left: 14px; font: 400 14.5px/1.55 var(--sans); color: var(--text-dim); text-wrap: pretty; }
+  .cl-row[data-speaker="event"] .x { padding-left: 14px; font: 400 10px/1.7 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--text-faint); }
+  /* the transcript closing: rows dim upward, the last line stays lit */
+  .cl-ledger .cl-row:nth-last-child(5) { opacity: .1; }
+  .cl-ledger .cl-row:nth-last-child(4) { opacity: .2; }
+  .cl-ledger .cl-row:nth-last-child(3) { opacity: .34; }
+  .cl-ledger .cl-row:nth-last-child(2) { opacity: .55; }
+  .cl-seal { color: var(--gold-soft); }
+  .cl-seal .rule { background: var(--gold-rule); }
+  .cl-status { display: grid; grid-template-columns: 112px 1fr; gap: 28px; align-items: center; }
+  .cl-score { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; height: 88px;
+              border: 1px dashed rgba(232, 201, 138, .45); clip-path: var(--cut9); }
+  .cl-score b { font: 400 34px/1 var(--mono); color: var(--gold-dim); font-variant-numeric: tabular-nums; }
+  .cl-score span { font: 500 8.5px/1 var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--text-faint); }
+  .cl-tracks { display: flex; flex-direction: column; gap: 16px; }
+  .cl-track { display: grid; grid-template-columns: 90px 1fr 28px; gap: 14px; align-items: center; }
+  .cl-track .bar { height: 1px; background: rgba(232, 201, 138, .18); }
+  .cl-track .v { font: 400 11px/1 var(--mono); color: var(--text-faint); text-align: right; }
+  .cl-b .cl-foot { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+
+  /* c — the note card */
+  .cl-c .cl-inner { max-width: 540px; gap: 18px; align-items: center; }
+  .cl-card { width: 100%; background: linear-gradient(180deg, rgba(160, 240, 255, .1), rgba(160, 240, 255, .03)); border: 1px solid var(--glass-border);
+             clip-path: var(--cut12); padding: 22px 24px 24px; display: flex; flex-direction: column; gap: 20px; box-shadow: 0 0 40px rgba(160, 240, 255, .08); }
+  .cl-card .head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .cl-card .head .k { font: 600 9.5px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--cyan-text); }
+  .cl-card .head .meta { font: 400 10px/1 var(--mono); color: var(--text-faint); letter-spacing: .08em; white-space: nowrap; }
+  .cl-card .title { font: 400 16px/1.3 var(--serif); color: var(--text-bright); margin-top: -10px; }
+  .cl-who { display: flex; align-items: center; gap: 12px; }
+  .cl-who .aperture { width: 30px; height: 30px; flex: none; }
+  .cl-who .name { font: 400 16px/1.2 var(--serif); color: var(--text-bright); }
+  .cl-who .role { display: block; margin-top: 4px; font: 500 9px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--text-faint); }
+  .cl-voice { border-left: 1px solid var(--gold-rule); padding-left: 18px; font: 400 22px/1.45 var(--serif); color: var(--text-bright); text-wrap: pretty; }
+  .cl-card .sep { height: 1px; background: var(--line); }
+  .cl-leave { display: flex; align-items: center; justify-content: space-between; gap: 14px; font: 400 11px/1.5 var(--mono); color: var(--text-faint); }
+  .cl-leave .btn { flex: none; }
+
+  /* the failure state: same bones, the gold stops moving. red stays REC's. */
+  .progress.failed .fill { opacity: .35; box-shadow: none; }
+  .progress.failed .head { opacity: .4; box-shadow: none; }
+  .progress.failed .line { text-transform: none; letter-spacing: .04em; font: 400 11.5px/1.5 var(--mono); color: var(--text-dim); }
+  .progress.failed .line .what { align-items: flex-start; }
+  .progress.failed .line .dot { background: none; border: 1px solid var(--gold-dim); box-shadow: none; animation: none; flex: none; margin-top: 5px; }
+  .cl-acts { display: flex; align-items: center; gap: 10px; }
+  .board.detail .cl-stage { padding: 30px 36px; }
+  .board.detail .cl-inner { gap: 22px; }
+  .board.detail .cl-a .cl-mark { width: 56px; height: 56px; }
+  .board.detail .cl-a .cl-mark .c-core { fill: var(--gold-dim); }
+  .board.detail .cl-a .progress { width: 100%; }
+  .board.detail .cl-b .cl-status { grid-template-columns: 96px 1fr; }
+  .board.detail .cl-b .cl-score { height: 72px; }
+  .board.detail .cl-b .cl-score b { font-size: 28px; }
+  .board.detail .cl-card { padding: 18px 20px 20px; gap: 16px; }
+  .board.detail .cl-voice { font-size: 19px; }
+
+  /* ── phone ───────────────────────────────────────────────────────────── */
+  .board.phone .corner { display: none; }
+  .board.phone header { padding: 10px 14px; gap: 8px; }
+  .board.phone .brand .sub { display: none; }
+  .board.phone .chip { padding: 6px 9px; font-size: 8.5px; letter-spacing: .16em; }
+  .board.phone .cl-stage { padding: 26px 18px 22px; }
+  .board.phone .cl-inner { gap: 22px; }
+  .board.phone .cl-a .cl-inner { gap: 26px; }
+  .board.phone .cl-a .cl-mark { width: 72px; height: 72px; }
+  .board.phone .cl-quote { font-size: 19px; }
+  .board.phone .cl-a .progress { width: 100%; }
+  .board.phone .cl-a .cap { text-align: center; line-height: 1.6; }
+  .board.phone .cl-ledger { gap: 12px; }
+  .board.phone .cl-ledger .cl-row:nth-last-child(5) { display: none; }
+  .board.phone .cl-row { grid-template-columns: 40px 1fr; gap: 10px; }
+  .board.phone .cl-row .t { font-size: 10px; }
+  .board.phone .cl-row[data-speaker="interviewer"] .x { font-size: 14px; }
+  .board.phone .cl-row[data-speaker="candidate"] .x { font-size: 13px; }
+  .board.phone .cl-status { grid-template-columns: 92px 1fr; gap: 18px; }
+  .board.phone .cl-score { height: 76px; }
+  .board.phone .cl-score b { font-size: 28px; }
+  .board.phone .cl-track { grid-template-columns: 70px 1fr 20px; gap: 10px; }
+  .board.phone .cl-b .cl-foot { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .board.phone .cl-card { padding: 18px 16px 20px; gap: 16px; }
+  .board.phone .cl-card .head { flex-direction: column; gap: 8px; }
+  .board.phone .cl-card .title { margin-top: 0; }
+  .board.phone .cl-voice { font-size: 19px; }
+  .board.phone .cl-leave { flex-direction: column; align-items: flex-start; }
+</style>
+</head>
+<body>
+
+<!-- ═══ a — the held breath ═══════════════════════════════════════════════ -->
+<section class="art">
+  <h2>a — the held breath <small>1200 × 800 · 375 × 700 · failure 560 × 340</small></h2>
+  <p>Centred and spare. The aperture breathes at a resting pace; the interviewer's last line hangs as a quiet quote; one caption, one hairline, the facts as chips, and the REC dot gone still.</p>
+
+  <div class="board desk">
+    <div class="scan"></div>
+    <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+    <header>
+      <div class="brand">
+        <svg class="aperture" width="26" height="26" viewBox="0 0 128 128" aria-hidden="true">
+          <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="5" stroke-dasharray="4 12"/>
+          <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="5"/>
+          <circle class="c-core" cx="64" cy="64" r="10"/>
+        </svg>
+        <span class="wordmark">Ciel</span>
+        <span class="sub">INTERVIEW</span>
+      </div>
+      <span class="cl-state"><span class="dot"></span>ended</span>
+      <span class="spacer"></span>
+      <span class="chip">choco</span>
+    </header>
+
+    <section class="cl-stage cl-a">
+      <div class="cl-inner">
+        <svg class="aperture cl-mark cl-breathe" viewBox="0 0 128 128" aria-hidden="true">
+          <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="3" stroke-dasharray="4 12"/>
+          <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="3"/>
+          <circle class="c-core" cx="64" cy="64" r="10"/>
+        </svg>
+
+        <blockquote class="cl-quote">Thanks for your time today — that's the end of our conversation.<cite class="cl-by">Maya Oduya</cite></blockquote>
+
+        <div class="cap">the interview is over · writing your debrief</div>
+
+        <div class="progress" data-p="62">
+          <div class="bar"><div class="fill"></div><div class="head"></div></div>
+          <div class="line"><span class="what"><span class="dot"></span>weighing each answer…</span><span class="pct">62%</span></div>
+        </div>
+
+        <div class="cl-facts">
+          <span class="chip">Ledgerline · Product Manager, Reconcile</span>
+          <span class="chip gold">company</span>
+          <span class="chip">27:14</span>
+          <span class="chip">Q 8</span>
+        </div>
+
+        <div class="cl-rec"><span class="dot"></span>REC<span class="sep">·</span>saved</div>
+      </div>
+    </section>
+  </div>
+
+  <div class="row">
+    <div class="sub">
+      <h3>phone · 375 × 700</h3>
+      <div class="board phone">
+        <div class="scan"></div>
+        <header>
+          <div class="brand">
+            <svg class="aperture" width="26" height="26" viewBox="0 0 128 128" aria-hidden="true">
+              <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="5" stroke-dasharray="4 12"/>
+              <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="5"/>
+              <circle class="c-core" cx="64" cy="64" r="10"/>
+            </svg>
+            <span class="wordmark">Ciel</span>
+          </div>
+          <span class="cl-state"><span class="dot"></span>ended</span>
+          <span class="spacer"></span>
+          <span class="chip">choco</span>
+        </header>
+        <section class="cl-stage cl-a">
+          <div class="cl-inner">
+            <svg class="aperture cl-mark cl-breathe" viewBox="0 0 128 128" aria-hidden="true">
+              <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="3" stroke-dasharray="4 12"/>
+              <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="3"/>
+              <circle class="c-core" cx="64" cy="64" r="10"/>
+            </svg>
+            <blockquote class="cl-quote">Thanks for your time today — that's the end of our conversation.<cite class="cl-by">Maya Oduya</cite></blockquote>
+            <div class="cap">the interview is over · writing your debrief</div>
+            <div class="progress" data-p="62">
+              <div class="bar"><div class="fill"></div><div class="head"></div></div>
+              <div class="line"><span class="what"><span class="dot"></span>weighing each answer…</span><span class="pct">62%</span></div>
+            </div>
+            <div class="cl-facts">
+              <span class="chip">Ledgerline · PM, Reconcile</span>
+              <span class="chip gold">company</span>
+              <span class="chip">27:14</span>
+              <span class="chip">Q 8</span>
+            </div>
+            <div class="cl-rec"><span class="dot"></span>REC<span class="sep">·</span>saved</div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div class="sub">
+      <h3>failure state · 560 × 340</h3>
+      <div class="board detail">
+        <div class="scan"></div>
+        <section class="cl-stage cl-a">
+          <div class="cl-inner">
+            <svg class="aperture cl-mark" viewBox="0 0 128 128" aria-hidden="true">
+              <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="3" stroke-dasharray="4 12"/>
+              <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="3"/>
+              <circle class="c-core" cx="64" cy="64" r="10"/>
+            </svg>
+            <div class="cap">the interview is over</div>
+            <div class="progress failed" data-p="62">
+              <div class="bar"><div class="fill"></div><div class="head"></div></div>
+              <div class="line"><span class="what"><span class="dot"></span>the debrief could not be written — your transcript and recording are saved</span></div>
+            </div>
+            <div class="cl-acts">
+              <button class="btn gold small">open transcript</button>
+              <button class="btn primary small">back to lobby</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ b — the ledger closes ═════════════════════════════════════════════ -->
+<section class="art">
+  <h2>b — the ledger closes <small>1200 × 800 · 375 × 700 · failure 560 × 340</small></h2>
+  <p>The transcript's last rows fade upward and the final line stays lit; a gold rule seals it; beneath, the debrief's outline waits empty — a dashed score tile and three bare tracks.</p>
+
+  <div class="board desk">
+    <div class="scan"></div>
+    <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+    <header>
+      <div class="brand">
+        <svg class="aperture" width="26" height="26" viewBox="0 0 128 128" aria-hidden="true">
+          <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="5" stroke-dasharray="4 12"/>
+          <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="5"/>
+          <circle class="c-core" cx="64" cy="64" r="10"/>
+        </svg>
+        <span class="wordmark">Ciel</span>
+        <span class="sub">INTERVIEW</span>
+      </div>
+      <span class="cl-state"><span class="dot"></span>ended</span>
+      <span class="chip gold">company</span>
+      <span class="spacer"></span>
+      <span class="chip">27:14</span>
+      <span class="chip">Q 8</span>
+      <span class="chip">choco</span>
+    </header>
+
+    <section class="cl-stage cl-b">
+      <div class="cl-inner">
+        <div class="cl-ledger">
+          <div class="cl-row" data-speaker="candidate"><span class="t">26:02</span><span class="x">…so I'd reconcile at the source, not in the report — if the export is wrong, every downstream view inherits it.</span></div>
+          <div class="cl-row" data-speaker="interviewer"><span class="t">26:31</span><span class="x">And how would you know it worked?</span></div>
+          <div class="cl-row" data-speaker="candidate"><span class="t">26:38</span><span class="x">Two things: the unmatched count drops week over week, and finance stops opening tickets about it. The second is the one I'd actually watch.</span></div>
+          <div class="cl-row" data-speaker="event"><span class="t">27:02</span><span class="x">end interview · candidate</span></div>
+          <div class="cl-row" data-speaker="interviewer"><span class="t">27:09</span><span class="x">Thanks for your time today — that's the end of our conversation.</span></div>
+        </div>
+
+        <div class="cap cl-seal"><span class="rule"></span>Ledgerline · Product Manager, Reconcile · 27:14 · 8 questions<span class="rule"></span></div>
+
+        <div class="cl-status">
+          <div class="cl-score"><b>—</b><span>score</span></div>
+          <div class="cl-tracks">
+            <div class="cl-track"><span class="lbl">structure</span><span class="bar"></span><span class="v">—</span></div>
+            <div class="cl-track"><span class="lbl">clarity</span><span class="bar"></span><span class="v">—</span></div>
+            <div class="cl-track"><span class="lbl">depth</span><span class="bar"></span><span class="v">—</span></div>
+          </div>
+        </div>
+
+        <div class="progress" data-p="62">
+          <div class="bar"><div class="fill"></div><div class="head"></div></div>
+          <div class="line"><span class="what"><span class="dot"></span>weighing each answer…</span><span class="pct">62%</span></div>
+        </div>
+
+        <div class="cl-foot">
+          <span class="hint">Maya Oduya is writing your debrief · 15–40 seconds</span>
+          <div class="cl-rec"><span class="dot"></span>REC<span class="sep">·</span>saved</div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="row">
+    <div class="sub">
+      <h3>phone · 375 × 700</h3>
+      <div class="board phone">
+        <div class="scan"></div>
+        <header>
+          <div class="brand">
+            <svg class="aperture" width="26" height="26" viewBox="0 0 128 128" aria-hidden="true">
+              <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="5" stroke-dasharray="4 12"/>
+              <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="5"/>
+              <circle class="c-core" cx="64" cy="64" r="10"/>
+            </svg>
+            <span class="wordmark">Ciel</span>
+          </div>
+          <span class="cl-state"><span class="dot"></span>ended</span>
+          <span class="spacer"></span>
+          <span class="chip">27:14</span>
+          <span class="chip">Q 8</span>
+        </header>
+        <section class="cl-stage cl-b">
+          <div class="cl-inner">
+            <div class="cl-ledger">
+              <div class="cl-row" data-speaker="candidate"><span class="t">26:02</span><span class="x">…so I'd reconcile at the source, not in the report — if the export is wrong, every downstream view inherits it.</span></div>
+              <div class="cl-row" data-speaker="interviewer"><span class="t">26:31</span><span class="x">And how would you know it worked?</span></div>
+              <div class="cl-row" data-speaker="candidate"><span class="t">26:38</span><span class="x">Two things: the unmatched count drops week over week, and finance stops opening tickets about it.</span></div>
+              <div class="cl-row" data-speaker="event"><span class="t">27:02</span><span class="x">end interview · candidate</span></div>
+              <div class="cl-row" data-speaker="interviewer"><span class="t">27:09</span><span class="x">Thanks for your time today — that's the end of our conversation.</span></div>
+            </div>
+            <div class="cap cl-seal"><span class="rule"></span>company · 27:14 · 8 questions<span class="rule"></span></div>
+            <div class="cl-status">
+              <div class="cl-score"><b>—</b><span>score</span></div>
+              <div class="cl-tracks">
+                <div class="cl-track"><span class="lbl">structure</span><span class="bar"></span><span class="v">—</span></div>
+                <div class="cl-track"><span class="lbl">clarity</span><span class="bar"></span><span class="v">—</span></div>
+                <div class="cl-track"><span class="lbl">depth</span><span class="bar"></span><span class="v">—</span></div>
+              </div>
+            </div>
+            <div class="progress" data-p="62">
+              <div class="bar"><div class="fill"></div><div class="head"></div></div>
+              <div class="line"><span class="what"><span class="dot"></span>weighing each answer…</span><span class="pct">62%</span></div>
+            </div>
+            <div class="cl-foot">
+              <span class="hint">Maya Oduya is writing your debrief</span>
+              <div class="cl-rec"><span class="dot"></span>REC<span class="sep">·</span>saved</div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div class="sub">
+      <h3>failure state · 560 × 340</h3>
+      <div class="board detail">
+        <div class="scan"></div>
+        <section class="cl-stage cl-b">
+          <div class="cl-inner">
+            <div class="cl-status">
+              <div class="cl-score"><b>—</b><span>score</span></div>
+              <div class="cl-tracks">
+                <div class="cl-track"><span class="lbl">structure</span><span class="bar"></span><span class="v">—</span></div>
+                <div class="cl-track"><span class="lbl">clarity</span><span class="bar"></span><span class="v">—</span></div>
+                <div class="cl-track"><span class="lbl">depth</span><span class="bar"></span><span class="v">—</span></div>
+              </div>
+            </div>
+            <div class="progress failed" data-p="62">
+              <div class="bar"><div class="fill"></div><div class="head"></div></div>
+              <div class="line"><span class="what"><span class="dot"></span>the debrief could not be written — your transcript and recording are saved</span></div>
+            </div>
+            <div class="cl-foot">
+              <div class="cl-acts">
+                <button class="btn gold small">open transcript</button>
+                <button class="btn primary small">back to lobby</button>
+              </div>
+              <div class="cl-rec"><span class="dot"></span>REC<span class="sep">·</span>saved</div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ c — the note card ═════════════════════════════════════════════════ -->
+<section class="art">
+  <h2>c — the note card <small>1200 × 800 · 375 × 700 · failure 560 × 340</small></h2>
+  <p>One glass exhibit card, centred. Cyan mono heads it, the interviewer speaks in serif, the hairline runs beneath, and a small note says you may leave — the debrief will find you in the lobby.</p>
+
+  <div class="board desk">
+    <div class="scan"></div>
+    <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+    <header>
+      <div class="brand">
+        <svg class="aperture" width="26" height="26" viewBox="0 0 128 128" aria-hidden="true">
+          <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="5" stroke-dasharray="4 12"/>
+          <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="5"/>
+          <circle class="c-core" cx="64" cy="64" r="10"/>
+        </svg>
+        <span class="wordmark">Ciel</span>
+        <span class="sub">INTERVIEW</span>
+      </div>
+      <span class="cl-state"><span class="dot"></span>ended</span>
+      <span class="spacer"></span>
+      <span class="chip">choco</span>
+    </header>
+
+    <section class="cl-stage cl-c">
+      <div class="cl-inner">
+        <article class="cl-card">
+          <div class="head"><span class="k">debrief · in progress</span><span class="meta">company · 27:14 · 8 questions</span></div>
+          <div class="title">Ledgerline · Product Manager, Reconcile</div>
+
+          <div class="cl-who">
+            <svg class="aperture cl-breathe" viewBox="0 0 128 128" aria-hidden="true">
+              <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="5" stroke-dasharray="4 12"/>
+              <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="5"/>
+              <circle class="c-core" cx="64" cy="64" r="10"/>
+            </svg>
+            <div><span class="name">Maya Oduya</span><span class="role">interviewer</span></div>
+          </div>
+
+          <p class="cl-voice">Give me a moment, I'm writing up what I heard.</p>
+
+          <div class="progress" data-p="62">
+            <div class="bar"><div class="fill"></div><div class="head"></div></div>
+            <div class="line"><span class="what"><span class="dot"></span>weighing each answer…</span><span class="pct">62%</span></div>
+          </div>
+
+          <div class="sep"></div>
+
+          <div class="cl-leave">
+            <span>you can leave this page — the debrief will be in your lobby</span>
+            <button class="btn small">← lobby</button>
+          </div>
+        </article>
+
+        <div class="cl-rec"><span class="dot"></span>REC<span class="sep">·</span>saved</div>
+      </div>
+    </section>
+  </div>
+
+  <div class="row">
+    <div class="sub">
+      <h3>phone · 375 × 700</h3>
+      <div class="board phone">
+        <div class="scan"></div>
+        <header>
+          <div class="brand">
+            <svg class="aperture" width="26" height="26" viewBox="0 0 128 128" aria-hidden="true">
+              <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="5" stroke-dasharray="4 12"/>
+              <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="5"/>
+              <circle class="c-core" cx="64" cy="64" r="10"/>
+            </svg>
+            <span class="wordmark">Ciel</span>
+          </div>
+          <span class="cl-state"><span class="dot"></span>ended</span>
+          <span class="spacer"></span>
+          <span class="chip">choco</span>
+        </header>
+        <section class="cl-stage cl-c">
+          <div class="cl-inner">
+            <article class="cl-card">
+              <div class="head"><span class="k">debrief · in progress</span><span class="meta">company · 27:14 · 8 questions</span></div>
+              <div class="title">Ledgerline · Product Manager, Reconcile</div>
+              <div class="cl-who">
+                <svg class="aperture cl-breathe" viewBox="0 0 128 128" aria-hidden="true">
+                  <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="5" stroke-dasharray="4 12"/>
+                  <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="5"/>
+                  <circle class="c-core" cx="64" cy="64" r="10"/>
+                </svg>
+                <div><span class="name">Maya Oduya</span><span class="role">interviewer</span></div>
+              </div>
+              <p class="cl-voice">Give me a moment, I'm writing up what I heard.</p>
+              <div class="progress" data-p="62">
+                <div class="bar"><div class="fill"></div><div class="head"></div></div>
+                <div class="line"><span class="what"><span class="dot"></span>weighing each answer…</span><span class="pct">62%</span></div>
+              </div>
+              <div class="sep"></div>
+              <div class="cl-leave">
+                <span>you can leave this page — the debrief will be in your lobby</span>
+                <button class="btn small">← lobby</button>
+              </div>
+            </article>
+            <div class="cl-rec"><span class="dot"></span>REC<span class="sep">·</span>saved</div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div class="sub">
+      <h3>failure state · 560 × 340</h3>
+      <div class="board detail">
+        <div class="scan"></div>
+        <section class="cl-stage cl-c">
+          <div class="cl-inner">
+            <article class="cl-card">
+              <div class="head"><span class="k">debrief · not written</span><span class="meta">company · 27:14 · 8 questions</span></div>
+              <p class="cl-voice">I couldn't finish the debrief — but I kept everything we said.</p>
+              <div class="progress failed" data-p="62">
+                <div class="bar"><div class="fill"></div><div class="head"></div></div>
+                <div class="line"><span class="what"><span class="dot"></span>the debrief could not be written — your transcript and recording are saved</span></div>
+              </div>
+              <div class="cl-leave">
+                <div class="cl-acts">
+                  <button class="btn gold small">open transcript</button>
+                  <button class="btn primary small">back to lobby</button>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

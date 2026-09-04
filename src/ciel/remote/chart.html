@@ -124,6 +124,13 @@
   #mute:hover { border-color: rgba(140, 240, 255, .45); color: var(--text); }
   body.muted #mute { background: rgba(143, 168, 179, .12); border-color: rgba(143, 168, 179, .45); color: #b6c6cd; }
 
+  /* the restart chip: quiet until armed, gold while it wants a second click */
+  #restart:hover { border-color: rgba(232, 201, 138, .5); color: var(--gold); }
+  #restart.arming { background: rgba(232, 201, 138, .12); border-color: rgba(232, 201, 138, .6); color: #f0dbaf; }
+
+  /* visually hidden, read aloud: the armed state must reach ears too */
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
   #agentsbar {
     display: none;
     border-bottom: 1px solid rgba(184, 155, 232, .22);
@@ -165,6 +172,32 @@
   .agent.timer .meta { font-size: 15px; color: #c7f4fd; }
   .agent.alarm .meta { color: rgba(182, 198, 205, .6); }
 
+  /* the readings strip: the world table (world.py), one chip per fact */
+  #world {
+    display: none;
+    flex-wrap: wrap; align-items: center; gap: 8px 10px;
+    padding: 8px 28px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(160, 240, 255, .025);
+    flex: none;
+  }
+  body.hasworld #world { display: flex; }
+  #world .reading {
+    display: inline-flex; align-items: baseline; gap: 7px;
+    padding: 4px 9px;
+    border: 1px solid var(--line);
+    clip-path: polygon(0 0, calc(100% - 6px) 0, 100% 6px, 100% 100%, 6px 100%, 0 calc(100% - 6px));
+    font: 500 9.5px/1.3 var(--mono);
+    letter-spacing: .14em; text-transform: uppercase;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  #world .reading .k { color: rgba(160, 214, 235, .55); }
+  #world .reading .age { color: var(--text-faint); letter-spacing: .06em; }
+  #world .reading.warn { border-color: rgba(232, 201, 138, .45); color: #f0dbaf; }
+  #world .reading.stale { opacity: .55; }
+  #world .reading.stale .age { color: rgba(232, 138, 138, .7); }
+
   /* banners: the machine's own condition, in mono */
   #conn {
     display: none;
@@ -177,8 +210,21 @@
     color: #f0dbaf;
     flex: none;
   }
-  body.disconnected #conn { display: flex; }
+  body.disconnected #conn, body.needtoken #conn { display: flex; }
   #conn .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gold); animation: br 2.2s ease-in-out infinite; flex: none; }
+  body.needtoken #conn .dot { animation: none; }
+  /* the token form: shown only when the server closed with 4401 */
+  #tokenform { display: none; align-items: center; gap: 8px; margin-left: auto; }
+  body.needtoken #tokenform { display: flex; }
+  #tokenin {
+    font: 500 12px/1.4 var(--mono); letter-spacing: .04em;
+    background: rgba(6, 18, 24, .7); color: #dfe6e6;
+    border: 1px solid rgba(232, 201, 138, .4); border-radius: 4px;
+    padding: 4px 8px; width: 220px; max-width: 45vw;
+  }
+  #tokenin:focus { outline: none; border-color: var(--gold); }
+  #tokenbtn { border: 1px solid rgba(232, 201, 138, .5); border-radius: 4px; padding: 4px 10px; color: #f0dbaf; }
+  #tokenbtn:hover { background: rgba(232, 201, 138, .12); }
 
   #mutebanner {
     display: none;
@@ -324,17 +370,20 @@
 
   @media (max-width: 640px) {
     .corner { display: none; }
-    header { gap: 9px; padding: 13px 15px; }
+    header { gap: 9px; padding: 13px 15px; flex-wrap: wrap; } /* five chips beat 375px — wrap, never clip */
     .brand { gap: 9px; }
     .aperture { width: 22px; height: 22px; }
     .wordmark { font-size: 15px; letter-spacing: .2em; }
     .chip { padding: 5px 10px; font-size: 8.5px; letter-spacing: .16em; gap: 6px; }
     .chip .dot { width: 5px; height: 5px; }
     .long { display: none; }
+    #restart.arming .long { display: inline; } /* SURE? must be readable to mean anything */
     #agentsbar .caption, #agentrows { padding-left: 15px; padding-right: 15px; }
     .agent .kind { width: 84px; letter-spacing: .14em; }
     .agent .label { white-space: normal; font-size: 14px; }
     #conn, #mutebanner { padding: 9px 15px; font-size: 9px; letter-spacing: .14em; }
+    #world { padding: 7px 15px; gap: 6px 8px; }
+    #world .reading { font-size: 8.5px; letter-spacing: .1em; padding: 3px 7px; }
     #log { padding: 20px 0 16px; }
     .inner { padding: 0 16px; }
     #rows { gap: 18px; }
@@ -374,9 +423,20 @@
   <button class="chip" id="mute" title="While muted, Ciel neither speaks nor listens for its name">
     <span>MIC</span><span class="long" id="mutelabel"> · ON</span>
   </button>
+  <button class="chip" id="restart" style="display: none" aria-pressed="false" title="Restart Ciel — waits for the current exchange to finish, then relaunches">
+    <span aria-hidden="true">↻</span><span class="long" id="restartlabel">RESTART</span>
+  </button>
+  <span id="srstatus" class="sr" aria-live="assertive"></span>
 </header>
 
-<div id="conn"><span class="dot"></span><span id="connlabel">reconnecting to Ciel</span></div>
+<div id="conn"><span class="dot"></span><span id="connlabel">reconnecting to Ciel</span>
+  <form id="tokenform" autocomplete="off">
+    <input id="tokenin" type="password" placeholder="hub token" aria-label="hub token" autocomplete="off">
+    <button id="tokenbtn" type="submit">CONNECT</button>
+  </form>
+</div>
+
+<div id="world" title="The system's own readings — what Ciel currently holds true, with its age"></div>
 
 <div id="agentsbar">
   <div class="caption">working on your behalf</div>
@@ -425,6 +485,7 @@ const agentsBtn = document.getElementById("agentsbtn");
 const agentsArr = document.getElementById("agentsarr");
 const agentsCount = document.getElementById("agentscount");
 const agentRows = document.getElementById("agentrows");
+const worldEl = document.getElementById("world");
 
 const KNOWN_STATES = new Set([
   "idle", "listening", "thinking", "reasoning", "speaking", "error",
@@ -455,15 +516,83 @@ let muted = false;
 let retryMs = 500;
 let attempts = 0;
 
+// Who this page is, and where it left off. The id names the client in
+// the server's log and outlives the tab; the resume claim — the
+// server's epoch and the last seq seen on it — lives with the ack
+// ledger in sessionStorage, because a reflexive refresh is exactly the
+// moment it matters. A claim the server can't honor (a new process, a
+// ring that moved on) costs nothing: the hello comes back fresh, with
+// the history window, which is what this page always got.
+const clientId = (() => {
+  try {
+    let id = localStorage.getItem("chartId");
+    if (!id) {
+      id = "chart-" + Math.random().toString(36).slice(2, 10);
+      localStorage.setItem("chartId", id);
+    }
+    return id;
+  } catch { return "chart"; }
+})();
+let epoch = null;
+let lastSeq = 0;
+try {
+  const r = JSON.parse(sessionStorage.getItem("resume") || "null");
+  if (r && typeof r.epoch === "string" && Number.isInteger(r.seq)) {
+    epoch = r.epoch; lastSeq = r.seq;
+  }
+} catch {}
+function saveResume() {
+  try { sessionStorage.setItem("resume", JSON.stringify({ epoch, seq: lastSeq })); } catch {}
+}
+
+// The hub token: required off loopback, remembered per origin. Asked
+// for only when the server says so (close code 4401) — a loopback page
+// never sees the form.
+function hubToken() {
+  try { return localStorage.getItem("hubToken") || ""; } catch { return ""; }
+}
+const tokenForm = document.getElementById("tokenform");
+const tokenIn = document.getElementById("tokenin");
+tokenForm.addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const t = tokenIn.value.trim();
+  if (!t) return;
+  try { localStorage.setItem("hubToken", t); } catch {}
+  tokenIn.value = "";
+  document.body.classList.remove("needtoken");
+  connect();
+});
+
 function nearBottom() {
   return logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 80;
+}
+
+// A flapping spoke seat writes "spoke connected" / "spoke disconnected"
+// over and over; a retried turn writes "turn failed" twice. Those stack
+// onto the previous event row as a count — "spoke disconnected (8×)" —
+// rather than fill the page. Two events stack when they say the same
+// thing, or when both are seat notices (the run keeps the latest one).
+function stacksOn(prev, body) {
+  if (!prev || !prev.classList.contains("event")) return false;
+  const was = prev.dataset.text || "";
+  return was === body || (was.startsWith("spoke ") && body.startsWith("spoke "));
 }
 
 function addRow(role, body, t) {
   const stick = nearBottom();
   const spec = ROLES[role] || { cls: "event" };
+  if (spec.cls === "event" && stacksOn(rows.lastElementChild, body)) {
+    const prev = rows.lastElementChild;
+    const n = (Number(prev.dataset.count) || 1) + 1;
+    prev.dataset.count = String(n);
+    prev.dataset.text = body;
+    prev.firstElementChild.textContent = body + " (" + n + "\u00d7)";
+    if (stick) logEl.scrollTop = logEl.scrollHeight;
+    return;
+  }
   const row = document.createElement("div");
   row.className = "row " + spec.cls;
+  if (spec.cls === "event") row.dataset.text = body;
   if (spec.cls === "confirmrow") {
     const wrap = document.createElement("div");
     wrap.className = "body";
@@ -515,6 +644,104 @@ const AGENT_KINDS = {
 };
 
 let agents = [];
+
+// The world table (world.py): the hub's readings, whole, whenever they
+// change — and re-drawn every half minute so the ages stay honest.
+// Fact names not listed are simply not shown; a new producer adds a
+// line here, the same rule as unknown transcript labels.
+let world = {};
+
+function ago(s) {
+  s = Math.max(0, Math.round(s));
+  if (s < 90) return "now";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h";
+  return Math.floor(s / 86400) + "d";
+}
+
+function hm(s) {
+  const m = Math.round(s / 60);
+  return Math.floor(m / 60) + "h" + String(m % 60).padStart(2, "0");
+}
+
+// name → [key label, value text, warn?] or null to hide. `v` is the fact's
+// value, `f` the whole fact (for a place's own timestamp).
+const READINGS = {
+  spoke: (v) => [v.connected ? "MAC" : "MAC", v.connected ? "linked" : "away", !v.connected],
+  presence: (v, f, now) => {
+    if (f.ttl_s != null && now - f.observed_at > f.ttl_s) return ["YOU", "unknown", true];
+    if (v.locked) return ["YOU", "locked", false];
+    if (typeof v.idle_s === "number") return ["YOU", v.idle_s < 120 ? "here" : "idle " + ago(v.idle_s), false];
+    return ["YOU", v.present ? "here" : "away", false];
+  },
+  place: (v) => [v.via === "findmy" ? "PHONE" : "PLACE", v.place || (v.network ? v.network : "unknown"), false],
+  timers: (v) => Array.isArray(v) && v.length ? ["TIMERS", String(v.length), false] : null,
+  watches: (v) => Array.isArray(v) && v.length ? ["WATCHES", String(v.length), false] : null,
+  agenda: (v, f, now) => {
+    const d = new Date(now * 1000);
+    const today = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+    if (v.day !== today) return null;
+    const lines = Array.isArray(v.lines) ? v.lines : [];
+    return ["NEXT", lines.length ? lines[0] : "nothing more today", false];
+  },
+  oura: (v) => {
+    const bits = [];
+    if (typeof v.readiness === "number") bits.push("ready " + v.readiness);
+    if (typeof v.sleep_s === "number") bits.push("slept " + hm(v.sleep_s));
+    else if (typeof v.sleep_score === "number") bits.push("sleep " + v.sleep_score);
+    return bits.length ? ["RING", bits.join(" · "), false] : null;
+  },
+  sections: (v) => {
+    const spots = v && v.spots ? v.spots : {};
+    const open = Object.entries(spots).filter(([, n]) => n > 0);
+    if (!Object.keys(spots).length) return null;
+    return ["SECTIONS", open.length ? open.map(([id, n]) => id + ": " + n).join(" ") : "all full", open.length > 0];
+  },
+  hold: (v) => v ? ["VIGIL", "held", true] : null,
+};
+
+function setWorld(facts) {
+  world = facts && typeof facts === "object" ? facts : {};
+  renderWorld();
+}
+
+function renderWorld() {
+  const now = Date.now() / 1000;
+  worldEl.textContent = "";
+  let shown = 0;
+  for (const name of Object.keys(READINGS)) {
+    const f = world[name];
+    if (!f || typeof f !== "object") continue;
+    let spec;
+    try { spec = READINGS[name](f.value, f, now); } catch { spec = null; }
+    if (!spec) continue;
+    const stale = f.ttl_s != null && now - f.observed_at > f.ttl_s;
+    // A place's own reading time is the honest age, not when it was folded in.
+    const at = name === "place" && f.value && typeof f.value.at === "number" ? f.value.at : f.observed_at;
+    const chip = document.createElement("span");
+    chip.className = "reading" + (spec[2] ? " warn" : "") + (stale ? " stale" : "");
+    const k = document.createElement("span");
+    k.className = "k";
+    k.textContent = spec[0];
+    chip.appendChild(k);
+    const val = document.createElement("span");
+    val.textContent = spec[1];
+    chip.appendChild(val);
+    const age = now - at;
+    if (age >= 90 || stale) {
+      const a = document.createElement("span");
+      a.className = "age";
+      a.textContent = ago(age);
+      chip.appendChild(a);
+    }
+    chip.title = name + " · " + (f.source || "?") + " · " + new Date(f.observed_at * 1000).toLocaleTimeString();
+    worldEl.appendChild(chip);
+    shown += 1;
+  }
+  document.body.classList.toggle("hasworld", shown > 0);
+}
+
+setInterval(renderWorld, 30000);
 
 function fmtSpan(s) {
   s = Math.max(0, Math.round(s));
@@ -610,40 +837,123 @@ function clearAsk() { document.body.classList.remove("asking"); }
 function sendFrame(obj) {
   // Refuses rather than drops: the caller keeps what it was trying to
   // send. A frame written to a CONNECTING or CLOSING socket is a message
-  // the user watched themselves send that never existed.
+  // the user watched themselves send that never existed. The one dead
+  // state this test cannot see — OPEN in the browser, long since dropped
+  // by the server, the parting gift of a sleeping machine — is covered
+  // for says by the ack ledger below, and shortened for everything else
+  // by the liveness probe.
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   ws.send(JSON.stringify(obj));
   return true;
 }
 
+// The ack ledger: every say carries a seq and stays here until the
+// server's receipt comes back; a reconnect resends whatever is still
+// owed. So a message written into a half-open socket arrives late, never
+// voided. At-least-once on purpose: the rare double (say delivered, ack
+// lost) is a visible, cheap failure where the void was a silent one.
+// sessionStorage backs the ledger because the half-open state it exists
+// for is exactly what provokes a reflexive refresh — the debts must
+// outlive the page. And the whole scheme waits for a hello that says
+// acks: this page is served from disk, so it can be newer than the
+// process behind the socket, and an ack-less server would leave every
+// say owed forever while the probe shot healthy sockets.
+let acks = false; // what the hello said this server speaks
+let saySeq = 0;
+const unacked = new Map(); // seq → text; insertion order is send order
+try {
+  for (const [seq, t] of JSON.parse(sessionStorage.getItem("unacked") || "[]")) {
+    unacked.set(seq, t);
+    saySeq = Math.max(saySeq, seq);
+  }
+} catch {}
+
+function saveLedger() {
+  try { sessionStorage.setItem("unacked", JSON.stringify([...unacked])); } catch {}
+}
+
 function say(t) {
-  if (!sendFrame({ type: "say", text: t })) return false;
+  if (!acks) {
+    // No hello yet, or an older server: the pre-ledger lane, fire-and-forget.
+    if (!sendFrame({ type: "say", text: t })) return false;
+  } else {
+    const seq = ++saySeq;
+    if (!sendFrame({ type: "say", text: t, seq })) return false;
+    unacked.set(seq, t);
+    saveLedger();
+  }
   clearAsk(); // whatever was pending, this line is the user's word on it
   return true;
 }
 
-function answer(word) { say(word); }
+// A confirm answer rides outside the ledger on purpose: a resend would
+// arrive freshly stamped, and the pipeline answers whatever question is
+// open *now* — a stale yes must never authorize a question the user
+// never saw. A swallowed answer is merely an unanswered question, and
+// the broker's timeout owns that case with the safe default.
+function answer(word) {
+  if (!sendFrame({ type: "say", text: word })) return;
+  clearAsk();
+}
 
 function connect() {
-  ws = new WebSocket(`ws://${location.host}/ws`);
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${scheme}://${location.host}/ws`);
 
   ws.onopen = () => {
     retryMs = 500;
     attempts = 0;
     document.body.classList.remove("disconnected");
     sendBtn.disabled = false;
+    // Capabilities reset until this server's hello claims them — a say
+    // sent in the gap rides seq-less rather than joining a ledger the
+    // hello is about to resend (the double would be manufactured here).
+    acks = false;
+    // The client speaks first: who, the proof, and where it left off.
+    const hello = { type: "hello", v: 1, role: "chart", client_id: clientId, caps: ["acks", "resume"] };
+    const token = hubToken();
+    if (token) hello.token = token;
+    if (epoch !== null) hello.resume = { epoch, seq: lastSeq };
+    sendFrame(hello);
   };
 
   ws.onmessage = (ev) => {
+    clearProbe(); // any inbound frame is proof of life
     let f;
     try { f = JSON.parse(ev.data); } catch { return; }
+    if (f.type !== "hello" && f.type !== "ack" && Number.isInteger(f.seq)) {
+      lastSeq = f.seq; // every broadcast frame moves the resume claim
+      saveResume();
+    }
     if (f.type === "hello") {
-      rows.textContent = "";               // a reconnect replays history
-      for (const r of f.history || []) addRow(r.role, r.text, r.t);
-      logEl.scrollTop = logEl.scrollHeight;
+      // The capability handshake: the ledger, the probe, and the restart
+      // chip all wait for the server to say it speaks them.
+      acks = !!f.acks;
+      restartBtn.style.display = acks ? "" : "none";
+      if (acks) {
+        // Settle the ledger: whatever the last socket swallowed rides again.
+        for (const [seq, t] of unacked) sendFrame({ type: "say", text: t, seq });
+      } else if (unacked.size) {
+        unacked.clear(); // debts an ack-less server can never settle
+        saveLedger();
+      }
+      if (typeof f.epoch === "string") {
+        epoch = f.epoch;
+        lastSeq = Number.isInteger(f.seq) ? f.seq : 0;
+        saveResume();
+      }
+      if (!f.resumed) {
+        // A fresh picture: the history window replaces whatever was
+        // drawn. A resumed one keeps the screen — the frames this page
+        // missed follow the hello one by one, as if nothing dropped.
+        rows.textContent = "";
+        for (const r of f.history || []) addRow(r.role, r.text, r.t);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
       setState(f.state || "idle");
       setMuted(!!f.muted);
       setAgents(f.agents);
+      setWorld(f.world);
     } else if (f.type === "row") {
       addRow(f.role, f.text, f.t);
       if (f.role && f.role.startsWith("you-confirm")) clearAsk();
@@ -654,22 +964,37 @@ function connect() {
       setMuted(!!f.muted);
     } else if (f.type === "agents") {
       setAgents(f.agents);
+    } else if (f.type === "world") {
+      setWorld(f.facts);
     } else if (f.type === "confirm") {
       askQ.textContent = f.text;
       document.body.classList.add("asking");
       const stick = nearBottom();
       if (stick) logEl.scrollTop = logEl.scrollHeight;
+    } else if (f.type === "ack") {
+      unacked.delete(f.seq);
+      saveLedger();
     }
   };
 
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
     attempts += 1;
-    connLabel.textContent = attempts > 1
-      ? "reconnecting to Ciel · attempt " + attempts
-      : "reconnecting to Ciel";
     document.body.classList.add("disconnected");
     sendBtn.disabled = true;
     clearAsk();
+    clearProbe(); // a pending deadline must not shoot the next socket
+    disarmRestart(); // an armed chip must not survive into the fresh process
+    if (ev && ev.code === 4401) {
+      // The server wants the hub token — this page is off loopback.
+      // No retry loop: the form reconnects when the user submits.
+      connLabel.textContent = hubToken() ? "hub token refused" : "hub token needed";
+      document.body.classList.add("needtoken");
+      tokenIn.focus();
+      return;
+    }
+    connLabel.textContent = attempts > 1
+      ? "reconnecting to Ciel · attempt " + attempts
+      : "reconnecting to Ciel";
     setTimeout(connect, retryMs);
     retryMs = Math.min(retryMs * 2, 8000);
   };
@@ -695,6 +1020,81 @@ text.addEventListener("input", () => {
 });
 muteBtn.addEventListener("click", () => sendFrame({ type: "mute", muted: !muted }));
 unmuteBtn.addEventListener("click", () => sendFrame({ type: "mute", muted: false }));
+
+// The restart chip arms on the first click and fires on the second — a
+// stray click must not cost the mic and the models a relaunch. The server
+// answers with an event row, and the reconnect banner narrates the rest.
+const restartBtn = document.getElementById("restart");
+const restartLabel = document.getElementById("restartlabel");
+const srStatus = document.getElementById("srstatus");
+let restartArm = null;
+let restartArmedAt = 0;
+
+function disarmRestart() {
+  if (restartArm !== null) clearTimeout(restartArm);
+  restartArm = null;
+  restartBtn.classList.remove("arming");
+  restartBtn.setAttribute("aria-pressed", "false");
+  restartBtn.style.minWidth = "";
+  restartLabel.textContent = "RESTART";
+  srStatus.textContent = "";
+}
+
+restartBtn.addEventListener("click", () => {
+  if (restartArm === null) {
+    // Freeze the hit target: the shorter armed label must not shift the
+    // chip row under a cursor that is about to click again.
+    restartBtn.style.minWidth = restartBtn.offsetWidth + "px";
+    restartBtn.classList.add("arming");
+    restartBtn.setAttribute("aria-pressed", "true");
+    restartLabel.textContent = "SURE?";
+    srStatus.textContent = "Armed — press again to restart Ciel";
+    restartArmedAt = Date.now();
+    restartArm = setTimeout(disarmRestart, 4000);
+    return;
+  }
+  // A second click this fast is a bounce or a habitual double-click, not
+  // a decision — SURE? was never readable. The arm stands; a real second
+  // click still fires.
+  if (Date.now() - restartArmedAt < 350) return;
+  // Refused (reconnecting): stay armed rather than disarm into a look
+  // identical to success — the caller keeps what it was trying to send.
+  if (!sendFrame({ type: "restart" })) return;
+  disarmRestart();
+});
+
+// The liveness probe: ask the server for any frame at all. A browser can
+// hold a socket OPEN long after the far side gave up on it (the machine
+// slept, the tab was frozen), and protocol-level pings are invisible to
+// page script — so ask at the app layer. No answer inside the deadline
+// means the socket is a ghost: close it, and the usual reconnect path
+// (with the ledger resend) does the rest.
+let probeDeadline = null;
+
+function clearProbe() {
+  if (probeDeadline !== null) clearTimeout(probeDeadline);
+  probeDeadline = null;
+}
+
+function verifyLink() {
+  // Gated on acks: a server that never pongs would make every probe
+  // shoot a healthy socket.
+  if (!acks || !ws || ws.readyState !== WebSocket.OPEN || probeDeadline !== null) return;
+  sendFrame({ type: "ping" });
+  probeDeadline = setTimeout(() => { probeDeadline = null; ws.close(); }, 3000);
+}
+
+// When to suspect the socket: coming back to the tab (a bfcache restore
+// lands here too), and a slow heartbeat that catches the rest — a
+// machine-level sleep under a page that stayed visible, a peer gone
+// without a FIN. Hidden tabs are left alone: their timers throttle by
+// design, and the visibility handler probes the moment they matter again.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") verifyLink();
+});
+setInterval(() => {
+  if (document.visibilityState === "visible") verifyLink();
+}, 15000);
 
 connect();
 </script>

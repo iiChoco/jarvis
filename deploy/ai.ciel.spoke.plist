@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The spoke as a LaunchAgent: the room's half — microphone, wake word,
+  speakers, HUD — always on while you're logged in, restarted if it exits,
+  talking to the hub named in [spoke].hub over the tailnet. The same
+  reasoning as ai.ciel.plist (a per-user agent, because the mic and the TCC
+  permissions belong to your login session), with the brain elsewhere.
+
+      cp deploy/ai.ciel.spoke.plist ~/Library/LaunchAgents/
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.ciel.spoke.plist
+
+  Stop / remove:
+
+      launchctl bootout gui/$(id -u)/ai.ciel.spoke
+
+  `--no-sync` because a bare `uv run` re-syncs the environment and would
+  drop the optional extras (piper, voice, web) every launch.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.ciel.spoke</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>mkdir -p "$HOME/.ciel/log" &amp;&amp; cd "$HOME/jarvis" &amp;&amp; exec uv run --no-sync ciel spoke</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <!-- Belt to the code's braces: __main__ line-buffers stdout itself,
+         but unbuffered output also covers interpreter-level messages
+         printed before main() runs. Without one of the two, prints sit in
+         an 8KB block buffer and the log lags reality by minutes. -->
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- If Ciel crash-loops, don't hammer: launchd waits this long between
+       respawns of a process that exited within seconds of starting. -->
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/choco/.ciel/log/ciel-spoke.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/choco/.ciel/log/ciel-spoke.err.log</string>
+</dict>
+</plist>

@@ -10,40 +10,59 @@ requires-python = ">=3.12"
 dependencies = [
     # Brain — authenticates via Claude subscription OAuth, not an API key.
     "claude-agent-sdk>=0.1.0",
-    # Audio I/O
-    "sounddevice>=0.5.1",
+    # Shared arithmetic (the wire's ring tones, the confirm broker's RMS).
     "numpy>=2.1",
+]
+
+# The room's half and the brain's half. Everything the microphone and
+# the Mac need lives in the `spoke` group; the hub's own extras in `hub`.
+# `spoke` is a default group, so a plain `uv sync` on this Mac installs
+# exactly what it always did; a server runs
+# `uv sync --no-default-groups --group hub --extra discord --extra web`
+# and never sees a sound device or a pyobjc wheel.
+[dependency-groups]
+spoke = [
+    # Audio I/O
+    "sounddevice>=0.5.1; sys_platform == 'darwin'",
     # Endpointing: knowing when the user stopped talking
-    "webrtcvad-wheels>=2.0.14",
+    "webrtcvad-wheels>=2.0.14; sys_platform == 'darwin'",
     # Speech-to-text, local. mlx-whisper is the default engine (Metal GPU);
     # faster-whisper stays installed as the CPU fallback build_stt reaches for.
-    "mlx-whisper>=0.4.2",
-    "faster-whisper>=1.1.0",
+    "mlx-whisper>=0.4.2; sys_platform == 'darwin'",
+    "faster-whisper>=1.1.0; sys_platform == 'darwin'",
     # Wake word, local
-    "openwakeword>=0.6.0",
-    "onnxruntime>=1.20",
+    "openwakeword>=0.6.0; sys_platform == 'darwin'",
+    "onnxruntime>=1.20; sys_platform == 'darwin'",
     # Floating on-screen indicator. Pinned explicitly rather than relying on
     # the system Python having it — `import AppKit` currently resolves through
     # system site-packages, which would vanish the moment the venv is made
     # strictly isolated.
-    "pyobjc-framework-Cocoa>=10.1",
+    "pyobjc-framework-Cocoa>=10.1; sys_platform == 'darwin'",
     # Screen look: preflights macOS Screen Recording permission before a
     # capture, because `screencapture` without the grant silently omits every
     # window instead of failing.
-    "pyobjc-framework-Quartz>=10.1",
+    "pyobjc-framework-Quartz>=10.1; sys_platform == 'darwin'",
     # Contact resolution: an in-process CNContactStore query (<50 ms) instead
     # of driving Contacts.app over AppleScript (1-4 s, and it launches the
     # app). The AppleScript path survives as the fallback.
-    "pyobjc-framework-Contacts>=10.1",
+    "pyobjc-framework-Contacts>=10.1; sys_platform == 'darwin'",
     # Calendar proximity nudges (Vigil): EventKit reads the local calendar
     # store in-process — AppleScript against Calendar.app takes seconds and
     # launches the app, and the store's SQLite schema churns across macOS
     # releases. Needs the one-time Calendars permission on first use.
-    "pyobjc-framework-EventKit>=10.1",
+    "pyobjc-framework-EventKit>=10.1; sys_platform == 'darwin'",
     # Where this machine is (Vigil's location watcher, the where_am_i tool):
     # CoreLocation's Wi-Fi positioning, in-process. Needs the one-time
     # Location Services permission for the Python that runs Ciel.
-    "pyobjc-framework-CoreLocation>=10.1",
+    "pyobjc-framework-CoreLocation>=10.1; sys_platform == 'darwin'",
+]
+hub = [
+    # The wire server (the Chart, the spoke's seat).
+    "aiohttp>=3.10",
+    # The interview room's voice (Adjoint): piper renders the interviewer's
+    # sentences on the server for the browser to play. The manylinux
+    # aarch64 wheel covers the Arm hub.
+    "piper-tts>=1.7.0",
 ]
 
 [project.optional-dependencies]
@@ -73,11 +92,12 @@ requires = ["uv_build>=0.12.1,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.uv]
-# Ciel targets macOS. Restricting resolution to darwin also sidesteps
-# openwakeword's Linux-only tflite-runtime dependency, which has no wheels for
-# Python 3.12+ — and we run openWakeWord under onnxruntime anyway, since the
-# tflite runtime is unreliable on Apple Silicon.
-environments = ["sys_platform == 'darwin'"]
+default-groups = ["spoke"]
+# The room's half resolves on macOS only (every `spoke` requirement carries
+# a darwin marker: openwakeword's Linux-only tflite-runtime dependency has
+# no wheels for Python 3.12+, and mlx and pyobjc are Apple-only anyway); the
+# brain's half resolves on Linux too, for the hub's server.
+environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
 
 [tool.uv.build-backend]
 module-root = "src"
