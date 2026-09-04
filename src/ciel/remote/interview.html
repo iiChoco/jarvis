@@ -135,7 +135,6 @@
   body[data-state="speaking"] #state-chip { --c: var(--st-speaking); border-color: rgba(160, 240, 255, .5); background: rgba(160, 240, 255, .1); color: var(--cyan-text); }
   body[data-state="speaking"] #state-chip .dot { box-shadow: 0 0 9px var(--c); }
   body[data-state="paused"] #state-chip { --c: var(--st-paused); color: #d6c8f0; }
-  body:not([data-view="live"]) #state-chip { display: none; }
 
   /* header */
   header { display: flex; align-items: center; gap: 14px; padding: 14px 28px; border-bottom: 1px solid var(--line); flex: none; flex-wrap: wrap; }
@@ -160,9 +159,35 @@
   header .nav { display: none; }
   body[data-view="lobby"] header .nav, body[data-view="setup"] header .nav, body[data-view="brief"] header .nav,
   body[data-view="review"] header .nav, body[data-view="admin"] header .nav { display: inline-flex; }
-  body[data-view="closing"] .aperture .c-outer { animation: ap3 4.4s ease-in-out infinite; }
-  body[data-view="closing"] .aperture .c-mid { animation: ap2 3.4s ease-in-out infinite; }
-  body[data-view="closing"] .aperture .c-core { animation: ap1 2.2s ease-in-out infinite; }
+
+  /* ── closing: the held breath ────────────────────────────────────────── */
+  .cl-stage { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 48px; min-height: 0; }
+  .cl-inner { width: 100%; max-width: 620px; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 32px; }
+  .cl-mark { width: 88px; height: 88px; }
+  .cl-breathe .c-outer { animation: ap3 6.6s ease-in-out infinite; }
+  .cl-breathe .c-mid { animation: ap2 5.1s ease-in-out infinite; }
+  .cl-breathe .c-core { animation: ap1 3.3s ease-in-out infinite; }
+  section[data-view="closing"][data-failed="1"] .cl-breathe circle { animation: none; }
+  section[data-view="closing"][data-failed="1"] .cl-breathe .c-core { fill: rgba(232, 201, 138, .35); }
+  .cl-quote { margin: 0; font: 400 24px/1.45 var(--serif); color: rgba(247, 242, 231, .78); text-wrap: pretty; max-width: 560px; }
+  .cl-quote::before { content: "\201C"; color: var(--gold-dim); }
+  .cl-quote::after { content: "\201D"; color: var(--gold-dim); }
+  .cl-quote:empty { display: none; }
+  .cl-by { display: block; margin-top: 12px; font: 500 9.5px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--text-faint); }
+  .cl-by:empty { display: none; }
+  .cl-inner .cap { justify-content: center; }
+  .cl-inner .progress { width: min(420px, 100%); }
+  .cl-facts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+  .cl-facts .chip:empty { display: none; }
+  .cl-rec { display: flex; align-items: center; gap: 10px; font: 500 10px/1 var(--mono); letter-spacing: .22em; text-transform: uppercase; color: var(--text-faint); }
+  .cl-rec .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--rec); opacity: .7; flex: none; }
+  .cl-rec[data-rec="none"] .dot { display: none; }
+  .cl-rec .sep { color: rgba(223, 230, 230, .2); }
+  .cl-fail { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+  .cl-fail .msg { font: 400 15px/1.5 var(--serif); color: var(--gold-soft); text-wrap: pretty; max-width: 460px; }
+  .cl-fail .row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  body:not([data-view="live"]):not([data-view="closing"]) #state-chip { display: none; }
+  @media (max-width: 640px) { .cl-stage { padding: 28px 16px; } .cl-quote { font-size: 20px; } .cl-mark { width: 64px; height: 64px; } }
   body[data-view="login"] #whoami, body[data-view="login"] #nav-logout { display: none; }
   #password-dialog { position: fixed; inset: 0; z-index: 60; display: none; align-items: center; justify-content: center; background: rgba(3, 6, 8, .75); }
   #password-dialog[data-show="1"] { display: flex; }
@@ -797,25 +822,30 @@
 </section>
 
 <!-- ── closing: the interview is over, the debrief is being written ────── -->
-<section data-view="closing">
-  <div class="page" id="closing" style="align-items:center;text-align:center;justify-content:center;flex:1">
-    <svg class="aperture cl-aperture" width="88" height="88" viewBox="0 0 128 128" aria-hidden="true">
-      <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="5" stroke-dasharray="4 12"/>
-      <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="5"/>
-      <circle class="c-core" cx="64" cy="64" r="10"/>
-    </svg>
-    <div class="said" id="closing-last" style="font-size:22px"></div>
-    <div class="cap" id="closing-cap"><span id="closing-status">the interview is over · writing your debrief</span></div>
-    <div class="progress" id="closing-progress" data-show="0" style="width:min(560px,100%)">
-      <div class="bar"><div class="fill"></div><div class="head" style="left:0"></div></div>
-      <div class="line"><span><span class="dot"></span><span class="label">reading the transcript</span></span><span class="pct">0%</span></div>
+<section data-view="closing" id="closing" data-failed="0">
+  <div class="cl-stage">
+    <div class="cl-inner">
+      <svg class="aperture cl-mark cl-breathe" viewBox="0 0 128 128" aria-hidden="true">
+        <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="3" stroke-dasharray="4 12"/>
+        <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="3"/>
+        <circle class="c-core" cx="64" cy="64" r="10"/>
+      </svg>
+      <blockquote class="cl-quote"><span id="closing-last"></span><cite class="cl-by" id="closing-who"></cite></blockquote>
+      <div class="cap" id="closing-cap"><span id="closing-status">the interview is over · writing your debrief</span></div>
+      <div class="progress" id="closing-progress" data-show="0">
+        <div class="bar"><div class="fill"></div><div class="head" style="left:0"></div></div>
+        <div class="line"><span><span class="dot"></span><span class="label">reading the transcript</span></span><span class="pct">0%</span></div>
+      </div>
+      <div class="cl-fail" id="closing-fail" data-show="0">
+        <div class="msg" id="closing-error"></div>
+        <div class="row"><button class="btn gold" id="closing-open">Open the transcript</button><button class="btn" id="closing-lobby">Back to lobby</button></div>
+      </div>
+      <div class="cl-facts">
+        <span class="chip" id="closing-title"></span><span class="chip gold" id="closing-mode"></span>
+        <span class="chip" id="closing-elapsed"></span><span class="chip" id="closing-questions"></span>
+      </div>
+      <div class="cl-rec" id="closing-rec" data-rec="on"><span class="dot"></span>REC<span class="sep">·</span><span id="closing-note">saving</span></div>
     </div>
-    <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center">
-      <span class="chip" id="closing-title"></span><span class="chip gold" id="closing-mode"></span>
-      <span class="chip" id="closing-elapsed"></span><span class="chip" id="closing-questions"></span>
-    </div>
-    <div class="hint" id="closing-note">the recording is being saved</div>
-    <p id="closing-error" data-show="0" class="hint"></p>
   </div>
 </section>
 

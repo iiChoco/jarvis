@@ -487,9 +487,7 @@
         if (f.code === "room_full") { alert(f.reason); live.closing = true; enterLobby(); }
         else if (f.code === "debrief") {
           if (live.closeProgress) { live.closeProgress(false); live.closeProgress = null; }
-          text("#closing-error", "the debrief could not be written — your transcript and recording are saved");
-          flag($("#closing-error"), true);
-          if (live.ended) setTimeout(finishLive, 2500);
+          closingFailed("I couldn't finish the debrief — but I kept everything we said. Your transcript and recording are saved.");
         }
         else console.warn("room error", f);
         break;
@@ -526,7 +524,12 @@
       if (live.debriefReady) finishLive();
       else {
         enterClosing();
-        setTimeout(() => { if (live.ended && body.dataset.view === "closing") finishLive(); }, 90000);
+        setTimeout(() => {
+          if (live.ended && body.dataset.view === "closing" && !live.debriefReady) {
+            if (live.closeProgress) { live.closeProgress(false); live.closeProgress = null; }
+            closingFailed("The debrief is taking longer than it should. Your transcript and recording are saved; it may still appear in your lobby.");
+          }
+        }, 90000);
       }
     }
   }
@@ -843,19 +846,33 @@
   const DEBRIEF_STAGES = ["reading the transcript", "weighing each answer", "ranking what to work on", "writing the debrief"];
 
   function enterClosing() {
-    const s = current.session, b = current.brief || {};
+    const s = current.session, b = current.brief || {}, who = b.interviewer || {};
     show("closing");
+    $("#closing").dataset.failed = "0";
     text("#closing-last", $("#q-text").textContent);
+    text("#closing-who", who.name || "");
+    text("#closing-status", "the interview is over · writing your debrief");
     text("#closing-title", s.title || "");
     text("#closing-mode", s.mode === "company" ? "company" : modeLabel(s));
     text("#closing-elapsed", fmtDuration(nowS()));
-    text("#closing-questions", `${live.questions} question${live.questions === 1 ? "" : "s"}`);
-    text("#closing-note", live.recorder ? "the recording is being saved" : "no recording this time — the microphone was not shared");
-    flag($("#closing-error"), false);
+    text("#closing-questions", `Q ${live.questions}`);
+    flag($("#closing-fail"), false);
+    const rec = $("#closing-rec");
+    rec.dataset.rec = live.recorder ? "on" : "none";
+    text("#closing-note", live.recorder ? "saving" : "no recording — the microphone was not shared");
     live.closeProgress = startProgress($("#closing-progress"), 28000, DEBRIEF_STAGES);
     // The recorder's last chunk goes up while the debrief is written.
-    stopRecording();
+    stopRecording().then(() => { if (rec.dataset.rec === "on") text("#closing-note", "saved"); });
   }
+
+  function closingFailed(message) {
+    $("#closing").dataset.failed = "1";
+    text("#closing-status", "the interview is over");
+    text("#closing-error", message);
+    flag($("#closing-fail"), true);
+  }
+  $("#closing-open").addEventListener("click", () => finishLive());
+  $("#closing-lobby").addEventListener("click", () => { live.closing = true; if (live.ws) { try { live.ws.close(); } catch (_) {} live.ws = null; } enterLobby(); });
 
   async function finishLive() {
     if (body.dataset.view !== "live" && body.dataset.view !== "closing") return;
