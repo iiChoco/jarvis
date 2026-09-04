@@ -53,6 +53,38 @@
 
   function flag(el, on) { if (el) el.dataset.show = on ? "1" : "0"; }
 
+  // An estimated progress bar for a call that reports none: eases toward
+  // ninety percent over the expected time, completes when the work lands.
+  const STAGES = {
+    company: ["inventing the company", "naming the interviewer", "writing the role", "drafting likely questions", "keeping some notes to itself"],
+    technical: ["inventing the company", "naming the interviewer", "choosing the problem", "writing starter code in eight languages", "hiding the reference solution"],
+    case: ["choosing a real decision", "renaming the client", "building the exhibits", "sealing the outcome"],
+  };
+  function startProgress(el, expectedMs, stages) {
+    const fill = el.querySelector(".fill"), head = el.querySelector(".head"), label = el.querySelector(".label"), pct = el.querySelector(".pct");
+    const start = performance.now();
+    let done = false, raf = null;
+    const paint = (p) => { const w = `${(p * 100).toFixed(1)}%`; fill.style.width = w; head.style.left = w; pct.textContent = `${Math.round(p * 100)}%`; };
+    const step = () => {
+      if (done) return;
+      const t = (performance.now() - start) / expectedMs;
+      const p = 0.92 * (1 - Math.exp(-2.2 * t));
+      paint(p);
+      const i = Math.min(stages.length - 1, Math.floor(t * stages.length * 0.9));
+      label.textContent = stages[i] + "…";
+      raf = requestAnimationFrame(step);
+    };
+    paint(0);
+    flag(el, true);
+    raf = requestAnimationFrame(step);
+    return (ok) => {
+      done = true;
+      if (raf) cancelAnimationFrame(raf);
+      if (ok) { paint(1); label.textContent = "ready"; setTimeout(() => flag(el, false), 500); }
+      else flag(el, false);
+    };
+  }
+
   // ── fetch ──────────────────────────────────────────────────────────────
 
   async function api(path, opts = {}) {
@@ -205,16 +237,20 @@
       case_source: checked("case_source") || "library",
     };
     $("#setup-submit").disabled = true;
-    flag($("#setup-busy"), true);
+    const instant = mode === "case" && setup.case_source === "library";
+    const stop = startProgress($("#setup-progress"), instant ? 1500 : mode === "case" ? 35000 : 22000, STAGES[mode] || STAGES.company);
+    let ok = false;
     try {
       const r = await api("/sessions", { method: "POST", body: setup });
       current = { session: r.session, setup, brief: r.brief, transcript: [], code: [] };
-      renderBrief();
+      ok = true;
+      stop(true);
+      setTimeout(renderBrief, 450);
     } catch (ex) {
+      stop(false);
       alert(ex.message);
     } finally {
       $("#setup-submit").disabled = false;
-      flag($("#setup-busy"), false);
     }
   });
 
@@ -298,12 +334,16 @@
   $("#brief-regenerate").addEventListener("click", async () => {
     if (!current) return;
     $("#brief-regenerate").disabled = true;
-    text("#brief-regenerate-label", "writing…");
+    const mode = current.session.mode;
+    const instant = mode === "case" && current.setup && current.setup.case_source === "library";
+    const stop = startProgress($("#brief-progress"), instant ? 1500 : mode === "case" ? 35000 : 22000, STAGES[mode] || STAGES.company);
     try {
       const r = await api(`/sessions/${encodeURIComponent(current.session.id)}/regenerate`, { method: "POST" });
       current.session = r.session; current.brief = r.brief;
-      renderBrief();
+      stop(true);
+      setTimeout(renderBrief, 450);
     } catch (ex) {
+      stop(false);
       alert(ex.message);
       $("#brief-regenerate").disabled = false;
       renderBrief();

@@ -251,6 +251,14 @@
   .setup-go { display: flex; align-items: center; gap: 18px; padding-top: 8px; flex-wrap: wrap; }
   #setup-busy { display: flex; align-items: center; gap: 10px; font: 400 12px/1.5 var(--mono); color: var(--gold-soft); }
   #setup-busy .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 9px var(--gold); animation: br 1.4s ease-in-out infinite; }
+  .progress { display: flex; flex-direction: column; gap: 10px; }
+  .progress .bar { position: relative; height: 1px; background: rgba(232, 201, 138, .18); overflow: visible; }
+  .progress .fill { position: absolute; left: 0; top: 0; height: 1px; width: 0; background: var(--gold); box-shadow: 0 0 8px rgba(232, 201, 138, .6); transition: width .4s ease; }
+  .progress .head { position: absolute; top: -4px; width: 9px; height: 9px; margin-left: -5px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 12px var(--gold); transition: left .4s ease; }
+  .progress .line { display: flex; align-items: center; justify-content: space-between; gap: 12px; font: 500 9.5px/1 var(--mono); letter-spacing: .22em; text-transform: uppercase; color: var(--gold-soft); }
+  .progress .line .pct { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+  .progress .line .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 9px var(--gold); animation: br 1.4s ease-in-out infinite; margin-right: 8px; }
+  .brief-bar .progress { flex: 1; min-width: 200px; }
   .rec-note { display: flex; align-items: center; gap: 10px; font: 400 11px/1.5 var(--mono); color: var(--text-faint); }
   .rec-note::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--rec); opacity: .9; flex: none; }
 
@@ -651,8 +659,12 @@
       <div class="hint" data-mode="technical">The interviewer reads your code as you write it. Nothing is executed.</div>
       <div class="setup-go">
         <button class="btn primary" id="setup-submit" type="submit">Prepare</button>
-        <span class="hint">Ciel writes the company and a brief · ~20 s</span>
-        <span id="setup-busy" data-show="0"><span class="dot"></span>preparing your interview…</span>
+        <span class="hint" id="setup-eta">Ciel writes the company and a brief · ~20 s</span>
+        <span id="setup-busy" data-show="0" hidden></span>
+      </div>
+      <div class="progress" id="setup-progress" data-show="0">
+        <div class="bar"><div class="fill"></div><div class="head" style="left:0"></div></div>
+        <div class="line"><span><span class="dot"></span><span class="label">preparing your interview</span></span><span class="pct">0%</span></div>
       </div>
       <div class="rec-note">the session is recorded from BEGIN · you can read the brief again in the review</div>
     </form>
@@ -665,6 +677,10 @@
     <span class="chip" id="brief-step">brief · step 2 of 2</span>
     <span class="chip gold" id="brief-mode"></span>
     <span class="spacer"></span>
+    <div class="progress" id="brief-progress" data-show="0">
+      <div class="bar"><div class="fill"></div><div class="head" style="left:0"></div></div>
+      <div class="line"><span><span class="dot"></span><span class="label">writing another</span></span><span class="pct">0%</span></div>
+    </div>
     <button class="chip" id="brief-regenerate"><span>↻</span><span id="brief-regenerate-label">regenerate</span></button>
     <button class="btn primary" id="brief-begin">Begin interview</button>
   </div>
