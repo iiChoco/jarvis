@@ -70,8 +70,11 @@ hub's existing aiohttp application (`WebLink.start()` mounts it when
 over the socket including a cut-off and a reconnect), `speaker` (4),
 `cases` (14). Live: the dev server (`ciel interview serve --dev`, the
 `interview-dev` preview) walked through a case and a technical interview
-in the browser with piper audio. Owed: the Cloudflare Access bypass for
-`/interview`, the hub deploy, and a spoken interview from a phone.
+in the browser with piper audio; the designed page walked through every
+view at desktop and phone widths. Deployed 2026-09-04: the Cloudflare
+Access bypass on `/interview` (the Chart stays behind the owner's PIN),
+piper on the arm64 hub, `[interview] enabled = true`. Owed: a spoken
+interview from a phone.
 
 ## 2026-09-03 — what survives a hub that is away (phase 5, part one)
 
