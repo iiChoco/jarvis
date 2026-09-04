@@ -47,6 +47,18 @@
         "8797"
       ],
       "port": 8797
+    },
+    {
+      "name": "design-boards",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8790",
+        "-d",
+        "design/boards"
+      ],
+      "port": 8790
     }
   ]
 }

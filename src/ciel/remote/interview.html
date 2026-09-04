@@ -1,261 +1,842 @@
 <!doctype html>
-<!-- The interview room (Adjoint), stub page.
+<!-- The interview room (Adjoint). Served by ciel/interview/app.py; the
+     behaviour is interview.js, loaded at the bottom, which touches this
+     document only through the ids, data attributes, and <template>s here.
 
-     This is the *contract*, not the design: every id, data attribute, and
-     <template> that interview.js touches, laid out plainly with almost no
-     CSS. The designed page from Claude Design replaces this file wholesale
-     and keeps exactly these hooks (and the one <script> tag at the bottom);
-     the script never touches the DOM through anything else. -->
+     The look is the Chart's "Instrument" (see chart.html): cyan is
+     structure, gold is voice and anything that wants you; cut-corner chips,
+     mono captions, serif for what Ciel says, scanlines, corner brackets.
+     Two rules the room adds: red is only ever REC, and the still-listening
+     ring is the listening green filling a plain circle — a timer, not a
+     control. Ciel's aperture breathes while she speaks.
+
+     Design: the owner's Claude Design project "Ciel Interview" (the 'a'
+     variants), translated from fixed artboards into a responsive page. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ciel · Interview</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Ccircle cx='64' cy='64' r='58' fill='none' stroke='%23e8c98a' stroke-opacity='.5' stroke-width='7' stroke-dasharray='4 12'/%3E%3Ccircle cx='64' cy='64' r='34' fill='none' stroke='%23a0f0ff' stroke-opacity='.7' stroke-width='7'/%3E%3Ccircle cx='64' cy='64' r='12' fill='%23e8c98a'/%3E%3C/svg%3E">
 <style>
-  body { font: 15px/1.5 system-ui, sans-serif; margin: 0; padding: 1rem; max-width: 60rem; color: #222; }
-  header { display: flex; gap: 1rem; align-items: center; margin-bottom: 1rem; }
-  header .spacer { flex: 1; }
-  section[data-view] { display: none; }
+  :root {
+    --line: rgba(140, 240, 255, .14);
+    --line-strong: rgba(140, 240, 255, .22);
+    --glass-border: rgba(160, 240, 255, .28);
+    --cyan: #a0f0ff;
+    --cyan-text: #c7f4fd;
+    --cyan-dim: rgba(160, 214, 235, .42);
+    --text: #dfe6e6;
+    --text-bright: #f7f2e7;
+    --text-dim: rgba(223, 230, 230, .65);
+    --text-faint: rgba(223, 230, 230, .34);
+    --gold: #e8c98a;
+    --gold-bright: #fdf5e5;
+    --gold-soft: #f0dbaf;
+    --gold-dim: rgba(232, 201, 138, .45);
+    --gold-line: rgba(232, 201, 138, .16);
+    --gold-rule: rgba(232, 201, 138, .5);
+    --green: #7adea8;
+    --green-text: #a6ecc7;
+    --rec: #e88a8a;
+    --serif: Georgia, "Times New Roman", serif;
+    --mono: ui-monospace, Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+    --st-idle: #8fa8b3;
+    --st-listening: #7adea8;
+    --st-thinking: #e8c98a;
+    --st-speaking: #a0f0ff;
+    --st-paused: #b89be8;
+    --st-ended: #8fa8b3;
+    --cut9: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px));
+    --cut8: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
+    --cut7: polygon(0 0, calc(100% - 7px) 0, 100% 7px, 100% 100%, 7px 100%, 0 calc(100% - 7px));
+    --cut12: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    background: radial-gradient(120% 85% at 50% -10%, #0b1922 0%, #050c11 55%, #030608 100%) #030608;
+    color: var(--text);
+    font: 14.5px/1.55 var(--sans);
+    display: flex; flex-direction: column;
+    min-height: 100vh;
+  }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { background: none; border: none; cursor: pointer; padding: 0; }
+  a { color: var(--gold); }
+  :focus-visible { outline: 1px solid rgba(160, 240, 255, .55); outline-offset: 2px; }
+  input::placeholder, textarea::placeholder { color: rgba(223, 230, 230, .32); }
+  [hidden] { display: none !important; }
+
+  @keyframes br { 0%, 100% { opacity: .45; transform: scale(.88); } 50% { opacity: 1; transform: scale(1.08); } }
+  @keyframes ap1 { 0%, 100% { transform: scale(1); opacity: .55; } 50% { transform: scale(1.18); opacity: .95; } }
+  @keyframes ap2 { 0%, 100% { transform: scale(1); opacity: .5; } 40% { transform: scale(1.32); opacity: .9; } }
+  @keyframes ap3 { 0%, 100% { transform: scale(1); opacity: .35; } 60% { transform: scale(1.5); opacity: .7; } }
+  @keyframes rec { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+  @keyframes cursor { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+  /* the projection */
+  #scan { position: fixed; inset: 0; z-index: 50; pointer-events: none; opacity: .3;
+          background: repeating-linear-gradient(180deg, rgba(160, 240, 255, .05) 0 1px, transparent 1px 3px); }
+  .corner { position: fixed; z-index: 51; width: 13px; height: 13px; pointer-events: none; }
+  .corner.tl { top: 10px; left: 10px; border-left: 1px solid rgba(232, 201, 138, .6); border-top: 1px solid rgba(232, 201, 138, .6); }
+  .corner.tr { top: 10px; right: 10px; border-right: 1px solid rgba(232, 201, 138, .6); border-top: 1px solid rgba(232, 201, 138, .6); }
+  .corner.bl { bottom: 10px; left: 10px; border-left: 1px solid rgba(232, 201, 138, .35); border-bottom: 1px solid rgba(232, 201, 138, .35); }
+  .corner.br { bottom: 10px; right: 10px; border-right: 1px solid rgba(232, 201, 138, .35); border-bottom: 1px solid rgba(232, 201, 138, .35); }
+
+  /* type roles */
+  .cap { font: 500 9.5px/1 var(--mono); letter-spacing: .26em; text-transform: uppercase; color: var(--gold-dim); display: flex; align-items: center; gap: 12px; }
+  .cap .rule { flex: 1; height: 1px; background: var(--gold-line); }
+  .cap.cyan { color: var(--cyan-dim); }
+  .cap.cyan .rule { background: var(--line); }
+  .lbl { font: 500 9.5px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--text-faint); }
+  .mono { font-family: var(--mono); }
+  .said { border-left: 1px solid var(--gold-rule); padding-left: 22px; font: 400 30px/1.4 var(--serif); color: var(--text-bright); text-wrap: pretty; }
+
+  /* chips */
+  .chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border: 1px solid var(--line-strong);
+          clip-path: var(--cut8); font: 600 10px/1 var(--mono); letter-spacing: .2em; text-transform: uppercase;
+          color: var(--text-dim); white-space: nowrap; text-decoration: none; background: none; }
+  .chip.gold { border-color: rgba(232, 201, 138, .4); color: var(--gold); }
+  .chip .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 16px; border: 1px solid var(--line-strong);
+         clip-path: var(--cut9); font: 600 10px/1 var(--mono); letter-spacing: .22em; text-transform: uppercase; color: var(--text-dim); white-space: nowrap; }
+  .btn.primary { padding: 16px 34px; font-weight: 700; font-size: 11px; background: rgba(232, 201, 138, .92); color: #231b0c; border: none; }
+  .btn.primary:disabled { opacity: .5; cursor: default; }
+  .btn.gold { border-color: rgba(232, 201, 138, .55); color: var(--gold); }
+  .btn.red { border-color: rgba(232, 138, 138, .3); color: rgba(232, 138, 138, .75); }
+  .btn.small { padding: 6px 10px; font-size: 9px; letter-spacing: .18em; clip-path: var(--cut7); }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field .lbl.on { color: var(--gold); }
+  .input { padding: 11px 15px; background: rgba(160, 240, 255, .03); border: 1px solid rgba(140, 240, 255, .2); clip-path: var(--cut9);
+           color: var(--text); font: 400 14px/1.4 var(--sans); outline: none; width: 100%; }
+  .input:focus { border-color: rgba(140, 240, 255, .45); }
+  textarea.input { font-size: 15px; line-height: 1.5; resize: none; }
+  .hint { font: 400 11px/1.5 var(--mono); color: var(--text-faint); }
+  /* chip groups: radio inputs dressed as chips */
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .chips label { position: relative; }
+  .chips input { position: absolute; opacity: 0; inset: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .chips span { display: inline-block; padding: 9px 11px; border: 1px solid var(--line-strong); clip-path: var(--cut7);
+                font: 600 9.5px/1 var(--mono); letter-spacing: .16em; color: var(--text-dim); text-transform: uppercase; }
+  .chips input:checked + span { border-color: rgba(160, 240, 255, .6); background: rgba(160, 240, 255, .12); color: var(--cyan-text); }
+  .chips input:focus-visible + span { outline: 1px solid rgba(160, 240, 255, .55); }
+
+  /* the state chip */
+  #state-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 13px 6px 10px; border: 1px solid rgba(143, 168, 179, .42);
+                background: rgba(143, 168, 179, .1); clip-path: var(--cut8); font: 600 10px/1 var(--mono); letter-spacing: .22em;
+                text-transform: uppercase; color: #b6c6cd; white-space: nowrap; --c: var(--st-idle); }
+  #state-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--c); }
+  body[data-state="listening"] #state-chip { --c: var(--st-listening); border-color: rgba(122, 222, 168, .5); background: rgba(122, 222, 168, .1); color: var(--green-text); }
+  body[data-state="listening"] #state-chip .dot { box-shadow: 0 0 9px var(--c); animation: br 3.4s ease-in-out infinite; }
+  body[data-state="thinking"] #state-chip { --c: var(--st-thinking); border-color: rgba(232, 201, 138, .5); background: rgba(232, 201, 138, .1); color: var(--gold-soft); }
+  body[data-state="thinking"] #state-chip .dot { box-shadow: 0 0 9px var(--c); animation: br 1.4s ease-in-out infinite; }
+  body[data-state="speaking"] #state-chip { --c: var(--st-speaking); border-color: rgba(160, 240, 255, .5); background: rgba(160, 240, 255, .1); color: var(--cyan-text); }
+  body[data-state="speaking"] #state-chip .dot { box-shadow: 0 0 9px var(--c); }
+  body[data-state="paused"] #state-chip { --c: var(--st-paused); color: #d6c8f0; }
+  body:not([data-view="live"]) #state-chip { display: none; }
+
+  /* header */
+  header { display: flex; align-items: center; gap: 14px; padding: 14px 28px; border-bottom: 1px solid var(--line); flex: none; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand .wordmark { font: 400 18px/1 var(--serif); letter-spacing: .24em; color: #f3efe6; }
+  .brand .sub { font: 500 9.5px/1 var(--mono); letter-spacing: .26em; color: rgba(160, 214, 235, .5); }
+  .aperture { overflow: visible; }
+  .aperture circle { transform-box: fill-box; transform-origin: center; }
+  .aperture .c-outer { stroke: rgba(232, 201, 138, .35); }
+  .aperture .c-mid { stroke: rgba(160, 240, 255, .5); }
+  .aperture .c-core { fill: rgba(232, 201, 138, .85); }
+  body[data-state="speaking"] .aperture .c-outer { animation: ap3 2.2s ease-in-out infinite; }
+  body[data-state="speaking"] .aperture .c-mid { animation: ap2 1.7s ease-in-out infinite; }
+  body[data-state="speaking"] .aperture .c-core { animation: ap1 1.1s ease-in-out infinite; }
+  .spacer { flex: 1; }
+  #rec { display: none; align-items: center; gap: 8px; font: 600 10px/1 var(--mono); letter-spacing: .22em; color: rgba(232, 138, 138, .9); }
+  #rec .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--rec); box-shadow: 0 0 8px rgba(232, 138, 138, .7); animation: rec 1.6s ease-in-out infinite; }
+  body[data-view="live"][data-rec="on"] #rec { display: inline-flex; }
+  #timer-chip, #q-count-chip, #mode-chip { display: none; font-variant-numeric: tabular-nums; }
+  body[data-view="live"] #timer-chip, body[data-view="live"] #q-count-chip, body[data-view="live"] #mode-chip:not(:empty) { display: inline-flex; }
+  #timer-chip .faint, #q-count-chip .faint { color: var(--text-faint); }
+  header .nav { display: none; }
+  body[data-view="lobby"] header .nav, body[data-view="setup"] header .nav, body[data-view="brief"] header .nav,
+  body[data-view="review"] header .nav, body[data-view="admin"] header .nav { display: inline-flex; }
+  body[data-view="login"] #whoami, body[data-view="login"] #nav-logout { display: none; }
+
+  /* banners */
+  #conn-banner { display: none; align-items: center; gap: 12px; padding: 10px 28px; border-bottom: 1px solid rgba(232, 201, 138, .4);
+                 background: rgba(232, 201, 138, .06); font: 500 10px/1 var(--mono); letter-spacing: .22em; text-transform: uppercase; color: var(--gold); }
+  #conn-banner .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--gold); animation: br 1.4s ease-in-out infinite; }
+  body[data-conn="lost"] #conn-banner { display: flex; }
+  #tts-fallback-note { display: none; padding: 8px 28px; font: 400 11px/1.5 var(--mono); color: var(--text-faint); border-bottom: 1px solid var(--line); }
+  body[data-tts="browser"][data-view="live"] #tts-fallback-note { display: block; }
+
+  /* views */
+  main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  section[data-view] { display: none; flex: 1; min-height: 0; }
   body[data-view="login"]  section[data-view="login"],
   body[data-view="lobby"]  section[data-view="lobby"],
   body[data-view="setup"]  section[data-view="setup"],
   body[data-view="brief"]  section[data-view="brief"],
   body[data-view="live"]   section[data-view="live"],
   body[data-view="review"] section[data-view="review"],
-  body[data-view="admin"]  section[data-view="admin"] { display: block; }
-  #conn-banner, #tts-fallback-note, #login-error, #setup-busy, #apology, #sessions-empty { display: none; }
-  body[data-conn="lost"] #conn-banner { display: block; background: #fdd; padding: .5rem; }
-  body[data-tts="browser"] #tts-fallback-note { display: block; color: #666; }
-  #login-error[data-show="1"], #setup-busy[data-show="1"], #apology[data-show="1"], #sessions-empty[data-show="1"] { display: block; }
-  #state { font-family: ui-monospace, monospace; }
-  #hold-ring { width: 3rem; height: 3rem; border-radius: 50%; border: 3px solid #ccc;
-               background: conic-gradient(#2a7 calc(var(--hold, 0) * 100%), transparent 0); }
-  #q-text { font-size: 1.4rem; font-family: Georgia, serif; min-height: 3rem; }
-  #partial { color: #666; min-height: 1.5rem; }
-  #transcript .row, #review-transcript .row { padding: .15rem 0; }
-  .row[data-speaker="interviewer"] { color: #333; }
-  .row[data-speaker="candidate"] { color: #06c; }
-  .row[data-speaker="event"] { color: #999; font-style: italic; }
-  #exhibits .card { border: 1px solid #ccc; padding: .5rem; margin: .5rem 0; }
-  table { border-collapse: collapse; } td, th { border: 1px solid #ddd; padding: .2rem .5rem; }
-  #account-secret:empty { display: none; }
-  #account-secret { background: #ffe; padding: .5rem; font-family: ui-monospace, monospace; }
-  body[data-stt="none"] #typed-form { display: block; }
-  #typed-form { display: none; }
-  #debrief { white-space: pre-wrap; }
-  [data-view="setup"] [data-mode] { display: none; }
-  body[data-setup-mode="company"] [data-mode~="company"],
-  body[data-setup-mode="case"] [data-mode~="case"],
-  body[data-setup-mode="technical"] [data-mode~="technical"] { display: block; }
-  [data-view="brief"] dd:empty, [data-view="brief"] dd:empty + dt, [data-view="brief"] dt:has(+ dd:empty) { display: none; }
+  body[data-view="admin"]  section[data-view="admin"] { display: flex; flex-direction: column; }
+  .page { width: 100%; max-width: 900px; margin: 0 auto; padding: 36px 20px 28px; display: flex; flex-direction: column; gap: 30px; }
+  [data-show]:not([data-show="1"]) { display: none !important; }
+
+  /* ── sign in ─────────────────────────────────────────────────────────── */
+  section[data-view="login"] { align-items: center; justify-content: center; }
+  #login-form { width: 340px; max-width: 100%; display: flex; flex-direction: column; gap: 22px; }
+  #login-form .mark { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+  #login-form .mark .wordmark { font: 400 22px/1 var(--serif); letter-spacing: .24em; color: #f3efe6; }
+  #login-form .fields { display: flex; flex-direction: column; gap: 10px; }
+  #login-form .btn.primary { padding: 14px 32px; }
+  #login-error { padding: 10px 14px; border-left: 1px solid rgba(232, 138, 138, .7); font: 500 10px/1.5 var(--mono); letter-spacing: .12em; color: rgba(232, 138, 138, .9); text-transform: uppercase; }
+  .login-foot { padding: 14px 28px; text-align: center; font: 500 9.5px/1 var(--mono); letter-spacing: .26em; text-transform: uppercase; color: var(--gold-dim); }
+
+  /* ── lobby ───────────────────────────────────────────────────────────── */
+  .lobby-top { display: flex; align-items: flex-end; justify-content: space-between; gap: 30px; flex-wrap: wrap; }
+  #lobby-greeting { border-left: 1px solid var(--gold-rule); padding-left: 18px; font: 400 22px/1.5 var(--serif); color: var(--text-bright); text-wrap: pretty; max-width: 560px; }
+  .cols { display: grid; grid-template-columns: 76px 1fr 120px 64px 150px 28px; column-gap: 18px; align-items: center; }
+  .cols.head { padding: 8px 0 6px; font: 500 9.5px/1 var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--text-faint); }
+  #sessions { display: flex; flex-direction: column; }
+  #sessions .session { padding: 13px 0; border-top: 1px solid rgba(255, 255, 255, .05); cursor: pointer; }
+  #sessions .session:last-child { border-bottom: 1px solid rgba(255, 255, 255, .05); }
+  #sessions .session:hover [data-field="title"] { color: #fff; }
+  .session [data-field="date"], .session [data-field="duration"] { font: 400 12px/1 var(--mono); color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .session [data-field="duration"] { text-align: right; }
+  .session [data-field="title"] { font: 400 16px/1.4 var(--serif); color: #eef4f1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session [data-field="mode"] { justify-self: start; padding: 5px 10px; font-size: 9px; letter-spacing: .18em; }
+  .session[data-mode="case"] [data-field="mode"], .session[data-mode="technical"] [data-field="mode"] { border-color: rgba(232, 201, 138, .4); color: var(--gold); }
+  .session [data-field="debrief"] { display: flex; align-items: center; gap: 8px; font: 500 10px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--text-faint); }
+  .session [data-field="debrief"]::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--st-idle); flex: none; }
+  .session[data-state="debriefed"] [data-field="debrief"] { color: var(--green-text); }
+  .session[data-state="debriefed"] [data-field="debrief"]::before { background: var(--green); box-shadow: 0 0 9px var(--green); }
+  .session[data-state="live"] [data-field="debrief"], .session[data-state="ended"] [data-field="debrief"] { color: var(--gold-soft); }
+  .session[data-state="live"] [data-field="debrief"]::before, .session[data-state="ended"] [data-field="debrief"]::before { background: var(--gold); box-shadow: 0 0 9px var(--gold); animation: br 3.4s ease-in-out infinite; }
+  .session [data-action="delete"] { font: 400 14px/1 var(--mono); color: var(--text-faint); justify-self: end; }
+  .session [data-action="delete"]:hover { color: rgba(232, 138, 138, .9); }
+  #sessions-empty { display: flex; flex-direction: column; gap: 34px; }
+  #sessions-empty .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 26px; }
+  #sessions-empty .step { display: flex; flex-direction: column; gap: 10px; padding-top: 12px; border-top: 1px solid var(--line-strong); }
+  #sessions-empty .step b { font: 500 9.5px/1 var(--mono); letter-spacing: .26em; color: var(--gold); }
+  #sessions-empty .step span { font: 400 13px/1.55 var(--sans); color: var(--text-dim); }
+  .lobby-list[data-empty="1"] { display: none; }
+
+  /* ── setup ───────────────────────────────────────────────────────────── */
+  #setup-form { max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 26px; width: 100%; }
+  .seg { display: grid; grid-template-columns: repeat(3, 1fr); }
+  .seg label { position: relative; }
+  .seg input { position: absolute; inset: 0; opacity: 0; margin: 0; width: 100%; height: 100%; cursor: pointer; }
+  .seg .card { display: flex; flex-direction: column; gap: 6px; padding: 16px 18px; border: 1px solid var(--line-strong); color: var(--text-dim); height: 100%; }
+  .seg label:first-child .card { clip-path: polygon(0 0, 100% 0, 100% 100%, 9px 100%, 0 calc(100% - 9px)); }
+  .seg label:not(:first-child) .card { border-left: none; }
+  .seg label:last-child .card { clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 0 100%); }
+  .seg .card b { font: 700 11px/1 var(--mono); letter-spacing: .22em; }
+  .seg .card span { font: 400 12.5px/1.4 var(--sans); opacity: .7; }
+  .seg input:checked + .card { background: rgba(232, 201, 138, .92); border-color: rgba(232, 201, 138, .92); color: #231b0c; }
+  .seg input:checked + .card span { opacity: .8; }
+  .setup-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; }
+  [data-view="setup"] [data-mode] { display: none !important; }
+  body[data-setup-mode="company"] [data-view="setup"] [data-mode~="company"],
+  body[data-setup-mode="case"] [data-view="setup"] [data-mode~="case"],
+  body[data-setup-mode="technical"] [data-view="setup"] [data-mode~="technical"] { display: flex !important; }
+  body[data-setup-mode="company"] [data-view="setup"] .setup-grid[data-mode~="company"],
+  body[data-setup-mode="case"] [data-view="setup"] .setup-grid[data-mode~="case"],
+  body[data-setup-mode="technical"] [data-view="setup"] .setup-grid[data-mode~="technical"] { display: grid !important; }
+  .setup-go { display: flex; align-items: center; gap: 18px; padding-top: 8px; flex-wrap: wrap; }
+  #setup-busy { display: flex; align-items: center; gap: 10px; font: 400 12px/1.5 var(--mono); color: var(--gold-soft); }
+  #setup-busy .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 9px var(--gold); animation: br 1.4s ease-in-out infinite; }
+  .rec-note { display: flex; align-items: center; gap: 10px; font: 400 11px/1.5 var(--mono); color: var(--text-faint); }
+  .rec-note::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--rec); opacity: .9; flex: none; }
+
+  /* ── brief ───────────────────────────────────────────────────────────── */
+  .brief-bar { display: flex; align-items: center; gap: 14px; padding: 12px 28px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .brief-bar .btn.primary { padding: 10px 22px; }
+  #brief-mode:empty { display: none; }
+  .dossier { flex: 1; display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+  .dossier > div { padding: 30px 36px; display: flex; flex-direction: column; gap: 20px; overflow: auto; }
+  .dossier > div:first-child { border-right: 1px solid var(--line); }
+  .dossier .name { font: 400 30px/1.15 var(--serif); color: var(--text-bright); letter-spacing: .01em; }
+  .dossier .tagline { font: 400 15px/1.5 var(--serif); color: rgba(247, 242, 231, .7); margin-top: 6px; text-wrap: pretty; }
+  .ledger { display: grid; grid-template-columns: 110px 1fr; row-gap: 13px; column-gap: 18px; font: 400 13.5px/1.5 var(--sans); color: var(--text); }
+  .ledger dt { font: 500 9.5px/1.6 var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--text-faint); padding-top: 3px; }
+  .ledger dd { text-wrap: pretty; }
+  .ledger dd:empty, .ledger dt:has(+ dd:empty) { display: none; }
+  .ledger dd.list { display: flex; flex-direction: column; gap: 5px; }
+  .ledger dd.list:empty { display: none; }
+  .case-prompt { border-left: 1px solid var(--gold-rule); padding-left: 20px; font: 400 21px/1.55 var(--serif); color: var(--text-bright); text-wrap: pretty; }
+  .case-prompt:empty { display: none; }
+  #brief-questions { list-style: none; padding: 0; display: flex; flex-direction: column; }
+  #brief-questions li { display: grid; grid-template-columns: 34px 1fr; gap: 12px; padding: 12px 0; border-bottom: 1px solid rgba(255, 255, 255, .05); }
+  #brief-questions li .n { font: 400 11px/1.7 var(--mono); color: var(--gold); }
+  #brief-questions li [data-field="q"] { font: 400 16px/1.5 var(--serif); color: var(--text-bright); text-wrap: pretty; }
+  #brief-questions li [data-field="kind"] { display: block; font: 400 9.5px/1.6 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--text-faint); }
+  .exhibit-list { display: flex; flex-direction: column; }
+  .exhibit-list div { display: grid; grid-template-columns: 24px 1fr auto; gap: 10px; padding: 10px 0; border-bottom: 1px solid rgba(255, 255, 255, .05); align-items: center; font: 400 13px/1.4 var(--sans); }
+  .exhibit-list .n { font: 400 10.5px/1 var(--mono); color: var(--gold); }
+  .exhibit-list .k { font: 400 9.5px/1 var(--mono); letter-spacing: .14em; color: var(--text-faint); text-transform: uppercase; }
+  .sealed { color: var(--text-dim); }
+  .brief-foot { margin-top: auto; }
+
+  /* ── live ────────────────────────────────────────────────────────────── */
+  .live-grid { flex: 1; display: grid; grid-template-columns: 1fr; min-height: 0; }
+  .live-grid[data-side="1"] { grid-template-columns: 1fr 440px; }
+  .live-grid[data-side="1"][data-editor="1"] { grid-template-columns: minmax(360px, 440px) 1fr; }
+  .stage { display: flex; flex-direction: column; justify-content: center; gap: 30px; padding: 40px 48px; min-height: 0; overflow: auto; }
+  .stage .inner { width: 100%; max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 30px; }
+  .live-grid[data-side="1"] .stage .inner { max-width: none; }
+  .live-grid[data-side="1"] #q-text { font-size: 24px; }
+  .live-grid[data-editor="1"] #q-text { font-size: 19px; line-height: 1.45; padding-left: 18px; }
+  .qblock { display: flex; flex-direction: column; gap: 14px; }
+  #q-text { min-height: 84px; }
+  #q-text[data-dim="1"] { border-left-color: rgba(232, 201, 138, .2); color: rgba(247, 242, 231, .4); font-size: 19px; line-height: 1.45; min-height: 0; }
+  #apology { display: flex; flex-direction: column; gap: 8px; padding-left: 22px; border-left: 1px solid rgba(232, 201, 138, .7); box-shadow: -8px 0 30px -14px rgba(232, 201, 138, .5); }
+  #apology .cap { color: var(--gold); letter-spacing: .22em; }
+  #apology .text { font: 400 30px/1.35 var(--serif); color: var(--gold-bright); }
+  .you { display: flex; flex-direction: column; gap: 12px; min-height: 150px; }
+  .you .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .you .row .lbl { color: var(--cyan-dim); letter-spacing: .18em; }
+  .ring-lbl { display: flex; align-items: center; gap: 10px; font: 500 9.5px/1 var(--mono); letter-spacing: .18em; text-transform: uppercase; color: var(--text-faint); }
+  body[data-state="listening"] .ring-lbl { color: var(--green-text); }
+  #hold-ring { width: 22px; height: 22px; }
+  #hold-ring .track { fill: none; stroke: rgba(122, 222, 168, .18); stroke-width: 1.5; }
+  #hold-ring .fill { fill: none; stroke: var(--green); stroke-width: 1.5; stroke-linecap: round; stroke-dasharray: 56.55;
+                     stroke-dashoffset: calc(56.55px * (1 - var(--hold, 0))); transform: rotate(-90deg); transform-origin: center; }
+  #partial { font: 400 18px/1.6 var(--sans); color: var(--text-dim); text-wrap: pretty; min-height: 88px; }
+  #partial::after { content: ""; display: inline-block; width: 2px; height: 18px; background: var(--green); vertical-align: -3px; margin-left: 3px; animation: cursor 1s steps(1) infinite; opacity: 0; }
+  body[data-state="listening"] #partial::after { opacity: 1; }
+  .live-grid[data-editor="1"] #partial { font-size: 13.5px; min-height: 0; }
+  .live-grid[data-editor="1"] .you { min-height: 0; }
+  .live-grid[data-editor="1"] .stage { justify-content: flex-start; padding: 20px 26px; gap: 14px; border-right: 1px solid var(--line); }
+  .controls { display: flex; align-items: center; gap: 12px; padding: 16px 28px; border-top: 1px solid var(--line); background: rgba(6, 18, 24, .55); flex: none; flex-wrap: wrap; }
+  .controls .hint { margin-left: 6px; }
+  body[data-state="listening"] #btn-done { border-color: rgba(232, 201, 138, .55); color: var(--gold); }
+  #typed-form { display: none; gap: 8px; flex: 1; min-width: 240px; }
+  body[data-stt="none"] #typed-form { display: flex; }
+  #typed-form .input { padding: 9px 13px; }
+  .side { padding: 28px 28px 28px 0; display: flex; flex-direction: column; gap: 12px; overflow: auto; min-height: 0; }
+  .live-grid[data-side="0"] .side { display: none; }
+  .live-grid[data-editor="1"] .side { padding: 28px; }
+  #exhibits { display: flex; flex-direction: column; gap: 12px; }
+  #exhibits .card { background: linear-gradient(180deg, rgba(160, 240, 255, .1), rgba(160, 240, 255, .03)); border: 1px solid var(--glass-border);
+                    clip-path: var(--cut12); padding: 18px 20px 20px; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 0 40px rgba(160, 240, 255, .08); }
+  #exhibits .card .head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; cursor: pointer; }
+  #exhibits .card .head .k { font: 600 9.5px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--cyan-text); display: block; margin-bottom: 5px; }
+  #exhibits .card .head [data-field="title"] { font: 400 16px/1.3 var(--serif); color: var(--text-bright); }
+  #exhibits .card .head .open { font: 400 10px/1 var(--mono); color: var(--text-faint); white-space: nowrap; }
+  #exhibits .card table { border-collapse: collapse; width: 100%; font: 400 12.5px/1.4 var(--mono); font-variant-numeric: tabular-nums; }
+  #exhibits .card th { padding: 6px 0 6px 8px; border-bottom: 1px solid rgba(160, 240, 255, .22); font: 500 9.5px/1 var(--mono); letter-spacing: .18em; text-transform: uppercase; color: var(--text-faint); text-align: right; }
+  #exhibits .card th:first-child, #exhibits .card td:first-child { text-align: left; padding-left: 0; font-family: var(--sans); font-size: 13px; }
+  #exhibits .card td { padding: 8px 0 8px 8px; border-bottom: 1px solid rgba(255, 255, 255, .05); text-align: right; }
+  #exhibits .card tr:last-child td { border-bottom: none; color: var(--text-bright); }
+  #exhibits .card [data-field="note"] { font: 400 10.5px/1.5 var(--mono); color: var(--text-faint); }
+  #exhibits .card [data-field="note"]:empty { display: none; }
+  #exhibits .card.collapsed { padding: 12px 16px; background: rgba(160, 240, 255, .03); border-color: rgba(160, 240, 255, .18); box-shadow: none; clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); }
+  #exhibits .card.collapsed table, #exhibits .card.collapsed [data-field="note"] { display: none; }
+  #exhibits .card.collapsed .head .k { display: inline; margin: 0 12px 0 0; color: rgba(160, 214, 235, .5); }
+  #exhibits .card.collapsed .head [data-field="title"] { font-size: 13.5px; color: rgba(247, 242, 231, .7); }
+  .side-foot { font: 400 11px/1.5 var(--mono); color: var(--text-faint); text-align: right; }
+  /* the problem + editor (technical) */
+  #problem { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border: 1px solid rgba(160, 240, 255, .22); background: rgba(160, 240, 255, .03);
+             clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); }
+  #problem .head { display: flex; align-items: center; gap: 10px; }
+  #problem .head .k { font: 600 9.5px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--cyan-text); }
+  #problem .head .rule { flex: 1; height: 1px; background: rgba(160, 240, 255, .14); }
+  #problem [data-field="title"] { font: 400 16px/1.3 var(--serif); color: var(--text-bright); }
+  #problem [data-field="meta"] { font: 400 9.5px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--text-faint); }
+  #problem [data-field="statement"] { font: 400 12.5px/1.5 var(--sans); color: var(--text); text-wrap: pretty; }
+  #problem ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font: 400 11.5px/1.5 var(--mono); color: var(--text-dim); }
+  #problem ul li::before { content: "› "; color: var(--gold); }
+  #problem .k2 { font: 600 9px/1 var(--mono); letter-spacing: .22em; text-transform: uppercase; color: var(--text-faint); }
+  .editor { flex: 1; display: flex; flex-direction: column; min-height: 320px; background: linear-gradient(180deg, rgba(160, 240, 255, .08), rgba(160, 240, 255, .02));
+            border: 1px solid var(--glass-border); clip-path: var(--cut12); overflow: hidden; }
+  .editor .bar { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid rgba(160, 240, 255, .18); }
+  .editor .bar .k { font: 600 9.5px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--cyan-text); }
+  .editor .sel { position: relative; }
+  #code-lang { appearance: none; -webkit-appearance: none; padding: 6px 26px 6px 12px; background: rgba(160, 240, 255, .06); border: 1px solid rgba(160, 240, 255, .6);
+               clip-path: var(--cut8); color: var(--cyan-text); font: 600 10px/1 var(--mono); letter-spacing: .2em; outline: none; text-transform: uppercase; }
+  .editor .sel::after { content: "▾"; position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font: 400 9px/1 var(--mono); color: rgba(160, 214, 235, .7); pointer-events: none; }
+  #code-editor { flex: 1; width: 100%; min-height: 280px; padding: 14px 18px; background: none; border: none; outline: none; resize: none;
+                 font: 400 13px/1.7 var(--mono); color: var(--text); tab-size: 4; white-space: pre; }
+  .editor .CodeMirror { flex: 1; height: auto; background: transparent; color: var(--text); font: 400 13px/1.7 var(--mono); }
+  .editor .CodeMirror-gutters { background: transparent; border-right: 1px solid rgba(160, 240, 255, .1); }
+  .editor .CodeMirror-linenumber { color: rgba(223, 230, 230, .25); }
+  .editor .CodeMirror-cursor { border-left: 2px solid var(--cyan); }
+  .editor .foot { display: flex; align-items: center; gap: 14px; padding: 9px 16px; border-top: 1px solid rgba(160, 240, 255, .18); font: 400 10.5px/1 var(--mono); color: var(--text-faint); }
+  .editor .foot .ok { color: var(--green-text); }
+
+  /* ── review ──────────────────────────────────────────────────────────── */
+  .review-head { display: flex; align-items: center; gap: 14px; padding: 12px 28px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .review-head [data-field="title"] { font: 400 15px/1.3 var(--serif); color: var(--text-bright); }
+  .player { display: flex; align-items: center; gap: 18px; padding: 16px 28px; border-bottom: 1px solid rgba(232, 201, 138, .3);
+            background: linear-gradient(180deg, rgba(232, 201, 138, .08), rgba(232, 201, 138, .02)); flex: none; }
+  #player-toggle { width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; clip-path: var(--cut9); background: rgba(232, 201, 138, .92); color: #231b0c; font: 700 12px/1 var(--mono); flex: none; }
+  #player-time { font: 400 12px/1 var(--mono); color: var(--gold-soft); font-variant-numeric: tabular-nums; }
+  #player-total { font: 400 12px/1 var(--mono); color: var(--text-faint); font-variant-numeric: tabular-nums; }
+  #player-bar { flex: 1; position: relative; height: 28px; display: flex; align-items: center; cursor: pointer; }
+  #player-bar .track { position: absolute; left: 0; right: 0; height: 1px; background: rgba(232, 201, 138, .25); }
+  #player-fill { position: absolute; left: 0; width: 0; height: 1px; background: var(--gold); box-shadow: 0 0 8px rgba(232, 201, 138, .6); }
+  #player-head { position: absolute; left: 0; top: 9px; width: 10px; height: 10px; margin-left: -5px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 12px var(--gold); }
+  #player-bar .tick { position: absolute; top: 6px; width: 1px; height: 16px; background: rgba(232, 201, 138, .5); }
+  #player-bar .tick.ex { background: rgba(160, 240, 255, .7); }
+  .review-grid { flex: 1; display: grid; grid-template-columns: 1fr 460px; min-height: 0; }
+  .review-grid > div { padding: 24px 32px; display: flex; flex-direction: column; gap: 14px; overflow: auto; min-height: 0; }
+  .review-grid > div:first-child { border-right: 1px solid var(--line); }
+  #review-transcript { display: flex; flex-direction: column; gap: 14px; }
+  #review-transcript .row { display: grid; grid-template-columns: 50px 1fr; gap: 14px; cursor: pointer; }
+  #review-transcript .row [data-field="t"] { font: 400 11px/1.7 var(--mono); color: var(--text-faint); }
+  #review-transcript .row[data-speaker="interviewer"] [data-field="text"] { border-left: 1px solid var(--gold-rule); padding-left: 14px; font: 400 15px/1.55 var(--serif); color: var(--text-bright); }
+  #review-transcript .row[data-speaker="candidate"] [data-field="text"] { padding-left: 14px; font: 400 14.5px/1.55 var(--sans); color: var(--text-dim); }
+  #review-transcript .row[data-speaker="event"] [data-field="text"] { padding-left: 14px; font: 400 10px/1.7 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--text-faint); }
+  #review-transcript .row.playing [data-field="t"] { color: var(--cyan-text); }
+  #review-transcript .row.playing[data-speaker="candidate"] [data-field="text"] { padding: 11px 16px; background: linear-gradient(180deg, rgba(160, 240, 255, .13), rgba(160, 240, 255, .04)); border: 1px solid var(--glass-border);
+       clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); color: #eaf9fb; }
+  #debrief { display: flex; flex-direction: column; gap: 18px; }
+  .score-row { display: grid; grid-template-columns: auto 1fr; gap: 20px; align-items: center; }
+  .score { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 16px; border: 1px solid rgba(232, 201, 138, .4); clip-path: var(--cut9); }
+  .score b { font: 400 34px/1 var(--mono); color: var(--gold); font-variant-numeric: tabular-nums; }
+  .score span { font: 500 8.5px/1 var(--mono); letter-spacing: .2em; color: var(--text-faint); }
+  .verdict { border-left: 1px solid var(--gold-rule); padding-left: 14px; font: 400 15px/1.5 var(--serif); color: var(--text-bright); text-wrap: pretty; }
+  .dlist { display: flex; flex-direction: column; gap: 8px; }
+  .dlist .k { font: 500 9.5px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--text-faint); }
+  .dlist .k.good { color: var(--green-text); }
+  .dlist .k.work { color: var(--gold); }
+  .dlist ul { margin: 0; padding: 0 0 0 14px; font: 400 13.5px/1.5 var(--sans); color: var(--text); display: flex; flex-direction: column; gap: 4px; }
+  .dlist ol { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 7px; font: 400 13.5px/1.5 var(--sans); }
+  .dlist ol li { display: grid; grid-template-columns: 18px 1fr; gap: 8px; }
+  .dlist ol li .n { font: 400 11px/1.7 var(--mono); color: var(--gold); }
+  .comm { display: grid; grid-template-columns: 90px 1fr; row-gap: 8px; column-gap: 12px; font: 400 13px/1.45 var(--sans); color: var(--text-dim); margin: 0; }
+  .comm dt { font: 500 9.5px/1.6 var(--mono); letter-spacing: .2em; text-transform: uppercase; }
+  .comm dd { margin: 0; }
+  .qgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 4px; }
+  .qgrid button { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 7px 0; border: 1px solid var(--line); }
+  .qgrid button b { font: 400 13px/1 var(--mono); color: var(--cyan-text); }
+  .qgrid button span { font: 400 8.5px/1 var(--mono); color: var(--text-faint); }
+  .qgrid button.on { border-color: rgba(160, 240, 255, .6); background: rgba(160, 240, 255, .12); }
+  .qnote { padding: 10px 12px; border-left: 1px solid rgba(160, 240, 255, .4); font: 400 12.5px/1.5 var(--sans); color: var(--text-dim); }
+  .qnote .k { font: 500 9px/1 var(--mono); letter-spacing: .2em; color: var(--cyan-text); margin-right: 8px; }
+  #review-outcome { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+  #review-outcome:empty { display: none; }
+  #review-outcome .you-said { padding: 14px 16px; background: linear-gradient(180deg, rgba(160, 240, 255, .13), rgba(160, 240, 255, .04)); border: 1px solid var(--glass-border);
+       clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px)); font: 400 14px/1.55 var(--sans); color: #eaf9fb; }
+  #review-outcome .real { border-left: 1px solid var(--gold-rule); padding-left: 16px; font: 400 15px/1.55 var(--serif); color: var(--text-bright); text-wrap: pretty; }
+  #review-outcome .col { display: flex; flex-direction: column; gap: 10px; }
+  #review-outcome .col .k { font: 500 9.5px/1 var(--mono); letter-spacing: .22em; text-transform: uppercase; }
+  #review-code pre { margin: 0; padding: 14px 18px; background: rgba(160, 240, 255, .03); border: 1px solid rgba(160, 240, 255, .18); clip-path: var(--cut12);
+                     font: 400 12px/1.6 var(--mono); color: var(--text); white-space: pre; overflow: auto; }
+  .md h2, .md h3 { font: 500 9.5px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--gold); margin-top: 6px; }
+  .md p { font: 400 13.5px/1.5 var(--sans); }
+  .md ul { padding-left: 14px; font: 400 13.5px/1.5 var(--sans); }
+
+  /* ── admin ───────────────────────────────────────────────────────────── */
+  #account-secret { display: none; align-items: center; gap: 22px; padding: 16px 28px; border-bottom: 1px solid rgba(232, 201, 138, .6);
+                    background: linear-gradient(180deg, rgba(232, 201, 138, .12), rgba(232, 201, 138, .03)); box-shadow: 0 14px 50px rgba(232, 201, 138, .08); }
+  #account-secret[data-show="1"] { display: flex; }
+  #account-secret .bar { width: 3px; align-self: stretch; background: var(--gold); box-shadow: 0 0 14px var(--gold); flex: none; }
+  #account-secret .k { font: 500 9.5px/1 var(--mono); letter-spacing: .24em; text-transform: uppercase; color: var(--gold); margin-bottom: 8px; }
+  #account-secret .who { font: 400 17px/1.4 var(--serif); color: var(--gold-bright); }
+  #account-secret .pw { font: 400 17px/1.4 var(--mono); letter-spacing: .06em; color: var(--gold-bright); padding: 2px 10px; border: 1px solid rgba(232, 201, 138, .4); }
+  #account-secret .line { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  #account-secret .note { font: 400 11px/1.4 var(--mono); color: rgba(240, 219, 175, .6); }
+  #account-secret[data-kind="error"] .pw { border-color: rgba(232, 138, 138, .5); color: rgba(232, 138, 138, .9); }
+  #account-secret[data-kind="error"] .note { display: none; }
+  .acols { display: grid; grid-template-columns: 20px 130px 1fr 110px 110px auto; column-gap: 16px; align-items: center; }
+  .acols.head { padding: 6px 0; font: 500 9.5px/1 var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--text-faint); }
+  #accounts { display: flex; flex-direction: column; }
+  #accounts .account { padding: 11px 0; border-top: 1px solid rgba(255, 255, 255, .05); }
+  #accounts .account:last-child { border-bottom: 1px solid rgba(255, 255, 255, .05); }
+  #accounts .account .led { width: 7px; height: 7px; border-radius: 50%; background: rgba(143, 168, 179, .9); }
+  #accounts .account[data-disabled="0"][data-recent="1"] .led { background: var(--green); box-shadow: 0 0 9px var(--green); }
+  #accounts .account[data-disabled="1"] { opacity: .45; }
+  #accounts .account[data-disabled="1"] .led { background: none; border: 1px solid rgba(143, 168, 179, .9); }
+  #accounts .account[data-disabled="1"] [data-field="username"] { text-decoration: line-through; }
+  #accounts .account [data-field="username"] { font: 400 15px/1.4 var(--serif); color: #eef4f1; }
+  #accounts .account [data-field="role"] { font: 400 10.5px/1.4 var(--mono); color: rgba(223, 230, 230, .35); }
+  #accounts .account [data-field="created"], #accounts .account [data-field="last_seen"] { font: 400 12px/1 var(--mono); color: var(--text-dim); }
+  #accounts .account .acts { display: flex; gap: 6px; justify-content: flex-end; }
+  #accounts .account [data-action="delete"] { color: rgba(232, 138, 138, .6); border-color: rgba(232, 138, 138, .25); }
+  .admin-create { display: flex; align-items: flex-end; gap: 12px; margin-top: auto; padding-top: 14px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+  .admin-create .field { width: 260px; }
+
+  /* ── phone ───────────────────────────────────────────────────────────── */
+  @media (max-width: 900px) {
+    .dossier, .review-grid, #review-outcome { grid-template-columns: 1fr; }
+    .dossier > div:first-child, .review-grid > div:first-child { border-right: none; border-bottom: 1px solid var(--line); }
+    .live-grid[data-side="1"], .live-grid[data-side="1"][data-editor="1"] { grid-template-columns: 1fr; }
+    .side { padding: 0 20px 20px; }
+    .live-grid[data-editor="1"] .side { padding: 0 20px 20px; }
+    .live-grid[data-editor="1"] .stage { border-right: none; }
+    .stage { padding: 24px 20px; justify-content: flex-start; }
+    .said, #q-text { font-size: 22px; }
+    .cols { grid-template-columns: 64px 1fr 28px; }
+    .cols.head span:nth-child(3), .cols.head span:nth-child(4), .cols.head span:nth-child(5),
+    .session [data-field="mode"], .session [data-field="duration"], .session [data-field="debrief"] { display: none; }
+    .setup-grid, #sessions-empty .steps { grid-template-columns: 1fr; }
+    .seg { grid-template-columns: 1fr; }
+    .seg label .card { clip-path: none !important; border-left: 1px solid var(--line-strong) !important; }
+    .acols { grid-template-columns: 20px 1fr auto; }
+    .acols.head span:nth-child(3), .acols.head span:nth-child(4), .acols.head span:nth-child(5),
+    .account [data-field="role"], .account [data-field="created"], .account [data-field="last_seen"] { display: none; }
+  }
+  @media (max-width: 640px) {
+    .corner { display: none; }
+    header { padding: 10px 14px; gap: 8px; }
+    .chip, .btn { font-size: 8.5px; letter-spacing: .16em; }
+    .brand .sub, #timer-chip .faint, #q-count-chip .faint { display: none; }
+    .controls { position: sticky; bottom: 0; padding: 10px 14px; gap: 8px; }
+    .controls .btn { min-height: 48px; flex: 1; padding: 12px 10px; }
+    .controls .hint { display: none; }
+    .page { padding: 24px 14px; }
+    .brief-bar, .review-head, .player { padding: 10px 14px; }
+    .dossier > div, .review-grid > div { padding: 20px 14px; }
+    .ledger { grid-template-columns: 1fr; row-gap: 4px; }
+    .ledger dd { margin-bottom: 8px; }
+    #apology .text, #q-text { font-size: 20px; }
+    .live-grid[data-side="1"] #q-text { font-size: 20px; }
+  }
 </style>
 </head>
 <body data-view="login" data-state="idle" data-conn="ok" data-rec="off" data-stt="browser" data-tts="browser" data-setup-mode="company">
 
+<div id="scan"></div>
+<div class="corner tl"></div><div class="corner tr"></div>
+<div class="corner bl"></div><div class="corner br"></div>
+
 <header>
-  <strong>Ciel · Interview</strong>
-  <span id="state">idle</span>
+  <div class="brand">
+    <svg class="aperture" width="26" height="26" viewBox="0 0 128 128" aria-hidden="true">
+      <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="5" stroke-dasharray="4 12"/>
+      <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="5"/>
+      <circle class="c-core" cx="64" cy="64" r="10"/>
+    </svg>
+    <span class="wordmark">Ciel</span>
+    <span class="sub" id="brand-sub">INTERVIEW</span>
+  </div>
+  <span id="state-chip"><span class="dot"></span><span id="state">idle</span></span>
+  <span class="chip gold" id="mode-chip"></span>
   <span class="spacer"></span>
-  <span id="whoami"></span>
-  <button id="nav-lobby" hidden>Lobby</button>
-  <button id="nav-admin" hidden>Admin</button>
-  <button id="nav-logout" hidden>Sign out</button>
+  <span id="rec"><span class="dot"></span>REC</span>
+  <span class="chip" id="timer-chip"><span id="timer">00:00</span><span class="faint" id="timer-total"></span></span>
+  <span class="chip" id="q-count-chip"><span id="q-count">Q 0</span></span>
+  <span class="chip nav" id="whoami"></span>
+  <button class="chip nav" id="nav-lobby" hidden>← lobby</button>
+  <button class="chip nav" id="nav-admin" hidden>admin</button>
+  <button class="chip nav" id="nav-logout" hidden>sign out</button>
 </header>
 
-<div id="conn-banner">reconnecting to Ciel…</div>
-<div id="tts-fallback-note">The interviewer will use your browser's built-in voice.</div>
+<div id="conn-banner"><span class="dot"></span>reconnecting to Ciel</div>
+<div id="tts-fallback-note">The interviewer is using your browser's own voice — piper is not available on the server.</div>
 
+<main>
+
+<!-- ── sign in ─────────────────────────────────────────────────────────── -->
 <section data-view="login">
-  <h2>Sign in</h2>
-  <form id="login-form">
-    <label>Username <input id="login-user" autocomplete="username" required></label>
-    <label>Password <input id="login-pass" type="password" autocomplete="current-password" required></label>
-    <button type="submit">Sign in</button>
+  <form id="login-form" autocomplete="on">
+    <div class="mark">
+      <svg width="44" height="44" viewBox="0 0 128 128" aria-hidden="true">
+        <circle cx="64" cy="64" r="58" fill="none" stroke="rgba(232,201,138,.35)" stroke-width="5" stroke-dasharray="4 12"/>
+        <circle cx="64" cy="64" r="34" fill="none" stroke="rgba(160,240,255,.5)" stroke-width="5"/>
+        <circle cx="64" cy="64" r="10" fill="rgba(232,201,138,.85)"/>
+      </svg>
+      <div class="brand" style="align-items:baseline;gap:10px"><span class="wordmark">Ciel</span><span class="sub">INTERVIEW</span></div>
+    </div>
+    <div class="fields">
+      <label class="field"><span class="lbl">username</span><input class="input" id="login-user" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
+      <label class="field"><span class="lbl">password</span><input class="input" id="login-pass" type="password" autocomplete="current-password" required></label>
+    </div>
+    <p id="login-error" data-show="0"></p>
+    <button class="btn primary" type="submit">Sign in</button>
+    <div class="hint" style="text-align:center">accounts are made by hand — ask the owner</div>
   </form>
-  <p id="login-error"></p>
+  <div class="login-foot">ciel.yunhan.me · voice interviews · recorded</div>
 </section>
 
+<!-- ── lobby ───────────────────────────────────────────────────────────── -->
 <section data-view="lobby">
-  <h2>Your interviews</h2>
-  <button id="new-interview">New interview</button>
-  <p id="sessions-empty">No interviews yet.</p>
-  <div id="sessions"></div>
+  <div class="page">
+    <div class="lobby-top">
+      <div id="lobby-greeting">Welcome back.</div>
+      <button class="btn primary" id="new-interview">New interview</button>
+    </div>
+    <div id="sessions-empty" data-show="0">
+      <div class="steps">
+        <div class="step"><b>01 · SET UP</b><span>Tell me the role you're after, pick a case type, or ask for a coding round. Two minutes.</span></div>
+        <div class="step"><b>02 · READ THE BRIEF</b><span>I invent the company, the team and the news — you prepare like it's real.</span></div>
+        <div class="step"><b>03 · TALK</b><span>Out loud, hands free. I wait two seconds of silence before I answer. Afterwards, a debrief.</span></div>
+      </div>
+      <div class="hint">headphones help — I hear my own voice otherwise · the whole session is recorded</div>
+    </div>
+    <div class="lobby-list" id="lobby-list">
+      <div class="cap"><span>past sessions</span><span class="rule"></span><span id="sessions-count"></span></div>
+      <div class="cols head"><span>date</span><span>session</span><span>mode</span><span style="text-align:right">length</span><span>debrief</span><span></span></div>
+      <div id="sessions"></div>
+    </div>
+  </div>
   <template id="session-row">
-    <div class="session">
-      <span data-field="date"></span> ·
-      <strong data-field="title"></strong> ·
-      <span data-field="mode"></span> ·
-      <span data-field="duration"></span> ·
+    <div class="session cols">
+      <span data-field="date"></span>
+      <span data-field="title"></span>
+      <span class="chip" data-field="mode"></span>
+      <span data-field="duration"></span>
       <span data-field="debrief"></span>
-      <button data-action="open">Open</button>
-      <button data-action="delete">Delete</button>
+      <button data-action="delete" title="Delete this interview and its recording">×</button>
+      <button data-action="open" hidden>Open</button>
     </div>
   </template>
 </section>
 
+<!-- ── setup ───────────────────────────────────────────────────────────── -->
 <section data-view="setup">
-  <h2>New interview</h2>
-  <form id="setup-form">
-    <p>This session will be recorded and saved to your account.</p>
-    <label><input type="radio" name="mode" value="company" checked> Company interview</label>
-    <label><input type="radio" name="mode" value="case"> Case interview</label>
-    <label><input type="radio" name="mode" value="technical"> Technical interview (with a code editor)</label>
-    <div data-mode="company technical">
-      <label>What do you want to practise? <textarea id="setup-request" rows="3" placeholder="PM role at a mid-size fintech, behavioural plus product sense"></textarea></label>
-      <label>Role <input id="setup-role"></label>
-      <label>Seniority <input id="setup-seniority" placeholder="new grad / mid / senior"></label>
-    </div>
-    <div data-mode="technical">
-      <label>Technical focus <input id="setup-focus" placeholder="algorithms, systems design, frontend, data…"></label>
-      <p>The interviewer reads your code; nothing is executed.</p>
-    </div>
-    <div data-mode="case">
-      <label>Case type
-        <select name="case_type">
-          <option value="any">surprise me</option>
-          <option value="product">product</option>
-          <option value="project">project</option>
-          <option value="company">company</option>
-        </select>
+  <div class="page">
+    <form id="setup-form">
+      <div class="cap"><span>new interview</span><span class="rule"></span><span>step 1 of 2</span></div>
+      <div class="seg">
+        <label><input type="radio" name="mode" value="company" checked><div class="card"><b>COMPANY INTERVIEW</b><span>A fictional employer, a real-feeling round</span></div></label>
+        <label><input type="radio" name="mode" value="case"><div class="card"><b>CASE INTERVIEW</b><span>Consulting-style, with exhibits</span></div></label>
+        <label><input type="radio" name="mode" value="technical"><div class="card"><b>TECHNICAL</b><span>A coding problem beside an editor</span></div></label>
+      </div>
+      <label class="field" data-mode="company technical">
+        <span class="lbl on">what are you practising for?</span>
+        <textarea class="input" id="setup-request" rows="3" placeholder="PM role at a mid-size fintech, behavioural plus product sense. They do B2B payments; I want to be pushed on prioritisation and metrics."></textarea>
+        <span class="hint">the more specific, the more specific the company I invent</span>
       </label>
-      <label>Source
-        <select name="case_source">
-          <option value="library">historical case</option>
-          <option value="generated">generated case</option>
-        </select>
+      <label class="field" data-mode="case">
+        <span class="lbl">anything in particular? · optional</span>
+        <textarea class="input" id="setup-request-case" rows="2" placeholder="an operations turnaround; something with pricing; a market I know nothing about"></textarea>
       </label>
-    </div>
-    <label>Length
-      <select name="length">
-        <option value="15">15 min</option>
-        <option value="30" selected>30 min</option>
-        <option value="45">45 min</option>
-      </select>
-    </label>
-    <button id="setup-submit" type="submit">Prepare</button>
-  </form>
-  <p id="setup-busy">Preparing your interview…</p>
+      <div class="setup-grid" data-mode="company technical">
+        <div class="field"><span class="lbl">role · optional</span><input class="input" id="setup-role" placeholder="Product Manager"></div>
+        <div class="field"><span class="lbl">seniority · optional</span>
+          <div class="chips">
+            <label><input type="radio" name="seniority" value="new grad"><span>NEW GRAD</span></label>
+            <label><input type="radio" name="seniority" value="mid"><span>MID</span></label>
+            <label><input type="radio" name="seniority" value="senior"><span>SENIOR</span></label>
+            <label><input type="radio" name="seniority" value="lead"><span>LEAD</span></label>
+          </div>
+          <input type="hidden" id="setup-seniority">
+        </div>
+        <div class="field" data-mode="technical"><span class="lbl on">technical focus</span><input class="input" id="setup-focus" placeholder="algorithms · systems design · frontend · data"></div>
+      </div>
+      <div class="setup-grid" data-mode="case">
+        <div class="field"><span class="lbl">case type</span>
+          <div class="chips">
+            <label><input type="radio" name="case_type" value="any" checked><span>SURPRISE ME</span></label>
+            <label><input type="radio" name="case_type" value="product"><span>PRODUCT</span></label>
+            <label><input type="radio" name="case_type" value="project"><span>PROJECT</span></label>
+            <label><input type="radio" name="case_type" value="company"><span>COMPANY</span></label>
+          </div>
+        </div>
+        <div class="field"><span class="lbl">source</span>
+          <div class="chips">
+            <label><input type="radio" name="case_source" value="library" checked><span>HISTORICAL</span></label>
+            <label><input type="radio" name="case_source" value="generated"><span>GENERATED</span></label>
+          </div>
+          <span class="hint">historical: a real business decision, client renamed, outcome sealed until the review</span>
+        </div>
+      </div>
+      <div class="field"><span class="lbl">length</span>
+        <div class="chips">
+          <label><input type="radio" name="length" value="15"><span>15</span></label>
+          <label><input type="radio" name="length" value="30" checked><span>30</span></label>
+          <label><input type="radio" name="length" value="45"><span>45</span></label>
+          <span class="hint" style="align-self:center">min</span>
+        </div>
+      </div>
+      <div class="hint" data-mode="technical">The interviewer reads your code as you write it. Nothing is executed.</div>
+      <div class="setup-go">
+        <button class="btn primary" id="setup-submit" type="submit">Prepare</button>
+        <span class="hint">Ciel writes the company and a brief · ~20 s</span>
+        <span id="setup-busy" data-show="0"><span class="dot"></span>preparing your interview…</span>
+      </div>
+      <div class="rec-note">the session is recorded from BEGIN · you can read the brief again in the review</div>
+    </form>
+  </div>
 </section>
 
+<!-- ── brief ───────────────────────────────────────────────────────────── -->
 <section data-view="brief">
-  <h2 data-field="name"></h2>
-  <div id="brief">
-    <p data-field="tagline"></p>
-    <dl>
-      <dt>Industry</dt><dd data-field="industry"></dd>
-      <dt>Stage</dt><dd data-field="stage"></dd>
-      <dt>Size</dt><dd data-field="size"></dd>
-      <dt>HQ</dt><dd data-field="hq"></dd>
-      <dt>Founded</dt><dd data-field="founded"></dd>
-      <dt>Business model</dt><dd data-field="business_model"></dd>
-      <dt>Culture</dt><dd data-field="culture"></dd>
-      <dt>Products</dt><dd data-field="products"></dd>
-      <dt>Recent news</dt><dd data-field="recent_news"></dd>
-      <dt>Role</dt><dd data-field="role_title"></dd>
-      <dt>Level</dt><dd data-field="role_level"></dd>
-      <dt>Team</dt><dd data-field="role_team"></dd>
-      <dt>Responsibilities</dt><dd data-field="role_responsibilities"></dd>
-      <dt>Must-haves</dt><dd data-field="role_must_haves"></dd>
-      <dt>Interviewer</dt><dd data-field="interviewer"></dd>
-      <dt>Case prompt</dt><dd data-field="case_prompt"></dd>
-      <dt>Client</dt><dd data-field="case_client"></dd>
-      <dt>Case type</dt><dd data-field="case_type"></dd>
-      <dt>Background</dt><dd data-field="case_background"></dd>
-      <dt>Technical focus</dt><dd data-field="tech_focus"></dd>
-      <dt>What to expect</dt><dd data-field="tech_expect"></dd>
-    </dl>
-    <h3>Likely questions</h3>
-    <ol id="brief-questions"></ol>
-    <template id="question-row"><li><span data-field="q"></span> <em data-field="kind"></em></li></template>
+  <div class="brief-bar">
+    <span class="chip" id="brief-step">brief · step 2 of 2</span>
+    <span class="chip gold" id="brief-mode"></span>
+    <span class="spacer"></span>
+    <button class="chip" id="brief-regenerate"><span>↻</span><span id="brief-regenerate-label">regenerate</span></button>
+    <button class="btn primary" id="brief-begin">Begin interview</button>
   </div>
-  <button id="brief-regenerate">Regenerate</button>
-  <button id="brief-begin">Begin interview</button>
-</section>
-
-<section data-view="live">
-  <div style="display:flex; gap:1rem; align-items:center">
-    <div id="hold-ring"></div>
-    <span id="timer">00:00</span>
-    <span id="q-count">Q0</span>
-    <span id="rec">REC</span>
-  </div>
-  <p id="q-text"></p>
-  <p id="apology"></p>
-  <p id="partial"></p>
-  <div id="exhibits"></div>
-  <template id="exhibit-card">
-    <div class="card"><strong data-field="title"></strong><table></table><p data-field="note"></p></div>
-  </template>
-  <div id="problem" hidden>
-    <h3 data-field="title"></h3>
-    <p data-field="meta"></p>
-    <p data-field="statement"></p>
-    <ul data-field="examples"></ul>
-    <ul data-field="constraints"></ul>
-    <label>Language
-      <select id="code-lang">
-        <option value="python">Python</option>
-        <option value="c">C</option>
-        <option value="cpp">C++</option>
-        <option value="java">Java</option>
-        <option value="rust">Rust</option>
-        <option value="javascript">JavaScript</option>
-        <option value="typescript">TypeScript</option>
-        <option value="go">Go</option>
-      </select>
-    </label>
-    <textarea id="code-editor" rows="16" spellcheck="false" style="width:100%; font-family: ui-monospace, monospace"></textarea>
-    <button id="btn-submit-code">Submit code</button>
-    <p>The interviewer reads your code; nothing is executed.</p>
-  </div>
-  <div>
-    <button id="btn-mute">Mute</button>
-    <button id="btn-done">I'm done answering</button>
-    <button id="btn-end">End interview</button>
-  </div>
-  <form id="typed-form">
-    <input id="typed-text" placeholder="Type your answer (speech recognition unavailable)">
-    <button type="submit">Send</button>
-  </form>
-  <h3>Transcript</h3>
-  <div id="transcript"></div>
-  <template id="transcript-row"><div class="row"><span data-field="t"></span> <span data-field="text"></span></div></template>
-</section>
-
-<section data-view="review">
-  <h2 data-field="title"></h2>
-  <p data-field="meta"></p>
-  <audio id="player" controls></audio>
-  <div id="review-code" hidden><h3>Your code</h3><pre></pre></div>
-  <h3>Debrief</h3>
-  <div id="debrief"></div>
-  <div id="review-outcome"></div>
-  <h3>Transcript</h3>
-  <div id="review-transcript"></div>
-</section>
-
-<section data-view="admin">
-  <h2>Accounts</h2>
-  <form id="account-create-form">
-    <input id="account-new-name" placeholder="username" required>
-    <button type="submit">Create</button>
-  </form>
-  <div id="account-secret"></div>
-  <div id="accounts"></div>
-  <template id="account-row">
-    <div class="account">
-      <strong data-field="username"></strong>
-      <span data-field="role"></span>
-      <span data-field="created"></span>
-      <span data-field="last_seen"></span>
-      <span data-field="status"></span>
-      <button data-action="reset">Reset password</button>
-      <button data-action="disable">Disable</button>
-      <button data-action="enable">Enable</button>
-      <button data-action="delete">Delete</button>
+  <div class="dossier" id="brief">
+    <div>
+      <div>
+        <div class="cap" style="margin-bottom:14px"><span id="brief-kicker">the company · fictional</span><span class="rule"></span></div>
+        <div class="name" data-field="name"></div>
+        <div class="tagline" data-field="tagline"></div>
+      </div>
+      <div class="case-prompt" data-field="case_prompt"></div>
+      <dl class="ledger">
+        <dt>what they do</dt><dd data-field="business_model"></dd>
+        <dt>industry</dt><dd data-field="industry"></dd>
+        <dt>stage · size</dt><dd data-field="stage_size"></dd>
+        <dt>hq · founded</dt><dd data-field="hq_founded"></dd>
+        <dt>products</dt><dd class="list" data-field="products"></dd>
+        <dt>recent</dt><dd class="list" data-field="recent_news"></dd>
+        <dt>culture</dt><dd data-field="culture"></dd>
+        <dt>the role</dt><dd data-field="role_title"></dd>
+        <dt>the team</dt><dd data-field="role_team"></dd>
+        <dt>you'll own</dt><dd class="list" data-field="role_responsibilities"></dd>
+        <dt>must-haves</dt><dd class="list" data-field="role_must_haves"></dd>
+        <dt>interviewer</dt><dd data-field="interviewer"></dd>
+        <dt>the client</dt><dd data-field="case_client"></dd>
+        <dt>case type</dt><dd data-field="case_type"></dd>
+        <dt>what Ciel expects</dt><dd data-field="case_expects"></dd>
+        <dt>the outcome</dt><dd class="sealed" data-field="case_outcome"></dd>
+        <dt>focus</dt><dd data-field="tech_focus"></dd>
+        <dt>what to expect</dt><dd class="list" data-field="tech_expect"></dd>
+      </dl>
     </div>
-  </template>
+    <div>
+      <div class="cap"><span id="brief-right-kicker">likely questions</span><span class="rule"></span><span id="brief-right-count"></span></div>
+      <ol id="brief-questions"></ol>
+      <template id="question-row"><li><span class="n"></span><span><span data-field="q"></span><span data-field="kind"></span></span></li></template>
+      <div class="exhibit-list" id="brief-exhibits"></div>
+      <div class="brief-foot rec-note">the session is recorded from BEGIN · you can read this brief again in the review</div>
+    </div>
+  </div>
 </section>
+
+<!-- ── live ────────────────────────────────────────────────────────────── -->
+<section data-view="live">
+  <div class="live-grid" id="live-grid" data-side="0" data-editor="0">
+    <div class="stage">
+      <div class="inner">
+        <div class="qblock">
+          <div class="cap"><span id="q-caption">interviewer</span><span class="rule"></span><span id="q-number">question 01</span></div>
+          <div class="said" id="q-text"></div>
+          <div id="apology" data-show="0"><span class="cap" id="apology-cap">ciel · spoke over you</span><span class="text" id="apology-text">Sorry — go on.</span></div>
+        </div>
+        <div class="you">
+          <div class="row">
+            <span class="lbl">you · live transcript · provisional</span>
+            <div class="ring-lbl"><span id="ring-label">waiting</span>
+              <svg id="hold-ring" viewBox="0 0 22 22" aria-hidden="true"><circle class="track" cx="11" cy="11" r="9"/><circle class="fill" cx="11" cy="11" r="9"/></svg>
+            </div>
+          </div>
+          <div id="partial"></div>
+        </div>
+        <div id="problem" hidden>
+          <div class="head"><span class="k">problem statement</span><span class="rule"></span><span class="hint">written · stays here</span></div>
+          <div data-field="title"></div>
+          <div data-field="meta"></div>
+          <div data-field="statement"></div>
+          <div class="k2">examples</div>
+          <ul data-field="examples"></ul>
+          <div class="k2">constraints</div>
+          <ul data-field="constraints"></ul>
+        </div>
+      </div>
+    </div>
+    <div class="side" id="side">
+      <div class="cap cyan" id="side-cap"><span id="side-title">exhibits</span><span class="rule"></span><span id="side-count"></span></div>
+      <div id="exhibits"></div>
+      <template id="exhibit-card">
+        <div class="card">
+          <div class="head"><div><span class="k"></span><span data-field="title"></span></div><span class="open"></span></div>
+          <table></table>
+          <div data-field="note"></div>
+        </div>
+      </template>
+      <div class="editor" id="editor" hidden>
+        <div class="bar">
+          <span class="k">editor</span>
+          <span class="spacer"></span>
+          <span class="sel"><select id="code-lang">
+            <option value="python">Python</option><option value="c">C</option><option value="cpp">C++</option><option value="java">Java</option>
+            <option value="rust">Rust</option><option value="javascript">JavaScript</option><option value="typescript">TypeScript</option><option value="go">Go</option>
+          </select></span>
+          <button class="btn gold small" id="btn-submit-code" style="padding:6px 12px;font-size:10px;letter-spacing:.2em">Submit</button>
+        </div>
+        <textarea id="code-editor" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>
+        <div class="foot"><span>the interviewer reads your code · nothing is executed</span><span class="spacer"></span><span class="ok">saved with the recording</span></div>
+      </div>
+      <div class="side-foot" id="side-foot">stays open while you talk · click a header to swap</div>
+    </div>
+  </div>
+  <div class="controls">
+    <button class="btn" id="btn-mute">MIC · ON</button>
+    <button class="btn" id="btn-done">I'm done answering</button>
+    <form id="typed-form"><input class="input" id="typed-text" placeholder="Type your answer — speech recognition is unavailable in this browser"><button class="btn gold" type="submit">Send</button></form>
+    <span class="hint" id="live-hint">hands free — I wait two seconds of silence</span>
+    <span class="spacer"></span>
+    <button class="btn red" id="btn-end">End interview</button>
+  </div>
+  <div id="transcript-wrap" hidden><div id="transcript"></div></div>
+  <template id="transcript-row"><div class="row"><span data-field="t"></span><span data-field="text"></span></div></template>
+</section>
+
+<!-- ── review ──────────────────────────────────────────────────────────── -->
+<section data-view="review">
+  <div class="review-head">
+    <span class="spacer"></span>
+    <span data-field="title"></span>
+    <span class="chip" data-field="meta"></span>
+  </div>
+  <div class="player" id="player-ui" hidden>
+    <button id="player-toggle" aria-label="play">▶</button>
+    <span id="player-time">00:00</span>
+    <div id="player-bar"><div class="track"></div><div id="player-fill"></div><div id="player-head"></div></div>
+    <span id="player-total">00:00</span>
+    <audio id="player" preload="metadata" hidden></audio>
+  </div>
+  <div class="review-grid">
+    <div>
+      <div class="cap cyan"><span>transcript · click a line to seek</span><span class="rule"></span></div>
+      <div id="review-transcript"></div>
+    </div>
+    <div>
+      <div class="cap"><span id="debrief-kicker">debrief</span><span class="rule"></span></div>
+      <div id="review-outcome"></div>
+      <div id="debrief"></div>
+      <div id="review-code" hidden><div class="cap cyan"><span>your code</span><span class="rule"></span></div><pre></pre></div>
+    </div>
+  </div>
+</section>
+
+<!-- ── admin ───────────────────────────────────────────────────────────── -->
+<section data-view="admin">
+  <div id="account-secret" data-show="0">
+    <div class="bar"></div>
+    <div style="flex:1;min-width:0">
+      <div class="k" id="account-secret-k">account created · password shown once</div>
+      <div class="line"><span class="who" id="account-secret-who"></span><span class="pw" id="account-secret-pw"></span><span class="note">send it to them yourself — Ciel won't email it</span></div>
+    </div>
+    <div style="display:flex;gap:11px;flex:none"><button class="btn primary" style="padding:12px 24px" id="account-secret-copy">Copy</button><button class="btn" id="account-secret-done">Done</button></div>
+  </div>
+  <div class="page" style="max-width:1000px;gap:10px;flex:1">
+    <div class="cap"><span>accounts</span><span class="rule"></span><span id="accounts-count"></span></div>
+    <div class="acols head"><span></span><span>username</span><span></span><span>created</span><span>last active</span><span></span></div>
+    <div id="accounts"></div>
+    <template id="account-row">
+      <div class="account acols">
+        <span class="led"></span>
+        <span data-field="username"></span>
+        <span data-field="role"></span>
+        <span data-field="created"></span>
+        <span data-field="last_seen"></span>
+        <span class="acts">
+          <span data-field="status" hidden></span>
+          <button class="btn small" data-action="reset">Reset pw</button>
+          <button class="btn small" data-action="disable">Disable</button>
+          <button class="btn small" data-action="enable">Re-enable</button>
+          <button class="btn small" data-action="delete">Delete</button>
+        </span>
+      </div>
+    </template>
+    <form class="admin-create" id="account-create-form">
+      <label class="field"><span class="lbl">new account · username</span><input class="input" id="account-new-name" placeholder="lowercase, no spaces" autocapitalize="none" spellcheck="false" required></label>
+      <button class="btn gold" type="submit">Create · generate password</button>
+      <span class="hint">passwords are four words and a number; shown once, then hashed</span>
+    </form>
+  </div>
+</section>
+
+</main>
 
 <script src="/interview/app.js"></script>
 </body>
