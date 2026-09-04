@@ -350,7 +350,7 @@
     }
   });
 
-  $("#brief-begin").addEventListener("click", () => enterLive());
+  $("#brief-begin").addEventListener("click", () => { audioContext(); enterLive(); });
 
   // ── live ───────────────────────────────────────────────────────────────
 
@@ -480,11 +480,17 @@
         break;
       case "debrief.ready":
         live.debriefReady = true;
-        if (live.ended) finishLive();
+        if (live.closeProgress) { live.closeProgress(true); live.closeProgress = null; }
+        if (live.ended) setTimeout(finishLive, 600);
         break;
       case "error":
         if (f.code === "room_full") { alert(f.reason); live.closing = true; enterLobby(); }
-        else if (f.code === "debrief") { if (live.ended) finishLive(); }
+        else if (f.code === "debrief") {
+          if (live.closeProgress) { live.closeProgress(false); live.closeProgress = null; }
+          text("#closing-error", "the debrief could not be written — your transcript and recording are saved");
+          flag($("#closing-error"), true);
+          if (live.ended) setTimeout(finishLive, 2500);
+        }
         else console.warn("room error", f);
         break;
       case "pong": break;
@@ -500,6 +506,9 @@
     body.dataset.state = state;
     text("#state", state);
     if (state === "listening") {
+      // The hub decides whose turn it is. If the page still thinks it is
+      // playing (a stuck or silent AudioContext), it is wrong: let go.
+      if (live.playing) { stopPlayback(); live.playing = false; }
       text("#ring-label", holdMs && live.holdWasListening ? "still listening" : "listening");
       live.holdWasListening = true;
       animateHold(holdMs);
@@ -513,9 +522,12 @@
     if (state === "ended") {
       live.ended = true;
       stopRecognition();
-      text("#live-hint", "writing your debrief…");
+      if (live.timer) { clearInterval(live.timer); live.timer = null; }
       if (live.debriefReady) finishLive();
-      else setTimeout(() => { if (live.ended && body.dataset.view === "live") finishLive(); }, 90000);
+      else {
+        enterClosing();
+        setTimeout(() => { if (live.ended && body.dataset.view === "closing") finishLive(); }, 90000);
+      }
     }
   }
 
@@ -627,24 +639,33 @@
     live.playing = true;
     stopRecognition(); // the mic would hear the interviewer
     try {
-      if (f.audio && audioContext()) {
+      const ctx = f.audio ? audioContext() : null;
+      if (ctx && ctx.state !== "running") {
+        // Autoplay policy: the context only runs after a gesture. Give it a
+        // moment; if it stays suspended, the browser's own voice speaks.
+        try { await Promise.race([ctx.resume(), new Promise((r) => setTimeout(r, 800))]); } catch (_) {}
+      }
+      if (ctx && ctx.state === "running") {
         const bytes = Uint8Array.from(atob(f.audio), (c) => c.charCodeAt(0));
-        const buf = await live.audio.decodeAudioData(bytes.buffer);
+        const buf = await ctx.decodeAudioData(bytes.buffer);
         await new Promise((resolve) => {
-          const src = live.audio.createBufferSource();
+          const src = ctx.createBufferSource();
           src.buffer = buf;
-          src.connect(live.audio.destination);
+          src.connect(ctx.destination);
           if (live.mix) src.connect(live.mix);
           src.onended = resolve;
           live.currentSource = src;
           src.start();
+          setTimeout(resolve, buf.duration * 1000 + 1500); // the watchdog
         });
         live.currentSource = null;
       } else if ("speechSynthesis" in window) {
+        if (ctx) console.warn("AudioContext is", ctx.state, "— using the browser voice for this sentence");
         await new Promise((resolve) => {
           const u = new SpeechSynthesisUtterance(f.text);
           u.onend = resolve; u.onerror = resolve;
           speechSynthesis.speak(u);
+          setTimeout(resolve, 60 * f.text.length + 4000); // the watchdog
         });
       }
     } catch (ex) {
@@ -669,7 +690,8 @@
   // ── the candidate's voice ──────────────────────────────────────────────
 
   function startRecognition() {
-    if (!hasSTT() || live.muted || live.ended || live.playing) return;
+    if (!hasSTT()) { body.dataset.stt = "none"; text("#live-hint", "this browser has no speech recognition — type your answers below (Chrome, Edge, or Safari can listen)"); return; }
+    if (live.muted || live.ended || live.playing) return;
     if (live.recognition) return;
     const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
     const rec = new Rec();
@@ -677,6 +699,7 @@
     rec.interimResults = true;
     rec.lang = navigator.language || "en-US";
     rec.onresult = (e) => {
+      live.recFailures = 0;
       let interim = "";
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const r = e.results[i];
@@ -696,17 +719,41 @@
         send({ type: "speech.partial", text: interim });
       }
     };
+    rec.onstart = () => { live.recError = null; text("#live-hint", "hands free — I wait two seconds of silence"); };
     rec.onerror = (e) => {
+      live.recError = e.error;
+      console.warn("speech recognition error:", e.error, e.message || "");
       if (e.error === "not-allowed" || e.error === "service-not-allowed") {
         body.dataset.stt = "none";
         live.recognition = null;
+        text("#live-hint", "microphone blocked for speech recognition — type your answers below");
+      } else if (e.error === "audio-capture" && live.recorder) {
+        // Some browsers (iPhone Safari) let one thing hold the microphone.
+        // The interview matters more than the recording: let the recorder go.
+        stopRecording();
+        text("#live-hint", "recording off — this browser gives the microphone to one thing at a time");
+      } else if (e.error === "network") {
+        // Chromium builds without Google's speech service (Arc, Brave, some
+        // Edge configurations) fail this way at once, every time. After a
+        // few in a row there is no voice to be had here: fall back to typing.
+        live.recFailures = (live.recFailures || 0) + 1;
+        if (live.recFailures >= 3) {
+          body.dataset.stt = "none";
+          live.recognition = null;
+          text("#live-hint", "this browser can't do speech recognition (it has no speech service) — type your answers below, or use Chrome or Safari for voice");
+        } else {
+          text("#live-hint", "speech recognition failed to reach its service — retrying");
+        }
+      } else if (e.error !== "no-speech" && e.error !== "aborted") {
+        text("#live-hint", `speech recognition: ${e.error}`);
       }
     };
     rec.onend = () => {
       live.recognition = null;
       if (!live.ended && !live.muted && !live.playing && body.dataset.view === "live") setTimeout(startRecognition, 150);
     };
-    try { rec.start(); live.recognition = rec; } catch (_) { live.recognition = null; }
+    try { rec.start(); live.recognition = rec; }
+    catch (ex) { live.recognition = null; console.warn("speech recognition would not start:", ex); }
   }
 
   function stopRecognition() {
@@ -723,7 +770,15 @@
     if (live.muted) stopRecognition(); else startRecognition();
   });
 
-  $("#btn-done").addEventListener("click", () => { stopPlayback(); send({ type: "answer.done" }); });
+  $("#btn-done").addEventListener("click", () => {
+    stopPlayback();
+    live.playing = false;
+    send({ type: "answer.done" });
+    if (!$("#partial").textContent.trim() && body.dataset.stt !== "none") {
+      text("#live-hint", live.recognition ? "I haven't heard anything yet — is the microphone on?" : "starting the microphone…");
+      startRecognition();
+    }
+  });
 
   $("#typed-form").addEventListener("submit", (e) => {
     e.preventDefault();
@@ -785,8 +840,25 @@
     for (const t of rec.stream.getTracks()) t.stop();
   }
 
+  const DEBRIEF_STAGES = ["reading the transcript", "weighing each answer", "ranking what to work on", "writing the debrief"];
+
+  function enterClosing() {
+    const s = current.session, b = current.brief || {};
+    show("closing");
+    text("#closing-last", $("#q-text").textContent);
+    text("#closing-title", s.title || "");
+    text("#closing-mode", s.mode === "company" ? "company" : modeLabel(s));
+    text("#closing-elapsed", fmtDuration(nowS()));
+    text("#closing-questions", `${live.questions} question${live.questions === 1 ? "" : "s"}`);
+    text("#closing-note", live.recorder ? "the recording is being saved" : "no recording this time — the microphone was not shared");
+    flag($("#closing-error"), false);
+    live.closeProgress = startProgress($("#closing-progress"), 28000, DEBRIEF_STAGES);
+    // The recorder's last chunk goes up while the debrief is written.
+    stopRecording();
+  }
+
   async function finishLive() {
-    if (body.dataset.view !== "live") return;
+    if (body.dataset.view !== "live" && body.dataset.view !== "closing") return;
     live.closing = true;
     if (live.timer) clearInterval(live.timer);
     stopRecognition();

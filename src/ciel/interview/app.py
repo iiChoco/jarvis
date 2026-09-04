@@ -383,6 +383,8 @@ class InterviewApp:
         return self._json({"sessions": rows})
 
     def _over_daily_cap(self, username: str) -> bool:
+        if self._dev:
+            return False  # the loopback room is for working on the page, all day
         today = time.strftime("%Y-%m-%dT00:00:00", time.localtime())
         return self._store.count_since(username, today) >= self._cfg.daily_sessions_per_user
 

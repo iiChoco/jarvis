@@ -160,6 +160,9 @@
   header .nav { display: none; }
   body[data-view="lobby"] header .nav, body[data-view="setup"] header .nav, body[data-view="brief"] header .nav,
   body[data-view="review"] header .nav, body[data-view="admin"] header .nav { display: inline-flex; }
+  body[data-view="closing"] .aperture .c-outer { animation: ap3 4.4s ease-in-out infinite; }
+  body[data-view="closing"] .aperture .c-mid { animation: ap2 3.4s ease-in-out infinite; }
+  body[data-view="closing"] .aperture .c-core { animation: ap1 2.2s ease-in-out infinite; }
   body[data-view="login"] #whoami, body[data-view="login"] #nav-logout { display: none; }
   #password-dialog { position: fixed; inset: 0; z-index: 60; display: none; align-items: center; justify-content: center; background: rgba(3, 6, 8, .75); }
   #password-dialog[data-show="1"] { display: flex; }
@@ -184,6 +187,7 @@
   body[data-view="brief"]  section[data-view="brief"],
   body[data-view="live"]   section[data-view="live"],
   body[data-view="review"] section[data-view="review"],
+  body[data-view="closing"] section[data-view="closing"],
   body[data-view="admin"]  section[data-view="admin"] { display: flex; flex-direction: column; }
   .page { width: 100%; max-width: 900px; margin: 0 auto; padding: 36px 20px 28px; display: flex; flex-direction: column; gap: 30px; }
   [data-show]:not([data-show="1"]) { display: none !important; }
@@ -790,6 +794,29 @@
   </div>
   <div id="transcript-wrap" hidden><div id="transcript"></div></div>
   <template id="transcript-row"><div class="row"><span data-field="t"></span><span data-field="text"></span></div></template>
+</section>
+
+<!-- ── closing: the interview is over, the debrief is being written ────── -->
+<section data-view="closing">
+  <div class="page" id="closing" style="align-items:center;text-align:center;justify-content:center;flex:1">
+    <svg class="aperture cl-aperture" width="88" height="88" viewBox="0 0 128 128" aria-hidden="true">
+      <circle class="c-outer" cx="64" cy="64" r="58" fill="none" stroke-width="5" stroke-dasharray="4 12"/>
+      <circle class="c-mid" cx="64" cy="64" r="34" fill="none" stroke-width="5"/>
+      <circle class="c-core" cx="64" cy="64" r="10"/>
+    </svg>
+    <div class="said" id="closing-last" style="font-size:22px"></div>
+    <div class="cap" id="closing-cap"><span id="closing-status">the interview is over · writing your debrief</span></div>
+    <div class="progress" id="closing-progress" data-show="0" style="width:min(560px,100%)">
+      <div class="bar"><div class="fill"></div><div class="head" style="left:0"></div></div>
+      <div class="line"><span><span class="dot"></span><span class="label">reading the transcript</span></span><span class="pct">0%</span></div>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center">
+      <span class="chip" id="closing-title"></span><span class="chip gold" id="closing-mode"></span>
+      <span class="chip" id="closing-elapsed"></span><span class="chip" id="closing-questions"></span>
+    </div>
+    <div class="hint" id="closing-note">the recording is being saved</div>
+    <p id="closing-error" data-show="0" class="hint"></p>
+  </div>
 </section>
 
 <!-- ── review ──────────────────────────────────────────────────────────── -->

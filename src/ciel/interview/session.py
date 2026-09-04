@@ -53,10 +53,10 @@ from ciel.interview.store import SessionStore
 log = logging.getLogger(__name__)
 
 _FLUSH_CHARS = 180
-_PLAYED_TIMEOUT_S = 90.0
-"""How long the room waits for the browser's ``played`` before it arms the
-silence clock anyway — a tab that never reports must not freeze the
-interview at 'speaking'."""
+_PLAYED_GRACE_S = 8.0
+"""Added to the turn's audio length: how long the room waits for the
+browser's ``played`` before it arms the silence clock anyway — a tab that
+never reports must not freeze the interview at 'speaking'."""
 _HISTORY = 600
 
 
@@ -105,6 +105,8 @@ class InterviewSession:
         )
         self._turn = 0
         self._say_n = 0
+        self._turn_audio_s = 0.0
+        """Seconds of speech sent this turn, for the played deadline."""
         self._history: deque[dict[str, Any]] = deque(maxlen=_HISTORY)
         self._started = clock()
         self._last_activity = clock()
@@ -341,6 +343,7 @@ class InterviewSession:
         await self._send({"type": "state", "state": "thinking"})
         self._turn += 1
         self._say_n = 0
+        self._turn_audio_s = 0.0
         turn = self._turn
         task = asyncio.create_task(self._speak_turn(turn, user_text))
         self._turn_task = task
@@ -366,14 +369,12 @@ class InterviewSession:
         await self._send({"type": "turn.end", "turn": turn})
         if closing:
             return
-        if self._say_n and self.tts_mode == "piper":
+        if self._say_n:
+            # The page reports played when its audio (or its own voice)
+            # finishes; the deadline is the speech length plus a grace, so a
+            # tab that never reports costs seconds, not minutes.
             self.state = "speaking"
-            self._played_deadline = self._clock() + _PLAYED_TIMEOUT_S
-            await self._send({"type": "state", "state": "speaking"})
-        elif self._say_n:
-            # Browser voice: the page reports played when its synth finishes.
-            self.state = "speaking"
-            self._played_deadline = self._clock() + _PLAYED_TIMEOUT_S
+            self._played_deadline = self._clock() + self._turn_audio_s + _PLAYED_GRACE_S
             await self._send({"type": "state", "state": "speaking"})
         else:
             self._arm_listening()
@@ -499,10 +500,14 @@ class InterviewSession:
             self.state = "speaking"
             await self._send({"type": "state", "state": "speaking"})
         frame: dict[str, Any] = {"type": "say", "n": self._say_n, "turn": turn, "text": sentence}
+        wav = None
         if self.tts_mode == "piper":
             wav = await self._speaker.wav(sentence)
             if wav:
                 frame["audio"] = base64.b64encode(wav).decode("ascii")
+        # 16-bit mono at the voice's rate; the browser voice is guessed by length.
+        rate = getattr(self._speaker, "sample_rate", 22050) or 22050
+        self._turn_audio_s += (len(wav) - 44) / (2 * rate) if wav else 0.06 * len(sentence)
         await self._send(frame, remember=True, remember_without=("audio",))
         await self._record("interviewer", sentence)
 
@@ -572,6 +577,8 @@ class InterviewSession:
         transcript = self._store.transcript(self.username, self.session_id)
         if not any(r.get("speaker") == "candidate" for r in transcript):
             log.info("interview %s: nothing from the candidate, no debrief", self.session_id)
+            # Still tell the page the wait is over: the review explains.
+            await self._send({"type": "debrief.ready", "session_id": self.session_id})
             return
         system, user, schema = prompts.debrief_request(
             self._mode, self._brief, transcript, self._store.code(self.username, self.session_id)

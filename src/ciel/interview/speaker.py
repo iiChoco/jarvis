@@ -54,6 +54,10 @@ class Speaker:
         self.available = True
         log.info("interview voice: piper %s at %d Hz", self._cfg.piper_voice, tts.sample_rate)
 
+    @property
+    def sample_rate(self) -> int:
+        return int(self._tts.sample_rate) if self._tts is not None else 22050
+
     async def wav(self, text: str) -> bytes | None:
         """The sentence as a 16-bit mono WAV, or None when the voice is
         unavailable or the sentence produced no audio."""
