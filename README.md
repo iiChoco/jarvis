@@ -52,6 +52,11 @@ Say **"hey jarvis"**, then talk.
   visible from any app, and a local web page (the Chart) that mirrors the whole
   conversation live, takes typed turns, and holds the mute switch for rooms
   that must stay quiet.
+- **Knows what is true right now** — one table of the system's own readings
+  (the time, whether you're around, where you are, what's armed, the rest of
+  today's calendar, the ring) opens every turn with its ages, so "what time
+  is it", "you're at home", and "the timer has four minutes left" need no
+  tool, and "as of" is said when it should be.
 
 ## The protocols
 
@@ -82,6 +87,7 @@ the docs — and you — get to use.
 | **Invariant** | Long-term memory — what survives every session transformation |
 | **Closure** | End-of-conversation reflection — capturing the limit points before the session is discarded |
 | **Atlas** | Projects — durable charts of ongoing work, with an index that says which chart to open |
+| **Phase Space** | The world state (`world.py`) — one point that says where everything is right now: the time, presence, place, mute, timers, watches, the agenda, the ring; fed by every producer, opening every turn, mirrored to the Chart |
 
 Closure and Atlas together are the continuity design (the "loving partner
 protocol"): sessions are deliberately short-lived, and continuity comes from
@@ -170,9 +176,13 @@ Ciel is doing without your having to find the terminal.
 | Speaking | Blue, pulsing — talking |
 | Error | Red — the turn failed |
 
-It ignores mouse clicks, never takes focus, and follows you across Spaces. Both
-the dot and the pill's outline carry the state colour — a dark pill with only a
-small dot vanishes against a dark terminal, which is exactly where it sits.
+It ignores mouse clicks, never takes focus, and follows you across Spaces. It
+wears the Chart's state chip — the same cut-corner shape, the same six colours,
+the same breathing dot and wide-tracked capitals — so the corner of the screen
+and the browser tab read as one instrument. The dot, the border, and the tint
+over the ground all carry the state colour: a dark chip with only a small dot
+vanishes against a dark terminal, which is exactly where it sits. The chip is
+sized to its label, so it grows and shrinks a little as the word changes.
 
 ```toml
 [ui]
@@ -428,7 +438,11 @@ buttons, and the mute switch lives in the header. Next to the status
 pill, an agents chip counts everything working on your behalf right now
 — a deep-thought pass mid-flight, background watches, running timers —
 and expands into a list with live countdowns; it disappears when
-nothing is running.
+nothing is running. Under the header, a strip of readings mirrors the
+world table (Phase Space, below): whether the Mac holds the seat and
+whether you're at it, the place, the timers and watches, what's next on
+the calendar, the ring — each chip with its age, dimmed once its reading
+has gone stale.
 
 ```bash
 uv sync --extra web
@@ -672,6 +686,49 @@ rides into the start of your next conversation, aging out after 18 hours.
 become held notes — until the file is removed; the mute switch does the
 same for anything that would have been spoken. `scripts/probe_vigil.py`
 drives every branch of "when may Ciel speak unprompted" with fakes.
+
+## What is true right now (Phase Space)
+
+On by default. Everything above produces readings — the presence probe,
+the locator, the ring, the calendar, the timers, the mute switch — and
+before this table each was read by exactly one consumer, and the brain
+by none of them: it learned the world by calling a tool, or from a
+lane's fixed note, and never knew the time of day. `world.py` is the one
+table those readings are written into, each with who reported it, when,
+and how long it stays trustworthy.
+
+**What opens a turn.** Every user turn (and every unattended Vigil turn)
+opens with one parenthesized block the runtime writes — the clock; the
+Mac's seat, on the hub; whether you're around; the place; the mute switch
+and the hold, only when set; the armed timers and watches; the rest of
+today's calendar; the ring's numbers — each reading with its age in the
+runtime's words. "As of" and "last known" are computed from timestamps,
+never narrated by the model, which is what lets Ciel say "I checked" for
+a tool result and "as of two minutes ago" for a reading here. The
+`world_now` tool re-reads the same block mid-turn. Facts, not events:
+things that *happen* stay in Vigil's one queue.
+
+**Who writes it.** The pipeline (mute, hold, the timers and watches once
+a second, presence per turn or per heartbeat, the spoke's seat), the
+locator on every fix, the ring watcher and tool on every fetch, the
+sections watcher on every scan, and a calendar refresh every fifteen
+minutes (`agenda_refresh_s`). On the hub the Mac's readings arrive as
+`fact` frames from the spoke's relay — last-value, resent after a
+reconnect — and the whole table rides to every Chart as a `world` frame
+when it changes. `~/.ciel/world.json` mirrors it across the
+autoreloader's re-execs, so a place or a ring score never blanks for
+minutes after a source edit; a carried-over reading shows its true age.
+
+```toml
+[world]
+enabled = true            # off: bare turns, no tool, no strip
+in_prompt = true          # off: the table still feeds the Chart and the tool
+agenda_refresh_s = 900.0  # 0 leaves the agenda to the brief alone
+```
+
+`scripts/probe_world.py` drives the table, the freshness rules, the
+block's wording, the file, the relay, and the hub's door with no network
+and a fixed clock.
 
 ## The ring (Oura)
 
@@ -1043,6 +1100,7 @@ uv run scripts/probe_oura.py --authorize  # connect the ring (one browser approv
 uv run scripts/probe_oura.py --live   # read today from the ring for real
 uv run scripts/probe_location.py      # places, both sources, move notes
 uv run scripts/probe_location.py --live  # read where this Mac is right now
+uv run scripts/probe_world.py         # the world table: facts, freshness, the block, the relay
 uv run scripts/probe_wake_model.py ~/.ciel/models/hey_ciel.onnx  # qualify a custom wake model
 ```
 
@@ -1101,4 +1159,5 @@ as soon as the first complete thought exists rather than after the whole answer.
 | `reload.py` | Analytic Continuation — watch the source, re-exec, resume |
 | `oura.py` | The Oura client — sleep, readiness, activity; read-only |
 | `location.py` | Where the user is — Find My's cache, the Mac's Wi-Fi, named places |
+| `world.py` | Phase Space — the one table of what is true right now, with ages; opens every turn |
 | `ui/` | The status pill (`hud.py` is its own process) and the indicator tee that feeds every view |

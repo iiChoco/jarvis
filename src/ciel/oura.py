@@ -690,6 +690,47 @@ def summarize_range(
     ]
 
 
+def today_readings(
+    day: str,
+    readiness: list[dict[str, Any]],
+    sleep: list[dict[str, Any]],
+    activity: list[dict[str, Any]],
+    sessions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """One day's numbers as a flat dict for the world table
+    (``world.py``): only the fields Oura actually sent, so a fetch that
+    skipped activity leaves that key out rather than writing None over
+    a reading another fetch left. Pure."""
+    out: dict[str, Any] = {"day": day}
+    ready = by_day(readiness).get(day)
+    if ready is not None:
+        score = ready.get("score")
+        if isinstance(score, (int, float)):
+            out["readiness"] = int(score)
+        weakest = weakest_contributor(ready)
+        if weakest is not None:
+            out["weakest"] = [weakest[0], weakest[1]]
+    slept = by_day(sleep).get(day)
+    if slept is not None:
+        score = slept.get("score")
+        if isinstance(score, (int, float)):
+            out["sleep_score"] = int(score)
+    session = main_sleep_by_day(sessions).get(day)
+    if session is not None:
+        duration = session.get("total_sleep_duration")
+        if isinstance(duration, (int, float)) and duration > 0:
+            out["sleep_s"] = float(duration)
+    active = by_day(activity).get(day)
+    if active is not None:
+        score = active.get("score")
+        if isinstance(score, (int, float)):
+            out["activity"] = int(score)
+        steps = active.get("steps")
+        if isinstance(steps, (int, float)):
+            out["steps"] = int(steps)
+    return out
+
+
 def hours_minutes(seconds: float) -> str:
     """``25920`` → "7 hours 12 minutes". Minute precision on purpose —
     timers' half-hour rounding would round a short night into a fine one."""
@@ -745,6 +786,7 @@ __all__ = [
     "redirect_uri",
     "summarize_day",
     "summarize_range",
+    "today_readings",
     "token_request",
     "weakest_contributor",
 ]

@@ -883,7 +883,10 @@ class SectionsConfig:
     """Section ids worth interrupting for, as the probe's listing prints
     them (``watch = ["12", "31"]``). Empty watches nothing — this filter
     is the consent, and "any section anywhere" is a notification storm,
-    not a wish."""
+    not a wish. Also the brain's self-knowledge: a non-empty list puts the
+    watch in the system prompt whether or not this process runs it, so
+    the hub (``enabled = false``, the watcher on the spoke) still answers
+    "are you watching?" with a yes."""
 
     poll_s: float = 30.0
     """How often the site is asked. Spots race by in minutes, so the
@@ -1800,6 +1803,42 @@ class ScreenConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WorldConfig:
+    """The world state (``world.py``, codename Phase Space): one table of
+    everything Ciel currently holds to be true — the time, whether the
+    user is around, where they are, the mute switch, the armed timers
+    and watches, the rest of today's calendar, the ring's numbers — fed
+    by every producer, opening every turn, and mirrored to the Chart.
+    Nothing here is a new source of information; it is where the
+    existing sources' latest readings are kept together, with their
+    ages, so the brain can say "as of" instead of guessing."""
+
+    enabled: bool = True
+    """Off, the table is not built: turns open bare, the ``world_now``
+    tool is withheld, and the Chart's readings strip stays empty. The
+    lane notes and the tools still work — this only removes the summary."""
+
+    in_prompt: bool = True
+    """Whether the rendering opens every turn. Off keeps the table (the
+    Chart, the tool) but sends the brain nothing unasked — for measuring
+    what the block costs, or a persona that should not know the time."""
+
+    agenda_refresh_s: float = 900.0
+    """How often today's remaining calendar is re-read into the table.
+    Fifteen minutes: the calendar watcher already nudges on the events
+    themselves; this is only so "what's left today" is a sentence away.
+    On the hub the read is one RPC to the Mac, skipped while it is away.
+    0 disables the refresh (the brief still reads the agenda itself)."""
+
+    file: Path = field(default_factory=lambda: Path.home() / ".ciel" / "world.json")
+    """The table's mirror, written at most once a second when something
+    changed, read at startup — the autoreloader re-execs on every source
+    edit, and a place or a ring score should not blank for minutes each
+    time. Every fact keeps its own timestamp, so a carried-over reading
+    is shown at its true age, never as new."""
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     wake: WakeConfig = field(default_factory=WakeConfig)
@@ -1827,6 +1866,7 @@ class Config:
     screen: ScreenConfig = field(default_factory=ScreenConfig)
     timers: TimersConfig = field(default_factory=TimersConfig)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
+    world: WorldConfig = field(default_factory=WorldConfig)
     transcripts: TranscriptConfig = field(default_factory=TranscriptConfig)
     interview: InterviewConfig = field(default_factory=InterviewConfig)
     dev: DevConfig = field(default_factory=DevConfig)
@@ -1871,6 +1911,7 @@ _SECTIONS = {
     "screen": ScreenConfig,
     "timers": TimersConfig,
     "proactive": ProactiveConfig,
+    "world": WorldConfig,
     "transcripts": TranscriptConfig,
     "interview": InterviewConfig,
     "dev": DevConfig,

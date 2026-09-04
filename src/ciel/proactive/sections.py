@@ -37,7 +37,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from ciel.gmail import GmailSender
 from ciel.mail import Mailer, MailUnavailable, SmtpSender
@@ -197,9 +197,14 @@ class SectionsWatcher:
         config: "SectionsConfig",
         queue: EventQueue,
         mail: "MailConfig | None" = None,
+        world: Any | None = None,
     ) -> None:
         self._config = config
         self._queue = queue
+        self._world = world
+        """The world table (or the spoke's relay): every scan leaves the
+        watched sections' open-spot counts there, so "is there a spot
+        yet?" is answered from the turn's opening block, not denied."""
         self._task: asyncio.Task[None] | None = None
         self._kick = asyncio.Event()
         self._health = WatcherHealth("sections", queue)
@@ -298,10 +303,18 @@ class SectionsWatcher:
 
     def _scan_sync(self) -> list[ProactiveEvent]:
         state = fetch_state(self._config.url, self._config.current_cookie())
+        now = time.time()
         events, self._last_spots = opening_events(
-            state, self._config.watch, self._last_spots,
-            time.time(), self._queue.next_id,
+            state, self._config.watch, self._last_spots, now, self._queue.next_id,
         )
+        if self._world is not None and self._last_spots is not None:
+            self._world.observe(
+                "sections", {"spots": dict(self._last_spots)},
+                source="sections", observed_at=now,
+                # A count older than a few polls is a count from before
+                # the race; say so rather than let it read as current.
+                ttl_s=max(120.0, self._config.poll_s * 4),
+            )
         return events
 
     def _maybe_refresh(self, now: float) -> None:

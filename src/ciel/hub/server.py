@@ -74,6 +74,8 @@ class HubServer(WebLink):
         Returns whether it was new; either way the publish is acked."""
         self.on_presence: Callable[[dict[str, Any]], None] | None = None
         """The spoke's heartbeat, raw — the presence view folds it in."""
+        self.on_fact: Callable[[dict[str, Any]], None] | None = None
+        """One world fact from the spoke, raw — the world table absorbs it."""
         self.spoke_listening = False
         """The spoke's last reported listening state — a window is open."""
         self.spoke_speaking = False
@@ -293,6 +295,9 @@ class HubServer(WebLink):
             elif kind == "presence":
                 if self.on_presence is not None:
                     self.on_presence(frame)
+            elif kind == "fact":
+                if self.on_fact is not None:
+                    self.on_fact(frame)
             elif kind == "turn.cancel":
                 if self.on_turn_cancel is not None:
                     self.on_turn_cancel(frame["turn_id"], frame.get("reason") or "")

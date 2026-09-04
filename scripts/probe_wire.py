@@ -69,6 +69,8 @@ SAMPLES: dict[str, dict] = {
     "event.publish": {"publish_id": "p1", "event": {"kind": "calendar"}},
     "presence": {"node": "mac", "attended": True, "locked": False, "idle_s": 2},
     "deliver.result": {"event_id": "e1", "ok": False, "error": "no tts"},
+    "fact": {"name": "place", "value": {"place": "home"}, "observed_at": 1.0,
+             "source": "mac", "node": "mac"},
     "row": {"role": "ciel", "text": "hello", "t": 1.0},
     "state": {"state": "idle"}, "muted": {"muted": False},
     "agents": {"agents": []}, "confirm": {"text": "Run it?"},
@@ -82,6 +84,7 @@ SAMPLES: dict[str, dict] = {
     "event.ack": {"publish_id": "p-mac-1"},
     "deliver.speak": {"event_id": "e1", "text": "Meeting in ten."},
     "timers.sync": {"timers": []},
+    "world": {"facts": {"muted": {"value": False, "observed_at": 1.0, "source": "hub"}}},
 }
 
 

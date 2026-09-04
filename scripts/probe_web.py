@@ -11,7 +11,8 @@ printed URL, type, watch it come back — the GUI, the WebSocket protocol,
 the mute switch, and the confirm banner all exercised without a
 microphone or a model. Type "confirm test" in the page to see the
 confirmation banner; type "deep" to toggle a deep-thought entry in the
-agents chip; flip the mute switch or arm the restart chip and the probe
+agents chip; type "world" to toggle the Mac away and a section open in
+the readings strip; flip the mute switch or arm the restart chip and the probe
 reports it (the probe only reports a restart — nothing relaunches here).
 
 If the page works here but not under Ciel, the lane is fine and the
@@ -312,6 +313,37 @@ async def live(port: int | None = None, require_token: str | None = None) -> Non
     deep_on = False
     link.note_agents(list(sample))
 
+    # A sample world table (world.py) so the readings strip has chips to
+    # draw; typing "world" toggles the Mac away and a section open, the
+    # way a spoke drop and a spot opening would move the strip.
+    now = time.time()
+    world_on = True
+
+    def world_facts() -> dict:
+        return {
+            "spoke": {"value": {"connected": world_on, "node": "mac"},
+                      "observed_at": now, "source": "hub"},
+            "presence": {"value": {"present": True, "locked": False, "idle_s": 4.0,
+                                   "since_conversation_s": 30.0},
+                         "observed_at": time.time(), "source": "spoke:mac", "ttl_s": 30.0},
+            "place": {"value": {"place": "home", "via": "wifi", "network": "Nest",
+                                "device": None, "at": now - 1500},
+                      "observed_at": now, "source": "mac"},
+            "timers": {"value": [{"kind": "timer", "label": "", "due_at": now + 480,
+                                  "duration_s": 600, "pending": False}],
+                       "observed_at": now, "source": "hub"},
+            "agenda": {"value": {"day": time.strftime("%Y-%m-%d"),
+                                 "lines": ["5:00 PM — Standup", "7:30 PM — Dinner"]},
+                       "observed_at": now - 600, "source": "calendar"},
+            "oura": {"value": {"day": time.strftime("%Y-%m-%d"), "readiness": 71,
+                               "sleep_score": 80, "sleep_s": 24000},
+                     "observed_at": now - 7200, "source": "oura"},
+            "sections": {"value": {"spots": {"12": 0, "31": 2 if not world_on else 0}},
+                         "observed_at": now, "source": "sections@mac", "ttl_s": 120.0},
+        }
+
+    link.note_world(world_facts())
+
     try:
         while True:
             await asyncio.sleep(0.2)
@@ -336,6 +368,11 @@ async def live(port: int | None = None, require_token: str | None = None) -> Non
                     "event",
                     "deep thought engaged" if deep_on else "deep thought done",
                 )
+                link.note_state("idle")
+            elif text.lower().startswith("world"):
+                world_on = not world_on
+                link.note_world(world_facts())
+                link.note_row("event", "spoke connected" if world_on else "spoke disconnected")
                 link.note_state("idle")
             elif text.lower().startswith("confirm"):
                 # Exercise the banner: the question frame plus its row,

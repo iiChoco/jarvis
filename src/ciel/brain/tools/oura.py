@@ -17,13 +17,22 @@ from typing import Any
 
 from claude_agent_sdk import tool
 
-from ciel.oura import MAX_RANGE_DAYS, OuraClient, OuraUnavailable, summarize_range
+from ciel.oura import (
+    MAX_RANGE_DAYS,
+    OuraClient,
+    OuraUnavailable,
+    summarize_range,
+    today_readings,
+)
 
 log = logging.getLogger(__name__)
 
 # Bound at startup, same pattern as the timer service: the SDK's @tool
 # decorator wants plain module-level functions.
 _client: OuraClient | None = None
+_world: Any | None = None
+"""The world table (``world.py``): a fetch that covers today leaves the
+day's numbers there, so the next turn opens already knowing them."""
 
 
 def _text(message: str) -> dict[str, Any]:
@@ -75,6 +84,10 @@ async def summary_for(
     readiness, sleep, activity, sessions = await asyncio.to_thread(
         _fetch_sync, client, start, end
     )
+    if _world is not None and end == today:
+        readings = today_readings(today.isoformat(), readiness, sleep, activity, sessions)
+        if len(readings) > 1:
+            _world.observe("oura", readings, source="oura")
     window = [start + datetime.timedelta(days=i) for i in range(days)]
     return "\n".join(
         f"{label_for(day, today)}: {text}"
@@ -123,10 +136,12 @@ async def oura_summary(args: dict[str, Any]) -> dict[str, Any]:
         return _text(str(exc))
 
 
-def bind_oura(client: OuraClient) -> None:
-    """Attach the client this tool reads through."""
-    global _client
+def bind_oura(client: OuraClient, world: Any | None = None) -> None:
+    """Attach the client this tool reads through, and the world table
+    its readings are left in."""
+    global _client, _world
     _client = client
+    _world = world
 
 
 OURA_TOOLS = [oura_summary]

@@ -29,6 +29,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
+from ciel.brain.prompt import build_system_prompt, sections_watch_line
 from ciel.config import MailConfig, SectionsConfig, load_config
 from ciel.gmail import GmailSender
 from ciel import mail as mailmod
@@ -524,6 +525,23 @@ async def smtp_checks(tmp: Path) -> None:
         mailmod.smtplib.SMTP_SSL = real
 
 
+def prompt_checks() -> None:
+    print("self-knowledge:")
+    line = sections_watch_line(("12132",), 30.0, True, 5)
+    check("the standing watch is described, with every outlet",
+          line.startswith("One watch is standing") and "section 12132" in line
+          and "every 30 seconds" in line and "texted if they are away" in line
+          and "emailed 5 times" in line and "cannot enroll" in line)
+    check("no outlets beyond speech when none are armed",
+          "texted" not in sections_watch_line(("1",), 30.0, False, 0)
+          and "emailed" not in sections_watch_line(("1",), 30.0, False, 0))
+    check("two sections read as plural", "sections 1, 2" in sections_watch_line(("1", "2"), 30.0, False, 0))
+    check("no watch, no line", sections_watch_line((), 30.0, True, 5) == "")
+    check("the prompt carries it under Watching things",
+          "section 12132" in build_system_prompt(vigil=True, vigil_standing=line)
+          and "section 12132" not in build_system_prompt(vigil=True))
+
+
 def config_checks(tmp: Path) -> None:
     print("config:")
     fresh = SectionsConfig()
@@ -619,6 +637,7 @@ async def main() -> int:
         await selfheal_checks(Path(tmp))
         await alarm_checks(Path(tmp))
         await smtp_checks(Path(tmp))
+        prompt_checks()
         config_checks(Path(tmp))
     print(f"\nall {len(CHECKS)} checks passed")
     return 0

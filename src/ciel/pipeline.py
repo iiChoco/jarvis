@@ -74,6 +74,8 @@ from ciel.proactive.work import WorkWatcher
 from ciel.brain.tools.location import bind_locator
 from ciel.brain.tools.watch import bind_watcher
 from ciel.location import Locator
+from ciel import world as W
+from ciel.world import World
 from ciel.endpointing import trails_off as _trails_off_words
 from ciel.reload import SourceWatcher, default_roots
 from ciel.schedule import Snapshot, Source, State, pick_next
@@ -656,6 +658,17 @@ def rehydrate_schedule(
 class Pipeline:
     """Runs Ciel until stopped."""
 
+    _world: World | None = None
+    """The world table (Phase Space, ``world.py``), or None when
+    ``[world]`` is off. A class default rather than only an instance
+    attribute so a probe that builds a pipeline by ``__new__`` runs with
+    no table and bare prompts, as every probe did before the table."""
+    _next_world_push = 0.0
+    _world_seen = -1
+    _agenda_task: "asyncio.Task[None] | None" = None
+    """The table's poll clock and the agenda refresher — class defaults
+    for the same reason as ``_world``."""
+
     def __init__(self, config: Config, role: str = "local") -> None:
         self._config = config
         self._role = role
@@ -718,6 +731,22 @@ class Pipeline:
                 WebLink(config.web, config.hub) if config.web.enabled else None
             )
 
+        # The world table (Phase Space): one place for everything Ciel
+        # currently holds true, fed below by every producer, opening every
+        # turn, mirrored to the Chart. Built before the tools so the ring
+        # tool and world_now can bind it.
+        self._world = World(config.world.file) if config.world.enabled else None
+        self._next_world_push = 0.0
+        """The table's once-a-second poll deadline: timers and watches
+        are re-observed, the file flushed, the Chart told if the version
+        moved — the agent roster's cadence and reasoning."""
+        self._world_seen = -1
+        """The table version last broadcast."""
+        self._agenda_task: asyncio.Task[None] | None = None
+        self._agenda_kick = asyncio.Event()
+        """The agenda refresher (``_refresh_agenda``) and its hurry-up:
+        set on a spoke connect and on wake from sleep."""
+
         # Custom tools (memory today, whatever lands in the registry later) are
         # assembled before the brain, because the memory index they expose has
         # to be baked into the system prompt at connect time.
@@ -728,7 +757,7 @@ class Pipeline:
             self._projects,
             self._journal,
             self._timers,
-        ) = build_tool_server(config, self._remote)
+        ) = build_tool_server(config, self._remote, self._world)
         if self._memory is not None and self._memory.all():
             log.info("loaded %d memories", len(self._memory.all()))
 
@@ -748,6 +777,8 @@ class Pipeline:
         if self._web_link is not None:
             # No clients yet — this just sets what the hello frame claims.
             self._web_link.note_muted(self._muted)
+        if self._world is not None:
+            self._world.observe(W.MUTED, self._muted, source=self._who)
         self._next_mute_check = 0.0
         self._next_agents_push = 0.0
         """The active-agent roster's once-a-second poll deadline (the mute
@@ -788,6 +819,15 @@ class Pipeline:
             server.on_turn_cancel = self._on_turn_cancel
             server.on_spoke_mute = lambda muted: self._set_muted(muted, from_spoke=True)
             server.on_spoke_change = self._on_spoke_change
+            server.on_fact = self._on_fact
+            if self._world is not None:
+                # Until the spoke says hello, the honest reading is "not
+                # here" — a carried-over "connected" from the last process
+                # would promise a room that may have gone.
+                self._world.observe(
+                    W.SPOKE, {"connected": False, "node": config.spoke.client_id},
+                    source="hub",
+                )
         # Bound methods, not strings: the brain re-reads these at every
         # connect, so a rotated session's prompt carries whatever the last
         # reflection wrote.
@@ -888,6 +928,8 @@ class Pipeline:
         just as visible. In-flight speech and user-requested timers are
         untouched — the brake stops new starts, never running work."""
         self._hold_engaged = False  # log the engagement once, not per poll
+        if self._world is not None:
+            self._world.observe(W.HOLD, self._hold_sentinel.exists(), source=self._who)
         self._calendar: CalendarWatcher | GoogleCalendarWatcher | None = None
         self._owner_messages: MessagesClient | None = None
         # The Discord lane (Parallel Transport): a user lane like the typed
@@ -905,6 +947,8 @@ class Pipeline:
         )
         if self._locator is not None:
             bind_locator(self._locator)
+            if self._world is not None:
+                self._locator.bind_world(self._world)
         if config.proactive.enabled:
             self._events = EventQueue(
                 config.proactive.state_file,
@@ -956,7 +1000,9 @@ class Pipeline:
                 # most once each per day. Needs an authorization and at
                 # least one threshold: all zero keeps the tool and drops
                 # the nudges.
-                self._vigil_watchers.append(OuraWatcher(config.oura, self._events))
+                self._vigil_watchers.append(
+                    OuraWatcher(config.oura, self._events, world=self._world)
+                )
             if config.sections.enabled and not hub:
                 # A spot opening in a watched course section — the one
                 # watcher whose whole value is the race, hence its own
@@ -965,7 +1011,10 @@ class Pipeline:
                 # On the hub it runs on the spoke instead: its cookie is
                 # minted by a browser profile on the Mac.
                 self._vigil_watchers.append(
-                    SectionsWatcher(config.sections, self._events, mail=config.mail)
+                    SectionsWatcher(
+                        config.sections, self._events, mail=config.mail,
+                        world=self._world,
+                    )
                 )
             if self._locator is not None:
                 self._vigil_watchers.append(
@@ -1138,6 +1187,9 @@ class Pipeline:
                         # is exactly when the page should say so.
                         self._next_agents_push = now_wall + 1.0
                         self._web_link.note_agents(self._active_agents())
+                    if now_wall >= self._next_world_push:
+                        self._next_world_push = now_wall + 1.0
+                        self._world_tick()
 
                     # The turn-slot arbitration: one frozen snapshot, one
                     # pure pick (the ladder lives in ciel.schedule — the
@@ -1411,10 +1463,14 @@ class Pipeline:
                         "vigil holding — remove %s to resume",
                         self._hold_sentinel,
                     )
+                    if self._world is not None:
+                        self._world.observe(W.HOLD, True, source=self._who)
                 return True
             if self._hold_engaged:
                 self._hold_engaged = False
                 log.info("vigil hold lifted")
+                if self._world is not None:
+                    self._world.observe(W.HOLD, False, source=self._who)
             # The event is *peeked*, not popped: only an enacted
             # decision claims it (begin), so a busy turn slot
             # simply leaves it queued — no pop-and-push churn
@@ -1595,6 +1651,9 @@ class Pipeline:
                              "pending": t.pending}
                             for t in self._timers.active()
                         ])
+                if now_wall >= self._next_world_push:
+                    self._next_world_push = now_wall + 1.0
+                    self._world_tick()
 
                 source = pick_next(self._loop_snapshot())
                 if await self._enact(source, None):
@@ -1679,6 +1738,22 @@ class Pipeline:
         watches = frame.get("watches")
         if isinstance(watches, list):
             self._remote.watcher.observe(watches)
+        if self._world is not None:
+            self._observe_presence(
+                source=f"spoke:{frame.get('node') or self._config.spoke.client_id}",
+                ttl_s=self._config.hub.presence_stale_s,
+            )
+
+    def _on_fact(self, frame: dict[str, Any]) -> None:
+        """One world fact from the spoke — its place, the sections'
+        spots — into the table, source-stamped with the node."""
+        if self._world is None:
+            return
+        node = str(frame.get("node") or self._config.spoke.client_id)
+        source = str(frame.get("source") or node)
+        stamped = source if source == node else f"{source}@{node}"
+        if not self._world.absorb(str(frame["name"]), frame, source=stamped):
+            log.debug("fact %r from the spoke refused", frame.get("name"))
 
     def _on_spoke_change(self, connected: bool) -> None:
         """The spoke took or left the seat. Leaving mid-question denies it
@@ -1689,6 +1764,13 @@ class Pipeline:
         self._record("event", notice)
         if not connected:
             self._confirm.cancel("spoke gone")
+        if self._world is not None:
+            self._world.observe(
+                W.SPOKE, {"connected": connected, "node": self._config.spoke.client_id},
+                source="hub",
+            )
+        if connected and self._agenda_task is not None:
+            self._agenda_kick.set()
 
     # ── one conversational turn ──────────────────────────────────────────────
 
@@ -1940,8 +2022,11 @@ class Pipeline:
             # the timer" line shouldn't consume notes no model will see —
             # and never into a public channel: notes are the owner's
             # private catch-up, not channel content.
+            # The lane's note says where the reply lands; the world block
+            # says what is true. Note first (it frames the whole turn),
+            # then the readings, then the held notes, then the words.
             note = prompt_note(req, muted=self._muted)
-            prompt = note + (
+            prompt = note + self._world_block() + (
                 self._with_held_notes(req.text) if spec.held_notes else req.text
             )
             await sink.begin(started)
@@ -2177,6 +2262,8 @@ class Pipeline:
         self._record("event", notice)
         if self._web_link is not None:
             self._web_link.note_muted(muted)
+        if self._world is not None:
+            self._world.observe(W.MUTED, muted, source="spoke" if from_spoke else self._who)
 
     def _request_restart(self) -> None:
         """The GUI's restart button — a typed "reload" without the words.
@@ -2478,6 +2565,12 @@ class Pipeline:
         self._unattended_hastened = False
         try:
             extra = await self._proactive_extra(event)
+            block = self._world_block().strip()
+            if block:
+                # The readings, before the event's own material: an
+                # unattended turn has even less to go on than a spoken
+                # one, and "is anyone around" is exactly its question.
+                extra = block if extra is None else f"{block}\n\n{extra}"
             timed_out = False
             with self._confirm.suppress(), self._brain.unattended("proactive"):
                 try:
@@ -2906,6 +2999,98 @@ class Pipeline:
         except Exception:  # noqa: BLE001 - a missing chime is not a failure
             log.debug("could not play the thinking chime", exc_info=True)
 
+    # ── the world table (Phase Space) ────────────────────────────────────────
+
+    @property
+    def _who(self) -> str:
+        """This process, as a fact's source: the hub, or the Mac itself."""
+        return "hub" if self._role == "hub" else "mac"
+
+    def _world_tick(self) -> None:
+        """The once-a-second duty: re-observe what this process owns
+        (timers, watches), mirror the file, and hand the Chart the
+        snapshot when the version moved. Polled, like the agent roster,
+        because the producers on threads must not touch the sockets."""
+        world = self._world
+        if world is None:
+            return
+        who = self._who
+        if self._timers is not None:
+            world.observe(W.TIMERS, [
+                {"kind": t.kind, "label": t.label, "due_at": t.due_at,
+                 "duration_s": t.duration_s, "pending": t.pending}
+                for t in self._timers.active()
+            ], source=who)
+        if self._work_watcher is not None:
+            world.observe(W.WATCHES, [
+                {"label": w.label, "kind": w.kind, "target": w.target,
+                 "expires_at": w.expires_at}
+                for w in self._work_watcher.active()
+            ], source=who)
+        world.flush()
+        version = world.version
+        if version != self._world_seen:
+            self._world_seen = version
+            if self._web_link is not None:
+                self._web_link.note_world(world.snapshot())
+
+    def _observe_presence(self, *, source: str, ttl_s: float | None = None) -> None:
+        """Fold the presence view into the table. On the hub this runs
+        on every heartbeat; locally, once per turn (the Quartz reads are
+        cheap, but the probe's rule is never at frame rate)."""
+        if self._world is None or self._presence is None:
+            return
+        try:
+            state = self._presence.state(time.monotonic())
+        except Exception:  # noqa: BLE001 - a failed read leaves the last one standing
+            log.debug("presence read for the world failed", exc_info=True)
+            return
+        idle = state.seconds_since_input
+        self._world.observe(W.PRESENCE, {
+            "present": state.present,
+            "locked": state.screen_locked,
+            "idle_s": round(idle, 1) if math.isfinite(idle) else None,
+            "since_conversation_s": (
+                round(state.seconds_since_conversation, 1)
+                if state.seconds_since_conversation is not None else None
+            ),
+        }, source=source, ttl_s=ttl_s)
+
+    def _world_block(self) -> str:
+        """The turn's opening block, or "" when the table is off or kept
+        out of the prompt. Locally the presence reading is taken here,
+        so it is never older than the turn it opens."""
+        if self._world is None or not self._config.world.in_prompt:
+            return ""
+        if self._role != "hub":
+            self._observe_presence(source="mac")
+        return self._world.render() + "\n\n"
+
+    async def _refresh_agenda(self) -> None:
+        """Today's remaining calendar into the table, every
+        ``agenda_refresh_s`` and when kicked (a spoke connect, a wake
+        from sleep). On the hub with the Mac's calendar the read is an
+        RPC, skipped while the seat is empty rather than warned about
+        every quarter hour."""
+        assert self._world is not None and self._calendar is not None
+        from ciel.proactive.watchers import poll_loop
+
+        async def tick() -> None:
+            if (
+                self._remote is not None
+                and self._calendar is self._remote.calendar
+                and not self._web_link.spoke_connected  # type: ignore[union-attr]
+            ):
+                return
+            lines = await self._calendar.agenda_today()  # type: ignore[union-attr]
+            self._world.observe(  # type: ignore[union-attr]
+                W.AGENDA,
+                {"day": time.strftime("%Y-%m-%d"), "lines": [str(x) for x in lines]},
+                source="calendar",
+            )
+
+        await poll_loop(self._agenda_kick, self._config.world.agenda_refresh_s, tick)
+
     def _record(self, speaker: str, text: str) -> None:
         """Append one row to this conversation's transcript, if one is kept.
 
@@ -3094,6 +3279,8 @@ class Pipeline:
             kick = getattr(watcher, "kick", None)
             if kick is not None:
                 kick()
+        if self._agenda_task is not None:
+            self._agenda_kick.set()
         if gap_s > self._config.brain.resume_window_minutes * 60:
             self._schedule.clear()
 
@@ -3199,6 +3386,12 @@ class Pipeline:
         # not the greeting.
         startup.extend(w.start() for w in self._vigil_watchers)
         await asyncio.gather(*startup)
+        if (
+            self._world is not None
+            and self._calendar is not None
+            and self._config.world.agenda_refresh_s > 0
+        ):
+            self._agenda_task = asyncio.create_task(self._refresh_agenda())
         log.info("ready in %.1fs", time.monotonic() - started)
 
     async def _warm_up_stt(self) -> None:
@@ -3264,7 +3457,12 @@ class Pipeline:
         if self._web_link is not None:
             closers.append(self._web_link.close())
         closers.extend(w.close() for w in self._vigil_watchers)
+        if self._agenda_task is not None and not self._agenda_task.done():
+            self._agenda_task.cancel()
+            closers.append(asyncio.gather(self._agenda_task, return_exceptions=True))
         await asyncio.gather(*closers, return_exceptions=True)
+        if self._world is not None:
+            self._world.flush()
         if self._transcript is not None:
             self._transcript.close()
         if self._brain.total_cost_usd:

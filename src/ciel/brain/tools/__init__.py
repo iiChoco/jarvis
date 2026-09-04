@@ -41,6 +41,7 @@ from ciel.brain.tools.projects import PROJECT_TOOLS, bind_projects
 from ciel.brain.tools.screen import SCREEN_TOOLS, bind_screen
 from ciel.brain.tools.timers import TIMER_TOOLS, bind_timers
 from ciel.brain.tools.watch import WATCH_TOOLS, bind_watcher
+from ciel.brain.tools.world import WORLD_TOOLS, bind_world
 from ciel.config import Config, MCPServerConfig
 from ciel.journal import ActionJournal
 from ciel.mail import SmtpSender
@@ -58,7 +59,7 @@ SERVER_NAME = "ciel"
 TOOLS = [
     *MEMORY_TOOLS, *MESSAGE_TOOLS, *ACTION_TOOLS, *PROJECT_TOOLS,
     *SCREEN_TOOLS, *TIMER_TOOLS, *WATCH_TOOLS, *GRANT_TOOLS, *OURA_TOOLS,
-    *LOCATION_TOOLS, *MAIL_TOOLS,
+    *LOCATION_TOOLS, *MAIL_TOOLS, *WORLD_TOOLS,
 ]
 
 
@@ -87,6 +88,7 @@ def _external_server(entry: MCPServerConfig) -> dict[str, Any] | None:
 def build_tool_server(
     config: Config,
     remote: Any | None = None,
+    world: Any | None = None,
 ) -> tuple[
     dict[str, Any],
     list[str],
@@ -109,6 +111,9 @@ def build_tool_server(
     the wire's duck type instead of the local implementation, and the
     Mac tools (the user's shell and files, from a brain elsewhere) are
     registered. None is the single process and the spoke.
+
+    ``world`` is the world table (``world.py``): the ring tool leaves
+    today's numbers in it, and the ``world_now`` tool reads it.
     """
     store: MemoryStore | None = None
     journal: ActionJournal | None = None
@@ -181,7 +186,7 @@ def build_tool_server(
 
     auth = build_auth(config.oura) if config.oura.armed else None
     if auth is not None:
-        bind_oura(OuraClient(auth))
+        bind_oura(OuraClient(auth), world)
     else:
         if config.oura.enabled:
             log.warning(
@@ -191,6 +196,13 @@ def build_tool_server(
             )
         # Same reasoning as memory: an always-unavailable tool wastes turns.
         tools = [t for t in tools if t not in OURA_TOOLS]
+
+    if world is not None:
+        bind_world(world)
+    else:
+        # Off, the tool would only ever answer unavailable — same
+        # reasoning as memory.
+        tools = [t for t in tools if t not in WORLD_TOOLS]
 
     if not config.location.enabled:
         # The pipeline binds the locator at startup (the watch tool's

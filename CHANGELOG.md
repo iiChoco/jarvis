@@ -2,6 +2,73 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-04 — one point that says where everything is (Phase Space)
+
+**Why.** What Ciel knew about the world was scattered by producer, each
+reading owned by its one consumer: presence by the interruption policy,
+the place by the location tool, the ring's numbers by nobody once the
+nudge was filed, the mute switch by the pipeline, the timers by their
+service. The brain saw none of it unless it called a tool, and the only
+world facts glued onto a turn were the lane notes' fixed strings — it
+never knew the time of day. "What time is it", "am I at home", "how
+long is left on the timer", "is anyone around" each cost a tool call or
+a guess, and nothing could say *how old* an answer was.
+
+**What.** `world.py`, codename **Phase Space**: one table of facts, each
+a value with who reported it, when it was observed, and how long it
+stays trustworthy.
+
+- *The table.* `World.observe` records a reading; an unchanged
+  re-observation is not a change but refreshes the age; a fact past its
+  `ttl_s` is kept and rendered "last known", never dropped. Thread-safe,
+  no asyncio: producers on worker threads (the locator) write under a
+  lock, and the pipeline polls `version` once a second — the agent
+  roster's rule — to flush `~/.ciel/world.json` and hand the Chart the
+  snapshot. The file carries facts across the autoreloader's re-execs
+  at their true age.
+- *The opening block.* Every user turn and every unattended turn now
+  opens "(Now — It is 3:42 PM on Friday 4 September 2026 ...)": the
+  Mac's seat (hub), presence, place, mute and hold when set, timers and
+  watches, the rest of today's calendar, the ring — one sentence each,
+  in a fixed room-first order, with ages in the runtime's words ("4
+  minutes ago", "as of 11:42 AM", "last known, at 3:42 PM — no newer
+  reading"). Lane note first (where the reply lands), then the block
+  (what is true), then the held notes, then the words; the transcript
+  keeps only the words. A static prompt section says how to read it;
+  the `world_now` tool re-reads it mid-turn. `[world] in_prompt = false`
+  keeps the table and drops the block.
+- *The producers.* The pipeline writes mute, hold, the spoke's seat,
+  timers and watches (once a second), and presence (per turn locally,
+  per heartbeat on the hub, with `presence_stale_s` as the ttl). The
+  locator writes the place on every fix, whichever path read it. The
+  ring watcher and the `oura_summary` tool write the day's numbers
+  (`today_readings`, only the fields fetched). The sections watcher
+  writes the open-spot counts with a four-poll ttl. A refresher reads
+  today's remaining calendar every `agenda_refresh_s` (15 min), kicked
+  on a spoke connect and a wake from sleep, and skipped on the hub
+  while the Mac is away.
+- *The wire.* Two frames: `fact` (spoke → hub, last-value, no ack) and
+  `world` (hub → every client, whole table, on the replay ring); the
+  hello carries the table. The spoke's `WorldRelay` has the table's
+  `observe` signature, keeps one frame per name, is flushed from the
+  frame loop (never a producer's thread), and resends the set after a
+  reconnect. The hub stamps a fact's source with the node
+  (`sections@mac`).
+- *The Chart.* A readings strip under the header: MAC linked/away, YOU
+  here/idle/locked, PLACE, TIMERS, WATCHES, NEXT, RING, SECTIONS, VIGIL
+  held — each chip with its age, gold when it wants attention, dimmed
+  once stale, redrawn every half minute. `probe_web.py --live` plants a
+  sample table; typing "world" toggles the Mac away and a section open.
+
+**Probes.** `probe_world.py` (72): versions and the notify clock,
+freshness and "last known", every renderer's wording, the file mirror
+across a restart and against a bad file, the relay's flush and resend,
+the hub's door and its source stamp, and the turn's composition order.
+`probe_wire.py` grows two samples. The pipelines the other probes build
+by `__new__` run with no table (class defaults), so `probe_turns`'
+prompt contract is untouched. Owed: a live look at the block from a
+real turn, and the strip on the deployed hub.
+
 ## 2026-09-03 — the interview room (Adjoint)
 
 **Why.** Ciel is one person's assistant, and a mock interviewer is a thing
@@ -77,6 +144,40 @@ view at desktop and phone widths. Deployed 2026-09-04: the Cloudflare
 Access bypass on `/interview` (the Chart stays behind the owner's PIN),
 piper on the arm64 hub, `[interview] enabled = true`. Owed: a spoken
 interview from a phone.
+
+## 2026-09-03 — a flapping seat is one line on the Chart
+
+**Why.** Every time the spoke takes or leaves the seat the hub records an
+event row, and a spoke that reconnects in a loop wrote "spoke connected"
+/ "spoke disconnected" down the whole page.
+
+**What.** `chart.html`'s `addRow` stacks an event onto the previous event
+row when the two say the same thing, or when both are seat notices: the
+row reads the latest text with the run's count — "spoke disconnected
+(8×)". Same rule for a repeated "turn failed". The history replayed on a
+fresh hello goes through the same door, so a reload shows the stack, not
+the spam. Browser-checked against the echo server.
+
+## 2026-09-03 — the pill wears the Chart's chip
+
+**Why.** Two status lights, two looks: the HUD in the corner was a rounded
+grey pill with a coloured dot, the Chart's header a cut-corner chip in the
+"Instrument" palette. They report the same six states and should read as
+one instrument.
+
+**What.** `ui/hud.py` redrawn in Core Animation from the page's CSS: the
+cut-corner polygon (a `CAShapeLayer` mask for the fill, a second stroking
+the same path for the border), the near-black ground tinted with the state
+colour, the six-point dot with a soft glow that breathes on the page's
+timings (3.4 s, 1.6 s while speaking), and a semibold monospace label in
+capitals at .2em tracking, in the page's hand-picked text colour per state.
+The chip sizes itself to its label and re-anchors to its corner; the window
+shadow is gone, the border is the edge. Colours, cuts, and timings are
+copied from `chart.html`, not approximated. Two PyObjC notes for next time:
+a method that takes an argument and has no trailing underscore is taken
+for a selector unless marked `@objc.python_method`; and an attributed
+string's `size()` under-reports kerned text, so the label is measured
+through its cell, or the last glyph is clipped.
 
 ## 2026-09-03 — what survives a hub that is away (phase 5, part one)
 
@@ -432,6 +533,8 @@ and that is the narrow thing worth automating.
   Ciel would honestly say no. `sections_watch_line` now tells the Watching
   section which sections are watched, how often, and every outlet that
   fires on an opening, and that enrolling stays the user's act.
+  Keyed on the watch list, not `enabled`: on the hub the watcher runs
+  on the spoke (enabled = false there) and the brain must still know.
 
 **Probes.** `probe_sections.py` grows to 78 checks: cookie-file
 precedence over the seed, the self-heal spawn and its cooldown,

@@ -53,7 +53,7 @@ from ciel.reload import SourceWatcher, default_roots
 from ciel.schedule import State
 from ciel.spoke.client import HubClient
 from ciel.spoke.executor import Executor
-from ciel.spoke.publisher import Heartbeat, PublishQueue
+from ciel.spoke.publisher import Heartbeat, PublishQueue, WorldRelay
 from ciel.spoke.timers import TimerMirror
 from ciel.timers import spoken_clock, spoken_duration
 from ciel.stt import SpeechToText, build_stt
@@ -97,6 +97,10 @@ async def _one(data: bytes):
 class Spoke:
     """Runs the room until stopped."""
 
+    _world: WorldRelay | None = None
+    """The world relay, or None when ``[world]`` is off — a class default
+    so a probe that builds the spoke by ``__new__`` runs without one."""
+
     def __init__(self, config: Config) -> None:
         self._config = config
         self._stt: SpeechToText = build_stt(config.stt)
@@ -124,6 +128,13 @@ class Spoke:
         # The same modules the single process runs; only their queue and
         # their caller changed.
         self._publish = PublishQueue(self._link.send, node=config.spoke.client_id)
+        self._world = (
+            WorldRelay(self._link.send, node=config.spoke.client_id)
+            if config.world.enabled else None
+        )
+        """The Mac's facts for the hub's world table (``world.py``): the
+        place and the sections' spots, as ``fact`` frames. Flushed from
+        the frame loop, never from the producers' threads."""
         self._watchers: list = []
         self._work_watcher = None
         self._calendar = None
@@ -145,6 +156,8 @@ class Spoke:
             from ciel.location import Locator
 
             self._locator = Locator(config.location)
+            if self._world is not None:
+                self._locator.bind_world(self._world)
             if config.proactive.enabled:
                 from ciel.proactive.location import LocationWatcher
 
@@ -158,7 +171,9 @@ class Spoke:
             from ciel.proactive.sections import SectionsWatcher
 
             self._watchers.append(
-                SectionsWatcher(config.sections, self._publish, mail=config.mail)
+                SectionsWatcher(
+                    config.sections, self._publish, mail=config.mail, world=self._world,
+                )
             )
         messages = None
         if config.messages.enabled:
@@ -250,6 +265,8 @@ class Spoke:
                         on_disk = self._mute_sentinel.exists()
                         if on_disk != self._muted:
                             self._set_muted(on_disk)
+                        if self._world is not None:
+                            self._world.flush()
                         # The mirror's own ringing: only what the hub can't.
                         if (
                             self._state is State.WAITING
@@ -526,6 +543,10 @@ class Spoke:
         if resent:
             log.info("re-published %d event(s) after the reconnect", resent)
         self._heartbeat.beat(force=True)
+        if self._world is not None:
+            # The hub may be a fresh process with an empty table; every
+            # fact rides again on the next flush.
+            self._world.resend()
 
     def _on_disconnect(self) -> None:
         if self._hub_turn is not None or self._awaiting_hub:

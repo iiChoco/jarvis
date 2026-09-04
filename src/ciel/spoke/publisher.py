@@ -19,12 +19,22 @@ The heartbeat rides alongside: every ``interval_s`` (and at once when
 something changes) the spoke sends ``presence`` — the raw Quartz
 signals the in-process probe used to read directly, plus the roster of
 active watches, which the hub's agents chip needs and can't read.
+
+The world relay (``WorldRelay``) is the third door: the Mac's readings
+that are *facts* rather than events — its place, the watched sections'
+spots — go up as ``fact`` frames for the hub's world table
+(``world.py``). Last-value semantics, so there is no outbox to ack:
+the relay keeps one frame per fact name, resends the whole set after a
+reconnect, and is flushed from the frame loop rather than from the
+producer — a locator refresh runs on a worker thread, and the socket
+must only ever be touched from the loop.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, Callable
@@ -191,4 +201,67 @@ class Heartbeat:
             await asyncio.sleep(self._interval)
 
 
-__all__ = ["Heartbeat", "PublishQueue"]
+class WorldRelay:
+    """The world table's ``observe`` signature, with the hub on the other
+    side. Thread-safe on the producers' side; ``flush`` on the loop's."""
+
+    def __init__(self, send: Callable[[dict[str, Any]], bool], node: str = "mac") -> None:
+        self._send = send
+        self._node = node
+        self._lock = threading.Lock()
+        self._facts: dict[str, dict[str, Any]] = {}
+        """name → the last fact frame built for it."""
+        self._pending: set[str] = set()
+        """names whose latest frame has not gone up yet."""
+
+    def observe(
+        self,
+        name: str,
+        value: Any,
+        *,
+        source: str,
+        observed_at: float | None = None,
+        ttl_s: float | None = None,
+    ) -> bool:
+        """The ``World.observe`` contract; True when the value changed."""
+        frame: dict[str, Any] = {
+            "type": "fact", "name": name, "value": value, "source": source,
+            "observed_at": time.time() if observed_at is None else observed_at,
+            "node": self._node,
+        }
+        if ttl_s is not None:
+            frame["ttl_s"] = ttl_s
+        with self._lock:
+            previous = self._facts.get(name)
+            changed = previous is None or previous.get("value") != value
+            self._facts[name] = frame
+            self._pending.add(name)
+        return changed
+
+    def flush(self) -> int:
+        """Send whatever changed since the last flush — from the loop.
+        A send that fails (hub away) stays pending for the next flush."""
+        with self._lock:
+            names = list(self._pending)
+            frames = [self._facts[n] for n in names]
+        sent = 0
+        for name, frame in zip(names, frames):
+            if self._send(frame):
+                sent += 1
+                with self._lock:
+                    if self._facts.get(name) is frame:
+                        self._pending.discard(name)
+        return sent
+
+    def resend(self) -> None:
+        """After a reconnect: every fact rides again on the next flush."""
+        with self._lock:
+            self._pending.update(self._facts)
+
+    @property
+    def outstanding(self) -> int:
+        with self._lock:
+            return len(self._pending)
+
+
+__all__ = ["Heartbeat", "PublishQueue", "WorldRelay"]

@@ -172,6 +172,32 @@
   .agent.timer .meta { font-size: 15px; color: #c7f4fd; }
   .agent.alarm .meta { color: rgba(182, 198, 205, .6); }
 
+  /* the readings strip: the world table (world.py), one chip per fact */
+  #world {
+    display: none;
+    flex-wrap: wrap; align-items: center; gap: 8px 10px;
+    padding: 8px 28px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(160, 240, 255, .025);
+    flex: none;
+  }
+  body.hasworld #world { display: flex; }
+  #world .reading {
+    display: inline-flex; align-items: baseline; gap: 7px;
+    padding: 4px 9px;
+    border: 1px solid var(--line);
+    clip-path: polygon(0 0, calc(100% - 6px) 0, 100% 6px, 100% 100%, 6px 100%, 0 calc(100% - 6px));
+    font: 500 9.5px/1.3 var(--mono);
+    letter-spacing: .14em; text-transform: uppercase;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  #world .reading .k { color: rgba(160, 214, 235, .55); }
+  #world .reading .age { color: var(--text-faint); letter-spacing: .06em; }
+  #world .reading.warn { border-color: rgba(232, 201, 138, .45); color: #f0dbaf; }
+  #world .reading.stale { opacity: .55; }
+  #world .reading.stale .age { color: rgba(232, 138, 138, .7); }
+
   /* banners: the machine's own condition, in mono */
   #conn {
     display: none;
@@ -356,6 +382,8 @@
     .agent .kind { width: 84px; letter-spacing: .14em; }
     .agent .label { white-space: normal; font-size: 14px; }
     #conn, #mutebanner { padding: 9px 15px; font-size: 9px; letter-spacing: .14em; }
+    #world { padding: 7px 15px; gap: 6px 8px; }
+    #world .reading { font-size: 8.5px; letter-spacing: .1em; padding: 3px 7px; }
     #log { padding: 20px 0 16px; }
     .inner { padding: 0 16px; }
     #rows { gap: 18px; }
@@ -408,6 +436,8 @@
   </form>
 </div>
 
+<div id="world" title="The system's own readings — what Ciel currently holds true, with its age"></div>
+
 <div id="agentsbar">
   <div class="caption">working on your behalf</div>
   <div id="agentrows"></div>
@@ -455,6 +485,7 @@ const agentsBtn = document.getElementById("agentsbtn");
 const agentsArr = document.getElementById("agentsarr");
 const agentsCount = document.getElementById("agentscount");
 const agentRows = document.getElementById("agentrows");
+const worldEl = document.getElementById("world");
 
 const KNOWN_STATES = new Set([
   "idle", "listening", "thinking", "reasoning", "speaking", "error",
@@ -536,11 +567,32 @@ function nearBottom() {
   return logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 80;
 }
 
+// A flapping spoke seat writes "spoke connected" / "spoke disconnected"
+// over and over; a retried turn writes "turn failed" twice. Those stack
+// onto the previous event row as a count — "spoke disconnected (8×)" —
+// rather than fill the page. Two events stack when they say the same
+// thing, or when both are seat notices (the run keeps the latest one).
+function stacksOn(prev, body) {
+  if (!prev || !prev.classList.contains("event")) return false;
+  const was = prev.dataset.text || "";
+  return was === body || (was.startsWith("spoke ") && body.startsWith("spoke "));
+}
+
 function addRow(role, body, t) {
   const stick = nearBottom();
   const spec = ROLES[role] || { cls: "event" };
+  if (spec.cls === "event" && stacksOn(rows.lastElementChild, body)) {
+    const prev = rows.lastElementChild;
+    const n = (Number(prev.dataset.count) || 1) + 1;
+    prev.dataset.count = String(n);
+    prev.dataset.text = body;
+    prev.firstElementChild.textContent = body + " (" + n + "\u00d7)";
+    if (stick) logEl.scrollTop = logEl.scrollHeight;
+    return;
+  }
   const row = document.createElement("div");
   row.className = "row " + spec.cls;
+  if (spec.cls === "event") row.dataset.text = body;
   if (spec.cls === "confirmrow") {
     const wrap = document.createElement("div");
     wrap.className = "body";
@@ -592,6 +644,104 @@ const AGENT_KINDS = {
 };
 
 let agents = [];
+
+// The world table (world.py): the hub's readings, whole, whenever they
+// change — and re-drawn every half minute so the ages stay honest.
+// Fact names not listed are simply not shown; a new producer adds a
+// line here, the same rule as unknown transcript labels.
+let world = {};
+
+function ago(s) {
+  s = Math.max(0, Math.round(s));
+  if (s < 90) return "now";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h";
+  return Math.floor(s / 86400) + "d";
+}
+
+function hm(s) {
+  const m = Math.round(s / 60);
+  return Math.floor(m / 60) + "h" + String(m % 60).padStart(2, "0");
+}
+
+// name → [key label, value text, warn?] or null to hide. `v` is the fact's
+// value, `f` the whole fact (for a place's own timestamp).
+const READINGS = {
+  spoke: (v) => [v.connected ? "MAC" : "MAC", v.connected ? "linked" : "away", !v.connected],
+  presence: (v, f, now) => {
+    if (f.ttl_s != null && now - f.observed_at > f.ttl_s) return ["YOU", "unknown", true];
+    if (v.locked) return ["YOU", "locked", false];
+    if (typeof v.idle_s === "number") return ["YOU", v.idle_s < 120 ? "here" : "idle " + ago(v.idle_s), false];
+    return ["YOU", v.present ? "here" : "away", false];
+  },
+  place: (v) => [v.via === "findmy" ? "PHONE" : "PLACE", v.place || (v.network ? v.network : "unknown"), false],
+  timers: (v) => Array.isArray(v) && v.length ? ["TIMERS", String(v.length), false] : null,
+  watches: (v) => Array.isArray(v) && v.length ? ["WATCHES", String(v.length), false] : null,
+  agenda: (v, f, now) => {
+    const d = new Date(now * 1000);
+    const today = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+    if (v.day !== today) return null;
+    const lines = Array.isArray(v.lines) ? v.lines : [];
+    return ["NEXT", lines.length ? lines[0] : "nothing more today", false];
+  },
+  oura: (v) => {
+    const bits = [];
+    if (typeof v.readiness === "number") bits.push("ready " + v.readiness);
+    if (typeof v.sleep_s === "number") bits.push("slept " + hm(v.sleep_s));
+    else if (typeof v.sleep_score === "number") bits.push("sleep " + v.sleep_score);
+    return bits.length ? ["RING", bits.join(" · "), false] : null;
+  },
+  sections: (v) => {
+    const spots = v && v.spots ? v.spots : {};
+    const open = Object.entries(spots).filter(([, n]) => n > 0);
+    if (!Object.keys(spots).length) return null;
+    return ["SECTIONS", open.length ? open.map(([id, n]) => id + ": " + n).join(" ") : "all full", open.length > 0];
+  },
+  hold: (v) => v ? ["VIGIL", "held", true] : null,
+};
+
+function setWorld(facts) {
+  world = facts && typeof facts === "object" ? facts : {};
+  renderWorld();
+}
+
+function renderWorld() {
+  const now = Date.now() / 1000;
+  worldEl.textContent = "";
+  let shown = 0;
+  for (const name of Object.keys(READINGS)) {
+    const f = world[name];
+    if (!f || typeof f !== "object") continue;
+    let spec;
+    try { spec = READINGS[name](f.value, f, now); } catch { spec = null; }
+    if (!spec) continue;
+    const stale = f.ttl_s != null && now - f.observed_at > f.ttl_s;
+    // A place's own reading time is the honest age, not when it was folded in.
+    const at = name === "place" && f.value && typeof f.value.at === "number" ? f.value.at : f.observed_at;
+    const chip = document.createElement("span");
+    chip.className = "reading" + (spec[2] ? " warn" : "") + (stale ? " stale" : "");
+    const k = document.createElement("span");
+    k.className = "k";
+    k.textContent = spec[0];
+    chip.appendChild(k);
+    const val = document.createElement("span");
+    val.textContent = spec[1];
+    chip.appendChild(val);
+    const age = now - at;
+    if (age >= 90 || stale) {
+      const a = document.createElement("span");
+      a.className = "age";
+      a.textContent = ago(age);
+      chip.appendChild(a);
+    }
+    chip.title = name + " · " + (f.source || "?") + " · " + new Date(f.observed_at * 1000).toLocaleTimeString();
+    worldEl.appendChild(chip);
+    shown += 1;
+  }
+  document.body.classList.toggle("hasworld", shown > 0);
+}
+
+setInterval(renderWorld, 30000);
 
 function fmtSpan(s) {
   s = Math.max(0, Math.round(s));
@@ -803,6 +953,7 @@ function connect() {
       setState(f.state || "idle");
       setMuted(!!f.muted);
       setAgents(f.agents);
+      setWorld(f.world);
     } else if (f.type === "row") {
       addRow(f.role, f.text, f.t);
       if (f.role && f.role.startsWith("you-confirm")) clearAsk();
@@ -813,6 +964,8 @@ function connect() {
       setMuted(!!f.muted);
     } else if (f.type === "agents") {
       setAgents(f.agents);
+    } else if (f.type === "world") {
+      setWorld(f.facts);
     } else if (f.type === "confirm") {
       askQ.textContent = f.text;
       document.body.classList.add("asking");

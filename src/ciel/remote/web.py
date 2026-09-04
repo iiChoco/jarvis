@@ -321,6 +321,8 @@ class WebLink:
         self._state = "idle"
         self._muted = False
         self._agents: list[dict[str, Any]] = []
+        self._world: dict[str, Any] = {}
+        """The last world snapshot broadcast — what the hello claims."""
         self._runner: Any = None
         self._site: Any = None
         self.on_mute: Callable[[bool], None] | None = None
@@ -423,6 +425,16 @@ class WebLink:
             return
         self._agents = agents
         self._broadcast({"type": "agents", "agents": agents})
+
+    def note_world(self, facts: dict[str, Any]) -> None:
+        """The world table tap (``world.py``): the pipeline polls the
+        table's version once a second and hands the whole snapshot here
+        when it moved; deduplicated again at this door for the callers
+        that don't."""
+        if facts == self._world:
+            return
+        self._world = facts
+        self._broadcast({"type": "world", "facts": facts})
 
     def _broadcast(self, payload: dict[str, Any]) -> None:
         """Every client, in order — and the ring, always: a frame said
@@ -682,6 +694,7 @@ class WebLink:
             "muted": self._muted,
             "state": self._state,
             "agents": self._agents,
+            "world": self._world,
             "history": [] if replay is not None else list(self._history),
         }))
         for data in replay or ():

@@ -307,7 +307,35 @@ saying permission is missing, relay that briefly and carry on with what they
 tell you out loud."""
 
 
-def vigil_section(away_outlet: bool) -> str:
+def sections_watch_line(
+    section_ids: tuple[str, ...], poll_s: float, away: bool, email_count: int
+) -> str:
+    """Self-knowledge of the section-signup watch — a standing watcher Ciel
+    did not register and cannot change, so without this line the honest
+    answer to "are you watching for a spot?" would be a wrong no."""
+    if not section_ids:
+        return ""
+    plural = "s" if len(section_ids) > 1 else ""
+    ids = ", ".join(section_ids)
+    outlets = ["spoken to them if they are around"]
+    if away:
+        outlets.append("texted if they are away")
+    if email_count > 0:
+        outlets.append(
+            f"and emailed {email_count} times from your own address, a minute apart"
+        )
+    return (
+        f"One watch is standing that you did not register and cannot change "
+        f"from here: the course section-signup site, for section{plural} "
+        f"{ids}. It is polled every {int(poll_s)} seconds, and the moment a "
+        f"watched section stops being full the user is told at once — "
+        f"{', '.join(outlets)}. If asked whether you are watching for a spot, "
+        f"the answer is yes, and this is how. You cannot enroll them: taking "
+        f"the spot is theirs to do on the site, quickly."
+    )
+
+
+def vigil_section(away_outlet: bool, standing: str = "") -> str:
     """Describe the proactive layer, when it's enabled.
 
     Same philosophy as the other sections: the machinery enforces itself —
@@ -317,6 +345,7 @@ def vigil_section(away_outlet: bool) -> str:
     promise to "keep an eye on things" with no watcher armed, or deny being
     able to do exactly what the watch tool exists for.
     """
+    standing_block = f"\n{standing}\n" if standing else ""
     away = (
         "\nWhen something urgent comes up while the user is away, the "
         "system may text it to them — iMessage or the Discord link, "
@@ -336,7 +365,7 @@ quiet hours, presence, a daily budget of unprompted speech — decides whether
 each one is spoken right away, held for the start of the next conversation,
 or dropped. You do not manage any of that; know it exists so you can answer
 honestly when asked what you will and won't notice on your own.
-
+{standing_block}
 When the user starts or mentions something long-running — an export writing
 a file, a build, a process that should finish — register it with
 watch_for_completion instead of promising to check later: between turns you
@@ -354,6 +383,23 @@ it later and report what it actually finds. Hold your own speech to that
 standard: "I checked" and "I recall" are different claims — make clear
 which one you are making, and when a fresh look costs one read-only call,
 take it before asserting."""
+
+
+WORLD = """\
+# The opening block
+
+Every turn from the user opens with a parenthesized block that begins
+"(Now — ...)": the system's own readings at that moment — the time and
+date, whether they are around, where they are, whether the speakers are
+muted, what is armed, what is left on today's calendar, the ring's
+numbers. It is written by the runtime, not by the user, and each reading
+states its age. Answer from it without a tool when it is fresh — "it's ten
+past three", "you're at home", "the timer has four minutes left" — and
+say "as of" when it says so. It is a reading, not a check: when the answer
+has to be current (has the spot opened, where exactly are they), use the
+tool that reads the live source and say you checked. The world_now tool
+re-reads the same block mid-turn. Never quote the block back or mention
+that it exists; it is how you know, not something the user wrote."""
 
 
 REMOTE = """\
@@ -582,6 +628,7 @@ def build_system_prompt(
     personality: str = "jarvis",
     vigil: bool = False,
     vigil_away: bool = False,
+    vigil_standing: str = "",
     remote: bool = False,
     grants: bool = False,
     oura: bool = False,
@@ -590,6 +637,7 @@ def build_system_prompt(
     mail_owner: str = "",
     mail_copy_to: str = "",
     mac: bool = False,
+    world: bool = False,
 ) -> str:
     """Assemble the full system prompt.
 
@@ -616,6 +664,9 @@ def build_system_prompt(
     if mac:
         sections.append(MAC)
 
+    if world:
+        sections.append(WORLD)
+
     if confirmed_actions:
         sections.append(CONFIRMED_ACTIONS)
 
@@ -629,7 +680,7 @@ def build_system_prompt(
         sections.append(DEEP_THOUGHT)
 
     if vigil:
-        sections.append(vigil_section(vigil_away))
+        sections.append(vigil_section(vigil_away, vigil_standing))
 
     if remote:
         sections.append(REMOTE)
@@ -657,6 +708,7 @@ def build_system_prompt(
 
 __all__ = [
     "build_system_prompt",
+    "sections_watch_line",
     "REFLECTION_PROMPT",
     "PERSONALITIES",
     "SPEECH_RULES",

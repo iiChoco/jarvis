@@ -93,6 +93,7 @@ CATALOG: dict[str, FrameSpec] = {
             "caps": "list", "resume": "dict",
             "seq": "int", "epoch": "str", "acks": "bool", "resumed": "bool",
             "muted": "bool", "state": "str", "agents": "list", "history": "list",
+            "world": "dict",
         },
     ),
     "ping": FrameSpec("both", optional={"t_wall": "num"}),
@@ -142,6 +143,15 @@ CATALOG: dict[str, FrameSpec] = {
     "deliver.result": FrameSpec(
         "c2h", required={"event_id": "str", "ok": "bool"}, optional={"error": "str"}
     ),
+    # One world fact from the spoke (Phase Space, ``world.py``): a reading
+    # the Mac took — its place, the watched sections' spots — for the
+    # hub's table. Last-value semantics: a resend after a reconnect
+    # replaces, never duplicates, so no ack is needed.
+    "fact": FrameSpec(
+        "c2h",
+        required={"name": "str", "value": "any", "observed_at": "num"},
+        optional={"source": "str", "ttl_s": "num", "node": "str"},
+    ),
     # ── hub → client ────────────────────────────────────────────────────
     "row": FrameSpec(
         "h2c", required={"role": "str", "text": "str", "t": "num"},
@@ -186,10 +196,14 @@ CATALOG: dict[str, FrameSpec] = {
         optional={"meta": "dict", "seq": "int"},
     ),
     "timers.sync": FrameSpec("h2c", required={"timers": "list"}, optional={"seq": "int"}),
+    # The hub's world table, whole, whenever it changes — the Chart's
+    # readings strip. Whole rather than a delta because it is small and a
+    # resume must not depend on having seen the previous one.
+    "world": FrameSpec("h2c", required={"facts": "dict"}, optional={"seq": "int"}),
 }
 
 BROADCAST_TYPES = frozenset({
-    "row", "state", "muted", "agents", "confirm", "timers.sync",
+    "row", "state", "muted", "agents", "confirm", "timers.sync", "world",
 })
 """The frames that carry a seq and live in the replay ring: everything
 the hub says to *every* client, all of it idempotent to re-see. Private

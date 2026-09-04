@@ -38,7 +38,7 @@ from claude_agent_sdk import (
 )
 
 from ciel.brain.permissions import FILE_TOOLS, WorkspaceGuard
-from ciel.brain.prompt import build_system_prompt
+from ciel.brain.prompt import build_system_prompt, sections_watch_line
 from ciel.brain.sentences import flush_point, split_sentences
 from ciel.brain.session import SessionStore
 from ciel.brain.recorder import ActionRecorder
@@ -219,6 +219,16 @@ class Brain:
             )
 
     @property
+    def _away_outlet(self) -> bool:
+        """Whether an away text can reach the user — the same test the
+        vigil_away prompt flag makes, named so both sites agree."""
+        return bool(
+            self._config.proactive.owner_handle
+            and self._config.messages.enabled
+            and self._config.messages.allow_send
+        ) or bool(self._remote_armed and self._config.discord.proactive)
+
+    @property
     def _remote_armed(self) -> bool:
         """Whether the Discord lane is configured to exist — the config
         claim, not the connection state: the system prompt is built at
@@ -322,6 +332,19 @@ class Brain:
                 # promises to "keep an eye on things" with no watcher armed,
                 # or denies being able to do what the watch tool exists for.
                 vigil=self._config.proactive.enabled,
+                # The standing section watch, so "are you watching for a
+                # spot?" is answered from fact rather than denied. Keyed on
+                # the watch list, not `enabled`: on the hub the watcher
+                # runs on the spoke (enabled = false here, cookie on the
+                # Mac) and the brain must still know it exists.
+                vigil_standing=sections_watch_line(
+                    self._config.sections.watch
+                    if self._config.proactive.enabled
+                    else (),
+                    self._config.sections.poll_s,
+                    self._away_outlet,
+                    self._config.sections.email_on_opening,
+                ),
                 vigil_away=bool(
                     self._config.proactive.owner_handle
                     and self._config.messages.enabled
@@ -347,6 +370,10 @@ class Brain:
                 mail_owner=self._config.mail.owner,
                 mail_copy_to=self._config.mail.copy_to,
                 mac=self._mac_tools,
+                # The opening block exists whenever the table does and
+                # is sent; the prompt must not describe a block that
+                # never comes.
+                world=self._config.world.enabled and self._config.world.in_prompt,
             ),
             # Explicit allowlist. The Agent SDK ships the full Claude Code
             # toolset — Bash, Write, Edit — and a voice assistant that can
