@@ -119,6 +119,13 @@ def _check_auth() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw = list(argv) if argv is not None else sys.argv[1:]
+    if raw and raw[0] == "interview":
+        # The interview room's owner tools — its own parser, because
+        # "add-user alice" shares nothing with the role flags below.
+        from ciel.interview.cli import main as interview_main
+
+        return interview_main(raw[1:])
     args = _parse_args(argv)
 
     # Line-buffer stdout even when it isn't a terminal. Under launchd (or

@@ -1,0 +1,109 @@
+{
+  "slug": "harbor-coffee-store-closures",
+  "title": "Harbor Coffee: seven hundred stores too many?",
+  "type": "project",
+  "client": "Harbor Coffee, a global coffeehouse chain",
+  "year": 2008,
+  "prompt": "Our client has grown from a thousand stores to over fifteen thousand in a decade. Same-store sales have just turned negative for the first time, and the founder has returned as CEO. He has asked how to fix the business, and specifically whether to close stores — and which.",
+  "background": "Growth came from opening stores fast, sometimes across the street from each other. Customer surveys say the experience has become impersonal: automatic espresso machines, breakfast sandwiches whose smell masks the coffee, and long queues. A recession is beginning.",
+  "clarifications": [
+    {
+      "q": "What does the CEO want?",
+      "a": "Return to same-store growth within two years and protect the brand; he is open to closures and to a smaller company."
+    },
+    {
+      "q": "Are the stores owned or leased?",
+      "a": "Company-operated stores in the home market are leased, typically on ten-year terms; overseas stores are largely licensed."
+    },
+    {
+      "q": "How are stores performing?",
+      "a": "Widely spread: the top quartile makes over twenty percent margin; the bottom quartile loses money."
+    }
+  ],
+  "exhibits": [
+    {
+      "id": "e1",
+      "title": "Home-market company stores by opening year",
+      "kind": "table",
+      "columns": [
+        "Opened",
+        "Stores",
+        "Avg weekly sales ($k)",
+        "Store margin",
+        "Within 0.5 mi of another store"
+      ],
+      "rows": [
+        [
+          "Before 2000",
+          "2,100",
+          "22.5",
+          "18%",
+          "35%"
+        ],
+        [
+          "2000-2003",
+          "2,400",
+          "19.0",
+          "12%",
+          "48%"
+        ],
+        [
+          "2004-2005",
+          "1,600",
+          "16.5",
+          "6%",
+          "61%"
+        ],
+        [
+          "2006-2008",
+          "1,700",
+          "14.0",
+          "-2%",
+          "72%"
+        ]
+      ],
+      "note": "Home market only. Margin is store-level, before overhead.",
+      "reveal_when": "The candidate asks how store performance varies, or about cannibalisation between stores."
+    },
+    {
+      "id": "e2",
+      "title": "Closure economics per store",
+      "kind": "table",
+      "columns": [
+        "Item",
+        "Typical value"
+      ],
+      "rows": [
+        [
+          "Annual loss avoided (bottom-quartile store)",
+          "$60k"
+        ],
+        [
+          "Lease exit cost",
+          "$150k"
+        ],
+        [
+          "Severance and closing costs",
+          "$40k"
+        ],
+        [
+          "Sales transferred to nearby stores",
+          "30-40% of the closed store's sales"
+        ]
+      ],
+      "note": "",
+      "reveal_when": "The candidate asks what a closure costs or saves."
+    }
+  ],
+  "framework_hints": [
+    "Separate the store-count problem from the experience problem",
+    "Segment stores before deciding; do not close by geography",
+    "The payback on a closure, including transferred sales"
+  ],
+  "good_answer": "Close the newest, most cannibalised, loss-making stores — several hundred — where a nearby store can absorb a third of the sales, and reinvest in the experience: retrain baristas, slow the food roll-out, and fix the machines. Closure payback is under three years once transferred sales are counted. Stop opening stores in the home market for now.",
+  "historical_outcome": "The real company closed about six hundred home-market stores in 2008 and another three hundred in 2009, most of them opened in the previous three years and near another store; it shut every store for an afternoon to retrain baristas, removed the breakfast sandwich for a time, and returned to same-store growth by 2010.",
+  "sources": [
+    "https://en.wikipedia.org/wiki/Starbucks",
+    "https://en.wikipedia.org/wiki/Howard_Schultz"
+  ]
+}

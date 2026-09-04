@@ -74,6 +74,7 @@ from ciel.proactive.work import WorkWatcher
 from ciel.brain.tools.location import bind_locator
 from ciel.brain.tools.watch import bind_watcher
 from ciel.location import Locator
+from ciel.endpointing import trails_off as _trails_off_words
 from ciel.reload import SourceWatcher, default_roots
 from ciel.schedule import Snapshot, Source, State, pick_next
 from ciel.commands import Command, match as match_command
@@ -83,6 +84,7 @@ from ciel.turn import TurnRequest, TurnSink, lane_spec, prompt_note
 from ciel.ui.indicator import Indicator, TeeIndicator, build_indicator
 
 if TYPE_CHECKING:
+    from ciel.interview.app import InterviewApp
     # The audio stack is imported where it is built (the local role's
     # constructor and the methods only it runs), never at module level:
     # the hub imports this module on a machine with no sound device, no
@@ -109,24 +111,12 @@ nap — the wake-up handler is where reality is reconciled."""
 def trails_off(heard: str, audio: AudioConfig) -> bool:
     """Whether a transcript ends mid-thought (the Cauchy hold's judgement).
 
-    The endpoint firing only proves the user *paused*, not that they
-    finished; the transcript is the tiebreaker, and it is read
-    pessimistically:
-
-    * a trailing ellipsis is the transcriber itself saying "trailed off".
-    * ``?``/``!`` are always complete — Whisper doesn't punctuate fragments
-      as questions.
-    * a period is trusted unless the last word is one that can't end a
-      thought (``dangling_words``): Whisper appends periods to fragments
-      out of habit, and "check my." is not a closed sentence.
-    * no closing punctuation at all means the transcriber didn't hear a
-      finished sentence either. This branch is what catches the pause after
-      an "um" — Whisper strips fillers from transcripts, so a hold that
-      waits to *see* one misses exactly the pauses it exists for.
+    The judgement itself lives in ``ciel.endpointing`` — the interview
+    room reads browser transcripts with the same eyes — and this keeps the
+    pipeline's signature, which takes the audio config for its
+    ``dangling_words``.
     """
-    text = heard.rstrip()
-    if text.endswith(("...", "…")):
-        return True
+    return _trails_off_words(heard, audio.dangling_words)
     if text.endswith(("?", "!")):
         return False
     words = text.split()
@@ -705,12 +695,23 @@ class Pipeline:
         # the tee below can include it.
         self._web_link: WebLink | None
         self._remote: "RemoteBindings | None" = None
+        self._interview: "InterviewApp | None" = None
         if hub:
             # The hub's socket is the spoke's door; the Chart rides along
             # whether or not config asked for it.
             if not config.web.enabled:
                 log.info("hub: the wire server is on regardless of [web].enabled")
-            self._web_link = HubServer(config.web, config.hub)
+            interview = None
+            if config.interview.enabled:
+                # The interview room (Adjoint): a second surface on this
+                # same server for other people. Built here, handed to the
+                # link, and never spoken of again — it has no lane, no
+                # sink, and no path to the brain below.
+                from ciel.interview.app import InterviewApp
+
+                interview = InterviewApp(config)
+            self._web_link = HubServer(config.web, config.hub, interview)
+            self._interview = interview
             self._remote = RemoteBindings(self._web_link, config)
         else:
             self._web_link = (
@@ -1006,6 +1007,7 @@ class Pipeline:
         """Set when the source changed and the loop exited to be re-exec'd.
         The entry point reads this after run() returns."""
         self._reload_pending = False
+        self._reload_waiting_since: float | None = None
         """A spoken or typed "reload" landed; the frame loop performs it from
         idle, exactly as it does for a source change."""
 
@@ -1475,6 +1477,22 @@ class Pipeline:
             self._watcher is not None and self._watcher.changed
         )
         if source_changed or self._reload_pending:
+            if self._interview is not None and self._interview.live_count:
+                # The interview room is a surface for other people: a
+                # reload waits for their interviews to end, and past a
+                # long ceiling ends them gently (debrief and all) rather
+                # than vanishing mid-question.
+                if self._reload_waiting_since is None:
+                    self._reload_waiting_since = time.monotonic()
+                    log.info(
+                        "reload waits on %d live interview(s)", self._interview.live_count
+                    )
+                waited = time.monotonic() - self._reload_waiting_since
+                if waited < self._config.interview.reload_max_wait_s:
+                    return False
+                log.warning("reload waited %.0fs — pausing live interviews", waited)
+                await self._interview.pause_all()
+            self._reload_waiting_since = None
             if source_changed:
                 print(f"\nsource changed ({self._watcher.changed.name}) — reloading")
             else:

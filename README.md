@@ -578,6 +578,64 @@ name in `[hub].origins` — a configured name is trusted on any port,
 since a proxied name arrives on the proxy's port, not the hub's — and
 the page speaks `wss://` on its own when served over TLS.
 
+## The interview room (Adjoint)
+
+Off by default. A second surface on the hub's web page, at `/interview`,
+for people who are not the owner: a voice-driven mock interviewer that
+invents a company from what a candidate asks for, or runs a consulting
+case, or poses a coding problem beside an editor — then records the whole
+thing and writes a debrief. It shares the process with Ciel and nothing
+else: its own accounts, its own brains with no tools and no memory, its
+own socket, its own files.
+
+```toml
+[interview]
+enabled = true                  # the hub serves /interview
+dir = "~/.ciel/interview"       # accounts, sessions, added cases
+model = "claude-opus-5"
+effort = "medium"               # the interviewer's turns; debrief_effort = "high"
+max_budget_usd = 3.0            # per session, enforced by the SDK
+daily_sessions_per_user = 4
+max_concurrent = 3              # one model subprocess per live interview
+silence_ms = 2000               # how long a candidate may pause before the answer is taken
+extend_ms = 3000                # extra wait when the transcript trails off
+piper_voice = "en_US-lessac-medium"
+```
+
+Accounts are the owner's to make. `ciel interview add-user alice` prints
+a generated password once; the admin panel on the page does the same, and
+can reset, disable, or delete. There is no signup. Public reach is the
+Chart's Cloudflare Tunnel plus a second Access application on
+`ciel.yunhan.me/interview` with a Bypass policy, so friends reach the
+room's own login while the Chart itself stays behind the owner's PIN.
+
+Three modes. **Company**: the candidate says what they want ("PM role at
+a mid-size fintech, behavioural plus product sense"), Ciel invents the
+company, the role, and the interviewer, and shows a brief with likely
+questions before the interview begins. **Case**: a consulting case from
+the library — three ship with the code, grounded in public business
+history with the client renamed; `ciel interview seed-cases -n 5` asks
+the model for more, and `~/.ciel/interview/cases/*.json` is where they
+land — or a freshly generated one; exhibits appear on the page when the
+interviewer shares them, and the debrief compares the recommendation with
+what really happened. **Technical**: a coding problem beside an editor
+(Python, C, C++, Java, Rust, JavaScript, TypeScript, Go); the interviewer
+reads the code and asks about it. Nothing is executed.
+
+The candidate speaks through the browser's speech recogniser (Chrome,
+Edge, Safari; elsewhere a text box); the interviewer speaks through piper
+on the hub, or the browser's own voice when piper is not installed. The
+room waits two seconds of silence before taking an answer — four times
+Ciel's own window — and longer when the words trail off. When it gets
+that wrong and the candidate goes on while the interviewer is already
+answering, the interviewer stops, says "Sorry, go on", and hears the
+whole answer. Every session is recorded (microphone and interviewer
+mixed) and replayable from the page with a click-to-seek transcript.
+
+`ciel interview serve --dev` runs the room alone on loopback with a
+scripted interviewer and a `dev`/`dev` account, for working on the page;
+`scripts/probe_interview.py` covers each layer.
+
 ## Watching things (Vigil)
 
 Off by default. Everything else Ciel says was asked for; Vigil is the

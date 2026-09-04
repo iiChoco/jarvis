@@ -59,6 +59,10 @@ spoke = [
 hub = [
     # The wire server (the Chart, the spoke's seat).
     "aiohttp>=3.10",
+    # The interview room's voice (Adjoint): piper renders the interviewer's
+    # sentences on the server for the browser to play. The manylinux
+    # aarch64 wheel covers the Arm hub.
+    "piper-tts>=1.7.0",
 ]
 
 [project.optional-dependencies]

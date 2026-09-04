@@ -2,6 +2,77 @@
 
 Notable changes to Ciel. Newest first.
 
+## 2026-09-03 — the interview room (Adjoint)
+
+**Why.** Ciel is one person's assistant, and a mock interviewer is a thing
+friends ask for. The same hub can hold both only if the second surface
+shares nothing with the first: not the Chart's queue, not the hub token,
+not the brain with the owner's memory and Mac. And a mock interviewer has
+one job Ciel's own pipeline gets wrong on purpose — waiting. A candidate
+thinks between sentences; half a second of silence is not an ending.
+
+**What.** A new package, `ciel/interview/`, served at `/interview` on the
+hub's existing aiohttp application (`WebLink.start()` mounts it when
+`[interview] enabled = true`).
+
+- *Accounts* (`accounts.py`): the owner creates every account — from an
+  admin panel on the page or `ciel interview add-user` — and passwords
+  are generated, shown once, and stored as scrypt hashes in
+  `interview-accounts.json`, which joins `interview.secret` on the
+  personal brain's forbidden list. Logins are signed cookies scoped to
+  `/interview`; five failures in fifteen minutes is a 429.
+- *Three modes.* A **company** interview invents a fictional company and
+  role from the candidate's request and shows a brief with likely
+  questions; a **case** interview runs a consulting case from a file
+  library (three ship in `interview/cases/`, `ciel interview seed-cases`
+  asks the model for more) or generates one; a **technical** interview
+  poses a coding problem beside an editor (Python, C, C++, Java, Rust,
+  JavaScript, TypeScript, Go) — the interviewer *reads* the code, nothing
+  is executed. Briefs and debriefs are structured calls against JSON
+  schemas (`prompt.py`); the interviewer's speech is a conversation.
+- *The interviewer's mind* (`brain.py`): one Claude Agent SDK session
+  per interview, no tools, `setting_sources=[]`, a per-session budget,
+  behind a `Backend` protocol so an API-key backend is one class away.
+  `ScriptedBackend` runs the whole room with no model, for the dev
+  server and the probes.
+- *Voice.* The candidate speaks through the browser's speech recogniser;
+  the interviewer speaks through piper on the hub, one WAV per sentence
+  inside the `say` frame (`speaker.py`), falling back to the browser's
+  own voice when piper cannot load. The page mixes the microphone and the
+  interviewer's audio into one webm recording, uploaded in chunks over
+  the same socket.
+- *Patience* (`endpoint.py`, `session.py`): the hub owns the clock. Two
+  seconds of silence, read with `trails_off` — lifted from the pipeline
+  into `ciel/endpointing.py` so both rooms judge a pause the same way —
+  and extended once by three more when the words trail off. When the
+  room misjudges and the candidate goes on while the interviewer is
+  answering, the turn is cancelled, the interviewer says "Sorry, go on",
+  and the continuation is merged onto the answer. The interviewer
+  reaches the page through two directives on lines of their own,
+  `[[exhibit: e1]]` and `[[problem: p1]]`, lifted out of the speech
+  stream before the sentence splitter (now `brain/sentences.py`, shared
+  with Ciel's own brain) sees them.
+- *The record* (`store.py`): one directory per session under
+  `<interview dir>/users/<name>/sessions/` — brief, transcript, code,
+  recording, and a debrief written after the interview (a case debrief
+  compares the recommendation with what really happened). The page
+  replays a recording with a click-to-seek transcript.
+- *The room and the reload.* A pending source reload waits for live
+  interviews and, past `reload_max_wait_s`, pauses them gracefully
+  (debrief and all) rather than vanishing mid-question.
+- *The page* (`remote/interview.html`, `remote/interview.js`): a stub
+  page carrying the DOM contract — ids, data attributes, templates — and
+  one script that owns all behaviour. The designed page from Claude
+  Design replaces the markup and keeps the hooks.
+
+**Probes.** `probe_interview.py` with `auth` (49), `brief` (47),
+`endpoint` (17), `wire` (11), `session` (28, a whole scripted interview
+over the socket including a cut-off and a reconnect), `speaker` (4),
+`cases` (14). Live: the dev server (`ciel interview serve --dev`, the
+`interview-dev` preview) walked through a case and a technical interview
+in the browser with piper audio. Owed: the Cloudflare Access bypass for
+`/interview`, the hub deploy, and a spoken interview from a phone.
+
 ## 2026-09-03 — what survives a hub that is away (phase 5, part one)
 
 **Why.** The split deferred the resilience it needed: a timer must ring

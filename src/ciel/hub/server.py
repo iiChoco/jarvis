@@ -25,11 +25,14 @@ import asyncio
 import logging
 import time
 from collections import deque
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from ciel import wire
 from ciel.config import HubConfig, WebConfig
 from ciel.remote.web import Admission, WebLink
+
+if TYPE_CHECKING:
+    from ciel.interview.app import InterviewApp
 
 log = logging.getLogger(__name__)
 
@@ -41,8 +44,13 @@ class RpcUnavailable(RuntimeError):
 class HubServer(WebLink):
     """``WebLink`` with the spoke seat."""
 
-    def __init__(self, config: WebConfig, hub: HubConfig | None = None) -> None:
-        super().__init__(config, hub)
+    def __init__(
+        self,
+        config: WebConfig,
+        hub: HubConfig | None = None,
+        interview: "InterviewApp | None" = None,
+    ) -> None:
+        super().__init__(config, hub, interview)
         self._spoke: Any = None
         """The seated spoke's socket, or None."""
         self._voice: deque[tuple[float, str, None]] = deque()

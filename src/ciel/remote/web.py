@@ -139,11 +139,14 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import urlsplit
 
 from ciel import wire
 from ciel.config import HubConfig, WebConfig
+
+if TYPE_CHECKING:
+    from ciel.interview.app import InterviewApp
 
 log = logging.getLogger(__name__)
 
@@ -275,9 +278,18 @@ def _mint_token(path: Path) -> str:
 class WebLink:
     """The GUI's server half: a turn queue, a broadcast fan-out, a page."""
 
-    def __init__(self, config: WebConfig, hub: HubConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: WebConfig,
+        hub: HubConfig | None = None,
+        interview: "InterviewApp | None" = None,
+    ) -> None:
         self._config = config
         self._hub = hub or HubConfig()
+        self._interview = interview
+        """The interview room, when the hub serves one: its routes ride
+        this same application under ``/interview``, and nothing else is
+        shared — not the queue, not the token, not the brain."""
         self._token = ""
         """Resolved at start(): the configured token, or the minted one."""
         self._ring = wire.ReplayRing(
@@ -489,6 +501,9 @@ class WebLink:
         app = web.Application()
         app.router.add_get("/", self._serve_page)
         app.router.add_get("/ws", self._serve_ws)
+        if self._interview is not None:
+            await self._interview.start()
+            self._interview.register(app.router)
 
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
@@ -507,6 +522,9 @@ class WebLink:
         log.info("web GUI at %s", self.url)
 
     async def close(self) -> None:
+        if self._interview is not None:
+            with contextlib.suppress(Exception):
+                await self._interview.close()
         for ws in list(self._clients):
             with contextlib.suppress(Exception):
                 await ws.close()

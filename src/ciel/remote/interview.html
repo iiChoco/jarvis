@@ -1,0 +1,262 @@
+<!doctype html>
+<!-- The interview room (Adjoint), stub page.
+
+     This is the *contract*, not the design: every id, data attribute, and
+     <template> that interview.js touches, laid out plainly with almost no
+     CSS. The designed page from Claude Design replaces this file wholesale
+     and keeps exactly these hooks (and the one <script> tag at the bottom);
+     the script never touches the DOM through anything else. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ciel · Interview</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 0; padding: 1rem; max-width: 60rem; color: #222; }
+  header { display: flex; gap: 1rem; align-items: center; margin-bottom: 1rem; }
+  header .spacer { flex: 1; }
+  section[data-view] { display: none; }
+  body[data-view="login"]  section[data-view="login"],
+  body[data-view="lobby"]  section[data-view="lobby"],
+  body[data-view="setup"]  section[data-view="setup"],
+  body[data-view="brief"]  section[data-view="brief"],
+  body[data-view="live"]   section[data-view="live"],
+  body[data-view="review"] section[data-view="review"],
+  body[data-view="admin"]  section[data-view="admin"] { display: block; }
+  #conn-banner, #tts-fallback-note, #login-error, #setup-busy, #apology, #sessions-empty { display: none; }
+  body[data-conn="lost"] #conn-banner { display: block; background: #fdd; padding: .5rem; }
+  body[data-tts="browser"] #tts-fallback-note { display: block; color: #666; }
+  #login-error[data-show="1"], #setup-busy[data-show="1"], #apology[data-show="1"], #sessions-empty[data-show="1"] { display: block; }
+  #state { font-family: ui-monospace, monospace; }
+  #hold-ring { width: 3rem; height: 3rem; border-radius: 50%; border: 3px solid #ccc;
+               background: conic-gradient(#2a7 calc(var(--hold, 0) * 100%), transparent 0); }
+  #q-text { font-size: 1.4rem; font-family: Georgia, serif; min-height: 3rem; }
+  #partial { color: #666; min-height: 1.5rem; }
+  #transcript .row, #review-transcript .row { padding: .15rem 0; }
+  .row[data-speaker="interviewer"] { color: #333; }
+  .row[data-speaker="candidate"] { color: #06c; }
+  .row[data-speaker="event"] { color: #999; font-style: italic; }
+  #exhibits .card { border: 1px solid #ccc; padding: .5rem; margin: .5rem 0; }
+  table { border-collapse: collapse; } td, th { border: 1px solid #ddd; padding: .2rem .5rem; }
+  #account-secret:empty { display: none; }
+  #account-secret { background: #ffe; padding: .5rem; font-family: ui-monospace, monospace; }
+  body[data-stt="none"] #typed-form { display: block; }
+  #typed-form { display: none; }
+  #debrief { white-space: pre-wrap; }
+  [data-view="setup"] [data-mode] { display: none; }
+  body[data-setup-mode="company"] [data-mode~="company"],
+  body[data-setup-mode="case"] [data-mode~="case"],
+  body[data-setup-mode="technical"] [data-mode~="technical"] { display: block; }
+  [data-view="brief"] dd:empty, [data-view="brief"] dd:empty + dt, [data-view="brief"] dt:has(+ dd:empty) { display: none; }
+</style>
+</head>
+<body data-view="login" data-state="idle" data-conn="ok" data-rec="off" data-stt="browser" data-tts="browser" data-setup-mode="company">
+
+<header>
+  <strong>Ciel · Interview</strong>
+  <span id="state">idle</span>
+  <span class="spacer"></span>
+  <span id="whoami"></span>
+  <button id="nav-lobby" hidden>Lobby</button>
+  <button id="nav-admin" hidden>Admin</button>
+  <button id="nav-logout" hidden>Sign out</button>
+</header>
+
+<div id="conn-banner">reconnecting to Ciel…</div>
+<div id="tts-fallback-note">The interviewer will use your browser's built-in voice.</div>
+
+<section data-view="login">
+  <h2>Sign in</h2>
+  <form id="login-form">
+    <label>Username <input id="login-user" autocomplete="username" required></label>
+    <label>Password <input id="login-pass" type="password" autocomplete="current-password" required></label>
+    <button type="submit">Sign in</button>
+  </form>
+  <p id="login-error"></p>
+</section>
+
+<section data-view="lobby">
+  <h2>Your interviews</h2>
+  <button id="new-interview">New interview</button>
+  <p id="sessions-empty">No interviews yet.</p>
+  <div id="sessions"></div>
+  <template id="session-row">
+    <div class="session">
+      <span data-field="date"></span> ·
+      <strong data-field="title"></strong> ·
+      <span data-field="mode"></span> ·
+      <span data-field="duration"></span> ·
+      <span data-field="debrief"></span>
+      <button data-action="open">Open</button>
+      <button data-action="delete">Delete</button>
+    </div>
+  </template>
+</section>
+
+<section data-view="setup">
+  <h2>New interview</h2>
+  <form id="setup-form">
+    <p>This session will be recorded and saved to your account.</p>
+    <label><input type="radio" name="mode" value="company" checked> Company interview</label>
+    <label><input type="radio" name="mode" value="case"> Case interview</label>
+    <label><input type="radio" name="mode" value="technical"> Technical interview (with a code editor)</label>
+    <div data-mode="company technical">
+      <label>What do you want to practise? <textarea id="setup-request" rows="3" placeholder="PM role at a mid-size fintech, behavioural plus product sense"></textarea></label>
+      <label>Role <input id="setup-role"></label>
+      <label>Seniority <input id="setup-seniority" placeholder="new grad / mid / senior"></label>
+    </div>
+    <div data-mode="technical">
+      <label>Technical focus <input id="setup-focus" placeholder="algorithms, systems design, frontend, data…"></label>
+      <p>The interviewer reads your code; nothing is executed.</p>
+    </div>
+    <div data-mode="case">
+      <label>Case type
+        <select name="case_type">
+          <option value="any">surprise me</option>
+          <option value="product">product</option>
+          <option value="project">project</option>
+          <option value="company">company</option>
+        </select>
+      </label>
+      <label>Source
+        <select name="case_source">
+          <option value="library">historical case</option>
+          <option value="generated">generated case</option>
+        </select>
+      </label>
+    </div>
+    <label>Length
+      <select name="length">
+        <option value="15">15 min</option>
+        <option value="30" selected>30 min</option>
+        <option value="45">45 min</option>
+      </select>
+    </label>
+    <button id="setup-submit" type="submit">Prepare</button>
+  </form>
+  <p id="setup-busy">Preparing your interview…</p>
+</section>
+
+<section data-view="brief">
+  <h2 data-field="name"></h2>
+  <div id="brief">
+    <p data-field="tagline"></p>
+    <dl>
+      <dt>Industry</dt><dd data-field="industry"></dd>
+      <dt>Stage</dt><dd data-field="stage"></dd>
+      <dt>Size</dt><dd data-field="size"></dd>
+      <dt>HQ</dt><dd data-field="hq"></dd>
+      <dt>Founded</dt><dd data-field="founded"></dd>
+      <dt>Business model</dt><dd data-field="business_model"></dd>
+      <dt>Culture</dt><dd data-field="culture"></dd>
+      <dt>Products</dt><dd data-field="products"></dd>
+      <dt>Recent news</dt><dd data-field="recent_news"></dd>
+      <dt>Role</dt><dd data-field="role_title"></dd>
+      <dt>Level</dt><dd data-field="role_level"></dd>
+      <dt>Team</dt><dd data-field="role_team"></dd>
+      <dt>Responsibilities</dt><dd data-field="role_responsibilities"></dd>
+      <dt>Must-haves</dt><dd data-field="role_must_haves"></dd>
+      <dt>Interviewer</dt><dd data-field="interviewer"></dd>
+      <dt>Case prompt</dt><dd data-field="case_prompt"></dd>
+      <dt>Client</dt><dd data-field="case_client"></dd>
+      <dt>Case type</dt><dd data-field="case_type"></dd>
+      <dt>Background</dt><dd data-field="case_background"></dd>
+      <dt>Technical focus</dt><dd data-field="tech_focus"></dd>
+      <dt>What to expect</dt><dd data-field="tech_expect"></dd>
+    </dl>
+    <h3>Likely questions</h3>
+    <ol id="brief-questions"></ol>
+    <template id="question-row"><li><span data-field="q"></span> <em data-field="kind"></em></li></template>
+  </div>
+  <button id="brief-regenerate">Regenerate</button>
+  <button id="brief-begin">Begin interview</button>
+</section>
+
+<section data-view="live">
+  <div style="display:flex; gap:1rem; align-items:center">
+    <div id="hold-ring"></div>
+    <span id="timer">00:00</span>
+    <span id="q-count">Q0</span>
+    <span id="rec">REC</span>
+  </div>
+  <p id="q-text"></p>
+  <p id="apology"></p>
+  <p id="partial"></p>
+  <div id="exhibits"></div>
+  <template id="exhibit-card">
+    <div class="card"><strong data-field="title"></strong><table></table><p data-field="note"></p></div>
+  </template>
+  <div id="problem" hidden>
+    <h3 data-field="title"></h3>
+    <p data-field="meta"></p>
+    <p data-field="statement"></p>
+    <ul data-field="examples"></ul>
+    <ul data-field="constraints"></ul>
+    <label>Language
+      <select id="code-lang">
+        <option value="python">Python</option>
+        <option value="c">C</option>
+        <option value="cpp">C++</option>
+        <option value="java">Java</option>
+        <option value="rust">Rust</option>
+        <option value="javascript">JavaScript</option>
+        <option value="typescript">TypeScript</option>
+        <option value="go">Go</option>
+      </select>
+    </label>
+    <textarea id="code-editor" rows="16" spellcheck="false" style="width:100%; font-family: ui-monospace, monospace"></textarea>
+    <button id="btn-submit-code">Submit code</button>
+    <p>The interviewer reads your code; nothing is executed.</p>
+  </div>
+  <div>
+    <button id="btn-mute">Mute</button>
+    <button id="btn-done">I'm done answering</button>
+    <button id="btn-end">End interview</button>
+  </div>
+  <form id="typed-form">
+    <input id="typed-text" placeholder="Type your answer (speech recognition unavailable)">
+    <button type="submit">Send</button>
+  </form>
+  <h3>Transcript</h3>
+  <div id="transcript"></div>
+  <template id="transcript-row"><div class="row"><span data-field="t"></span> <span data-field="text"></span></div></template>
+</section>
+
+<section data-view="review">
+  <h2 data-field="title"></h2>
+  <p data-field="meta"></p>
+  <audio id="player" controls></audio>
+  <div id="review-code" hidden><h3>Your code</h3><pre></pre></div>
+  <h3>Debrief</h3>
+  <div id="debrief"></div>
+  <div id="review-outcome"></div>
+  <h3>Transcript</h3>
+  <div id="review-transcript"></div>
+</section>
+
+<section data-view="admin">
+  <h2>Accounts</h2>
+  <form id="account-create-form">
+    <input id="account-new-name" placeholder="username" required>
+    <button type="submit">Create</button>
+  </form>
+  <div id="account-secret"></div>
+  <div id="accounts"></div>
+  <template id="account-row">
+    <div class="account">
+      <strong data-field="username"></strong>
+      <span data-field="role"></span>
+      <span data-field="created"></span>
+      <span data-field="last_seen"></span>
+      <span data-field="status"></span>
+      <button data-action="reset">Reset password</button>
+      <button data-action="disable">Disable</button>
+      <button data-action="enable">Enable</button>
+      <button data-action="delete">Delete</button>
+    </div>
+  </template>
+</section>
+
+<script src="/interview/app.js"></script>
+</body>
+</html>

@@ -102,6 +102,11 @@ FORBIDDEN_NAMES = frozenset({
     # reason. And the hub's environment file, which holds the brain's
     # login on a server with no keychain.
     "hub.token", "hub.env",
+    # The interview room's accounts (password hashes for the owner's
+    # friends) and its cookie-signing secret — the one place Ciel holds
+    # other people's credentials, so named twice over: distinctive file
+    # names, and this list.
+    "interview-accounts.json", "interview.secret",
     # Agent and CLI state. `.claude` is not just settings — it holds session
     # transcripts and history from every coding session, which is a broader
     # disclosure than any single credential file.

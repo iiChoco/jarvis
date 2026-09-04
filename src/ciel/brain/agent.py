@@ -39,6 +39,7 @@ from claude_agent_sdk import (
 
 from ciel.brain.permissions import FILE_TOOLS, WorkspaceGuard
 from ciel.brain.prompt import build_system_prompt
+from ciel.brain.sentences import flush_point, split_sentences
 from ciel.brain.session import SessionStore
 from ciel.brain.recorder import ActionRecorder
 from ciel.brain.shellguard import ShellGuard
@@ -55,49 +56,6 @@ log = logging.getLogger(__name__)
 # corpse forever. BrokenPipe/ConnectionError cover the OS-level write to a
 # terminated process underneath the SDK's own wrappers.
 _TRANSPORT_ERRORS = (CLIConnectionError, ProcessError, BrokenPipeError, ConnectionError)
-
-# A sentence ends at .?! followed by whitespace or a closing quote/bracket — but
-# not when the period is part of a decimal ("3.5" — the lookahead rejects it,
-# since the next character is a digit) or an ellipsis. End-of-buffer is
-# deliberately NOT a boundary: mid-stream the buffer ends at an arbitrary delta
-# cut, so "3." at a delta boundary must wait for the next delta rather than
-# split the number — the true end of a response is emitted by ask()'s tail flush
-# instead. Getting this wrong is audible: a premature split pauses mid-number.
-_BOUNDARY = re.compile(r"(?<!\.)([.!?])(?=[\s\"')\]])")
-
-# Abbreviations that end in a period without ending a sentence. The prompt
-# discourages these, but the model still produces them occasionally. Ordinary
-# words that double as abbreviations ("no", "us") don't belong here — "The
-# answer is no." is a complete sentence far more often than "No. 5" appears.
-_ABBREVIATIONS = frozenset({
-    "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc",
-    "approx", "fig", "inc", "ltd", "co", "uk",
-})
-
-# Abbreviations recognized only in their dotted spelling ("e.g.", "i.e.",
-# "a.m.", "U.S."). Their dotless forms ("eg", "am", "us") are ordinary words
-# that legitimately end sentences, so they qualify only when the trailing token
-# actually carried internal periods.
-_DOTTED_ABBREVIATIONS = frozenset({"eg", "ie", "am", "pm", "us"})
-
-# The trailing token before a sentence-final period, keeping any internal dots
-# so "e.g." is seen whole rather than as a bare "g".
-_TRAILING_WORD = re.compile(r"([A-Za-z.]+)\.$")
-
-
-def _is_real_boundary(candidate: str) -> bool:
-    """Reject boundaries that fall inside an abbreviation."""
-    match = _TRAILING_WORD.search(candidate.strip())
-    if match is None:
-        return True
-    token = match.group(1)
-    word = token.replace(".", "").lower()
-    if word in _ABBREVIATIONS:
-        return False
-    if "." in token and word in _DOTTED_ABBREVIATIONS:
-        return False
-    return True
-
 
 class Brain:
     """A conversational Claude session that yields speakable sentences."""
@@ -832,63 +790,13 @@ class Brain:
             log.debug("could not drain the abandoned turn", exc_info=True)
 
     def _drain(self, buffer: str) -> tuple[list[str], str]:
-        """Split off every complete sentence.
-
-        Returns the finished sentences and whatever text remains unterminated,
-        which the caller keeps buffering into.
-        """
-        sentences: list[str] = []
-        start = 0
-
-        for match in _BOUNDARY.finditer(buffer):
-            end = match.end()
-            candidate = buffer[start:end]
-            if not _is_real_boundary(candidate):
-                continue
-            text = candidate.strip()
-            if text:
-                sentences.append(text)
-            start = end
-
-        if sentences:
-            return sentences, buffer[start:]
-
-        # No sentence boundary yet. Past the flush threshold, release anyway —
-        # otherwise a long run-on leaves the user in silence indefinitely.
-        limit = self._brain_config.sentence_flush_chars
-        if len(buffer) >= limit:
-            cut = self._flush_point(buffer, limit)
-            if cut > 0:
-                head = buffer[:cut].strip()
-                if head:
-                    return [head], buffer[cut:]
-
-        return [], buffer
+        """Split off every complete sentence — the shared splitter in
+        ``brain/sentences.py``, at this brain's flush threshold."""
+        return split_sentences(buffer, self._brain_config.sentence_flush_chars)
 
     @staticmethod
     def _flush_point(buffer: str, limit: int) -> int:
-        """Choose where to cut an over-long buffer.
-
-        Prefer a clause boundary — a comma, semicolon, colon, or dash. Cutting
-        at an arbitrary word break is audible: "...compared to drinking" / "none."
-        puts a pause in a place no speaker would, because the synthesizer gives
-        each chunk its own falling intonation. A clause boundary is somewhere a
-        person would naturally draw breath.
-        """
-        window = buffer[:limit]
-        # Ignore boundaries in the first third: cutting there leaves a stub too
-        # short to be worth speaking on its own ("Yes," as its own utterance).
-        earliest = limit // 3
-
-        for marker in ("; ", ", ", ": ", " — ", " - "):
-            cut = window.rfind(marker)
-            if cut > earliest:
-                return cut + len(marker)
-
-        cut = window.rfind(" ")
-        # The same guard applies to the word-break fallback, which otherwise
-        # happily returns the space after the first word.
-        return cut if cut > earliest else limit
+        return flush_point(buffer, limit)
 
 
 def _label(kind: str | None) -> str:

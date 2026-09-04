@@ -1,0 +1,103 @@
+{
+  "slug": "meridian-games-free-to-play",
+  "title": "Meridian Games: should the sequel be free?",
+  "type": "product",
+  "client": "Meridian Games, a mid-size video game studio",
+  "year": 2013,
+  "prompt": "Our client is about to release the sequel to a successful multiplayer shooter that sold for sixty dollars a copy. Several competitors have gone free-to-play, making money from cosmetic items instead. The product lead wants a recommendation: charge sixty dollars, go free, or something in between.",
+  "background": "The first game sold three million copies at launch and has half a million monthly players two years on. The sequel cost forty million dollars to build. The studio has never run an in-game store. A live team of thirty would be needed to keep a free game fed with content.",
+  "clarifications": [
+    {
+      "q": "What is the goal?",
+      "a": "Maximise lifetime profit of the sequel over four years, with a strong preference for a large, lasting player base."
+    },
+    {
+      "q": "What do cosmetics earn elsewhere?",
+      "a": "Comparable free-to-play shooters report two to four dollars per monthly active player per month, from about five percent of players who pay."
+    },
+    {
+      "q": "Is the audience price-sensitive?",
+      "a": "Half the first game's buyers came in during a thirty-dollar sale six months after launch."
+    }
+  ],
+  "exhibits": [
+    {
+      "id": "e1",
+      "title": "Three pricing models, client's four-year projections",
+      "kind": "table",
+      "columns": [
+        "Model",
+        "Players year 1 (M)",
+        "Monthly actives year 2 (M)",
+        "Revenue per player (lifetime)",
+        "Live-team cost / year ($M)"
+      ],
+      "rows": [
+        [
+          "$60 premium",
+          "3.5",
+          "0.6",
+          "$52",
+          "6"
+        ],
+        [
+          "Free-to-play",
+          "20",
+          "4.0",
+          "$9",
+          "15"
+        ],
+        [
+          "$30 plus store",
+          "7",
+          "1.5",
+          "$34",
+          "12"
+        ]
+      ],
+      "note": "Revenue per player is net of platform fees. Free-to-play revenue comes almost entirely from the five percent who pay.",
+      "reveal_when": "The candidate asks how the options compare on players, revenue, or cost."
+    },
+    {
+      "id": "e2",
+      "title": "What happened to two comparable titles",
+      "kind": "table",
+      "columns": [
+        "Title",
+        "Model",
+        "Peak monthly actives (M)",
+        "Year-2 revenue ($M)",
+        "Notes"
+      ],
+      "rows": [
+        [
+          "Rival A",
+          "Went free after a paid launch",
+          "6",
+          "90",
+          "Player count tripled after the switch"
+        ],
+        [
+          "Rival B",
+          "Premium $60",
+          "1.2",
+          "25",
+          "Sequel sold well; player base faded in a year"
+        ]
+      ],
+      "note": "",
+      "reveal_when": "The candidate asks about competitors or precedents."
+    }
+  ],
+  "framework_hints": [
+    "Lifetime value = players × conversion × spend, minus the cost of feeding the game",
+    "Player base as the asset: what else does a big audience enable?",
+    "Risk: the studio has never run a store"
+  ],
+  "good_answer": "Go free-to-play, but stage it: launch at a low price with a store already built, or free with a paid founder's pack, and commit to the live team. Four-year revenue: premium about a hundred and eighty million; free-to-play about the same headline but with a player base seven times larger and a business that keeps earning; the risk is execution, not economics.",
+  "historical_outcome": "The real studio's peers who switched to free-to-play in that period generally saw player counts multiply and revenue hold or rise; the paid shooter sequels of 2013 mostly faded within a year. Within five years free-to-play with cosmetic sales became the dominant model for multiplayer shooters, and the largest titles earned billions a year from it.",
+  "sources": [
+    "https://en.wikipedia.org/wiki/Free-to-play",
+    "https://en.wikipedia.org/wiki/Team_Fortress_2"
+  ]
+}

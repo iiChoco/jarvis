@@ -1466,6 +1466,87 @@ class DevConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class InterviewConfig:
+    """The interview room — codename Adjoint. A second surface on the hub's
+    web server, at ``/interview``, for the owner's friends: a voice-driven
+    mock interviewer (a fictional company, or a consulting case), with the
+    session recorded and debriefed. Isolated from Ciel proper: its own
+    accounts, its own brains with no tools, no memory, and no Mac."""
+
+    enabled: bool = False
+    """Serve the room. Off by default: it is a surface for other people,
+    and the owner turns it on where friends can reach it (the hub)."""
+
+    dir: Path = field(
+        default_factory=lambda: Path.home() / ".ciel" / "interview"
+    )
+    """Where the room keeps everything: ``interview-accounts.json``,
+    ``interview.secret``, one directory per user with one per session
+    (brief, transcript, recording, debrief), and any added cases."""
+
+    backend: Literal["agent-sdk", "api"] = "agent-sdk"
+    """Who answers: ``agent-sdk`` runs each interview on a Claude Agent SDK
+    session (the owner's subscription, like Ciel's own brain); ``api`` will
+    use the Anthropic API with a key of its own, once friends' usage is
+    worth billing separately. One class each; the room sees neither."""
+
+    model: str = "claude-opus-5"
+    effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    """Effort for the interviewer's turns. Medium: an interviewer who
+    follows up on specifics without a long pause before each question."""
+
+    debrief_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
+    """Effort for the written debrief — read, not heard, and the point of
+    the exercise, so it gets real thought."""
+
+    max_budget_usd: float = 3.0
+    """Per-session ceiling, enforced by the SDK. A ninety-minute case at
+    medium effort is well under a dollar; this catches a runaway, not a
+    long interview."""
+
+    daily_sessions_per_user: int = 4
+    max_concurrent: int = 3
+    """Live interviews at once — each is an SDK subprocess of a few hundred
+    megabytes, and the hub is a small machine. A fourth caller is told the
+    room is full."""
+
+    idle_close_s: float = 600.0
+    """A live session with no words either way for this long is ended and
+    debriefed as if the candidate had left — a closed laptop must not hold
+    a subprocess open all night."""
+
+    silence_ms: int = 2000
+    """How long the candidate must stop talking before the answer is taken
+    as finished. Four times Ciel's own window: interview answers have
+    pauses for thought, and being cut off is the failure the room most
+    needs to avoid."""
+
+    extend_ms: int = 3000
+    """Extra wait when the transcript reads mid-thought (a trailing
+    conjunction, no closing punctuation) at the silence deadline."""
+
+    max_answer_s: float = 240.0
+    """The longest one answer can run before the interviewer moves on."""
+
+    barge_grace_ms: int = 800
+    """Speech arriving this soon after an answer was taken as finished is
+    its tail — merged in silently. Later than this while the interviewer
+    is thinking or speaking is a real cut-off: the interviewer stops,
+    apologizes, and lets the candidate go on."""
+
+    piper_voice: str = "en_US-lessac-medium"
+    """The interviewer's voice, synthesized on the hub. When piper cannot
+    load, the page falls back to the browser's own voice."""
+
+    cookie_days: int = 30
+    """How long a login lasts."""
+
+    reload_max_wait_s: float = 1200.0
+    """How long a pending source reload waits for live interviews to end
+    before pausing them, debriefing, and restarting anyway."""
+
+
+@dataclass(frozen=True, slots=True)
 class TranscriptConfig:
     """Local record of every conversation."""
 
@@ -1747,6 +1828,7 @@ class Config:
     timers: TimersConfig = field(default_factory=TimersConfig)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
     transcripts: TranscriptConfig = field(default_factory=TranscriptConfig)
+    interview: InterviewConfig = field(default_factory=InterviewConfig)
     dev: DevConfig = field(default_factory=DevConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     mcp: dict[str, MCPServerConfig] = field(default_factory=dict)
@@ -1790,6 +1872,7 @@ _SECTIONS = {
     "timers": TimersConfig,
     "proactive": ProactiveConfig,
     "transcripts": TranscriptConfig,
+    "interview": InterviewConfig,
     "dev": DevConfig,
     "ui": UIConfig,
 }
