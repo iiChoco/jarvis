@@ -135,6 +135,7 @@ class InterviewApp:
         router.add_post(f"{api}/login", self._login)
         router.add_post(f"{api}/logout", self._logout)
         router.add_get(f"{api}/me", self._me)
+        router.add_post(f"{api}/password", self._change_password)
         router.add_get(f"{api}/sessions", self._sessions_list)
         router.add_post(f"{api}/sessions", self._sessions_create)
         router.add_get(f"{api}/sessions/{{id}}", self._session_get)
@@ -590,14 +591,15 @@ class InterviewApp:
         body = await self._body(request)
         username = str(body.get("username", "")).strip().lower()
         role = "admin" if body.get("role") == "admin" else "user"
+        chosen = str(body.get("password") or "") or None
         try:
-            password = await asyncio.to_thread(self._accounts.create, username, role)
+            password = await asyncio.to_thread(self._accounts.create, username, role, chosen)
         except ValueError as exc:
             return self._fail(400, "bad_request", str(exc))
         log.info("interview account %r created by %s", username, admin.username)
         account = self._accounts.get(username)
         assert account is not None
-        return self._json({"account": self._account_row(account), "password": password})
+        return self._json({"account": self._account_row(account), "password": password, "chosen": chosen is not None})
 
     def _target(self, request: Any) -> str:
         return str(request.match_info.get("u", "")).strip().lower()
@@ -605,12 +607,33 @@ class InterviewApp:
     async def _admin_reset(self, request: Any) -> Any:
         admin = self._require(request, admin=True)
         username = self._target(request)
+        body = await self._body(request)
+        chosen = str(body.get("password") or "") or None
         try:
-            password = await asyncio.to_thread(self._accounts.reset, username)
+            password = await asyncio.to_thread(self._accounts.reset, username, chosen)
         except KeyError:
             return self._fail(404, "no_such_account", username)
+        except ValueError as exc:
+            return self._fail(400, "bad_request", str(exc))
         log.info("interview account %r reset by %s", username, admin.username)
-        return self._json({"username": username, "password": password})
+        return self._json({"username": username, "password": password, "chosen": chosen is not None})
+
+    async def _change_password(self, request: Any) -> Any:
+        """A signed-in user chooses their own password, proving the old one."""
+        account = self._require(request)
+        body = await self._body(request)
+        current = str(body.get("current") or "")
+        new = str(body.get("new") or "")
+        if await asyncio.to_thread(self._accounts.verify, account.username, current) is None:
+            # 403, not 401: the cookie is fine, the proof is not — a 401
+            # would read as "signed out" to the page.
+            return self._fail(403, "bad_current", "the current password is wrong")
+        try:
+            await asyncio.to_thread(self._accounts.reset, account.username, new)
+        except ValueError as exc:
+            return self._fail(400, "bad_request", str(exc))
+        log.info("interview account %r changed its own password", account.username)
+        return self._json({"ok": True})
 
     async def _set_disabled(self, request: Any, disabled: bool) -> Any:
         admin = self._require(request, admin=True)

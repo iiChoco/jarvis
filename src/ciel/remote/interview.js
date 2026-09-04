@@ -46,6 +46,7 @@
     $("#nav-lobby").hidden = !me || view === "lobby" || view === "live";
     $("#nav-admin").hidden = !me || me.role !== "admin" || view === "admin" || view === "live";
     $("#nav-logout").hidden = !me || view === "live";
+    $("#nav-password").hidden = !me || view === "live";
     text("#whoami", me ? (me.role === "admin" ? `${me.username} · owner` : me.username) : "");
     text("#brand-sub", view === "admin" ? "INTERVIEW · ADMIN" : "INTERVIEW");
   }
@@ -99,6 +100,27 @@
   });
   $("#nav-lobby").addEventListener("click", enterLobby);
   $("#nav-admin").addEventListener("click", enterAdmin);
+
+  // ── change my password ─────────────────────────────────────────────────
+
+  $("#nav-password").addEventListener("click", () => {
+    $("#password-current").value = ""; $("#password-new").value = "";
+    flag($("#password-error"), false);
+    flag($("#password-dialog"), true);
+    $("#password-current").focus();
+  });
+  $("#password-cancel").addEventListener("click", () => flag($("#password-dialog"), false));
+  $("#password-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    flag($("#password-error"), false);
+    try {
+      await api("/password", { method: "POST", body: { current: $("#password-current").value, new: $("#password-new").value } });
+      flag($("#password-dialog"), false);
+    } catch (ex) {
+      text("#password-error", ex.message);
+      flag($("#password-error"), true);
+    }
+  });
 
   const hasSTT = () => "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
   const hasAudio = () => "AudioContext" in window || "webkitAudioContext" in window;
@@ -1050,7 +1072,13 @@
       row.querySelector("[data-action=delete]").hidden = a.username === me.username;
       const u = encodeURIComponent(a.username);
       row.querySelector("[data-action=reset]").addEventListener("click", async () => {
-        try { const r = await api(`/admin/accounts/${u}/reset`, { method: "POST" }); showSecret(a.username, r.password, "reset"); }
+        try { const r = await api(`/admin/accounts/${u}/reset`, { method: "POST", body: {} }); showSecret(a.username, r.password, "reset"); }
+        catch (ex) { showSecret(a.username, ex.message, "error"); }
+      });
+      row.querySelector("[data-action=setpw]").addEventListener("click", async () => {
+        const chosen = prompt(`New password for ${a.username} (8+ characters):`);
+        if (!chosen) return;
+        try { const r = await api(`/admin/accounts/${u}/reset`, { method: "POST", body: { password: chosen } }); showSecret(a.username, r.password, "reset"); }
         catch (ex) { showSecret(a.username, ex.message, "error"); }
       });
       const disableBtn = row.querySelector("[data-action=disable]");
@@ -1080,10 +1108,12 @@
     e.preventDefault();
     const name = $("#account-new-name").value.trim().toLowerCase();
     if (!name) return;
+    const chosen = $("#account-new-pass").value;
     try {
-      const r = await api("/admin/accounts", { method: "POST", body: { username: name } });
+      const r = await api("/admin/accounts", { method: "POST", body: chosen ? { username: name, password: chosen } : { username: name } });
       showSecret(r.account.username, r.password, "created");
       $("#account-new-name").value = "";
+      $("#account-new-pass").value = "";
     } catch (ex) {
       showSecret(name, ex.message, "error");
     }

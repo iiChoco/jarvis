@@ -67,6 +67,17 @@ class Account:
         return self.role == "admin"
 
 
+MIN_PASSWORD = 8
+MAX_PASSWORD = 128
+
+
+def check_password(password: str) -> None:
+    """A chosen password must be at least eight characters. Nothing more
+    clever: length is the rule that survives contact with people."""
+    if not isinstance(password, str) or not (MIN_PASSWORD <= len(password) <= MAX_PASSWORD):
+        raise ValueError(f"password must be {MIN_PASSWORD}-{MAX_PASSWORD} characters")
+
+
 def generate_password() -> str:
     words = "-".join(secrets.choice(_WORDS) for _ in range(4))
     return f"{words}-{secrets.randbelow(90) + 10}"
@@ -176,6 +187,8 @@ class Accounts:
         data = self._load()
         if username in data["users"]:
             raise ValueError(f"account {username!r} already exists")
+        if password is not None and username != "dev":
+            check_password(password)
         password = password or generate_password()
         salt = secrets.token_bytes(16)
         data["users"][username] = {
@@ -189,13 +202,18 @@ class Accounts:
         self._save(data)
         return password
 
-    def reset(self, username: str) -> str:
-        """A new generated password for an existing account."""
+    def reset(self, username: str, password: str | None = None) -> str:
+        """A new password for an existing account — chosen when given
+        (and long enough), generated otherwise."""
         data = self._load()
         raw = data["users"].get(username)
         if not isinstance(raw, dict):
             raise KeyError(username)
-        password = generate_password()
+        if password:
+            if username != "dev":  # the loopback dev account keeps its short one
+                check_password(password)
+        else:
+            password = generate_password()
         salt = secrets.token_bytes(16)
         raw["scrypt"] = base64.b64encode(_hash(password, salt)).decode()
         raw["salt"] = base64.b64encode(salt).decode()
@@ -281,6 +299,8 @@ def read_cookie(secret: str, value: str, now: float | None = None) -> str | None
 
 __all__ = [
     "ACCOUNTS_FILE",
+    "MIN_PASSWORD",
+    "check_password",
     "Account",
     "Accounts",
     "SECRET_FILE",

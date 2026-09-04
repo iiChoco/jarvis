@@ -161,6 +161,11 @@
   body[data-view="lobby"] header .nav, body[data-view="setup"] header .nav, body[data-view="brief"] header .nav,
   body[data-view="review"] header .nav, body[data-view="admin"] header .nav { display: inline-flex; }
   body[data-view="login"] #whoami, body[data-view="login"] #nav-logout { display: none; }
+  #password-dialog { position: fixed; inset: 0; z-index: 60; display: none; align-items: center; justify-content: center; background: rgba(3, 6, 8, .75); }
+  #password-dialog[data-show="1"] { display: flex; }
+  #password-form { width: 340px; max-width: calc(100% - 28px); display: flex; flex-direction: column; gap: 14px; padding: 24px; background: #07141b; border: 1px solid var(--glass-border); clip-path: var(--cut12); }
+  #password-form .row { display: flex; gap: 10px; justify-content: flex-end; }
+  #password-error { padding: 8px 12px; border-left: 1px solid rgba(232, 138, 138, .7); font: 500 10px/1.5 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: rgba(232, 138, 138, .9); }
 
   /* banners */
   #conn-banner { display: none; align-items: center; gap: 12px; padding: 10px 28px; border-bottom: 1px solid rgba(232, 201, 138, .4);
@@ -521,6 +526,7 @@
   <span class="chip nav" id="whoami"></span>
   <button class="chip nav" id="nav-lobby" hidden>← lobby</button>
   <button class="chip nav" id="nav-admin" hidden>admin</button>
+  <button class="chip nav" id="nav-password" hidden title="Change your password">password</button>
   <button class="chip nav" id="nav-logout" hidden>sign out</button>
 </header>
 
@@ -822,6 +828,7 @@
         <span class="acts">
           <span data-field="status" hidden></span>
           <button class="btn small" data-action="reset">Reset pw</button>
+          <button class="btn small" data-action="setpw">Set pw</button>
           <button class="btn small" data-action="disable">Disable</button>
           <button class="btn small" data-action="enable">Re-enable</button>
           <button class="btn small" data-action="delete">Delete</button>
@@ -830,13 +837,24 @@
     </template>
     <form class="admin-create" id="account-create-form">
       <label class="field"><span class="lbl">new account · username</span><input class="input" id="account-new-name" placeholder="lowercase, no spaces" autocapitalize="none" spellcheck="false" required></label>
-      <button class="btn gold" type="submit">Create · generate password</button>
-      <span class="hint">passwords are four words and a number; shown once, then hashed</span>
+      <label class="field"><span class="lbl">password · optional</span><input class="input" id="account-new-pass" type="text" placeholder="blank = generate one" autocomplete="off" spellcheck="false"></label>
+      <button class="btn gold" type="submit">Create</button>
+      <span class="hint">blank generates four words and a number · chosen ones need 8+ characters · shown once, then hashed</span>
     </form>
   </div>
 </section>
 
 </main>
+
+<div id="password-dialog" data-show="0">
+  <form id="password-form" autocomplete="off">
+    <div class="cap"><span>change your password</span><span class="rule"></span></div>
+    <label class="field"><span class="lbl">current password</span><input class="input" id="password-current" type="password" autocomplete="current-password" required></label>
+    <label class="field"><span class="lbl">new password · 8+ characters</span><input class="input" id="password-new" type="password" autocomplete="new-password" minlength="8" required></label>
+    <p id="password-error" data-show="0"></p>
+    <div class="row"><button class="btn" type="button" id="password-cancel">Cancel</button><button class="btn gold" type="submit">Change</button></div>
+  </form>
+</div>
 
 <script src="/interview/app.js"></script>
 </body>

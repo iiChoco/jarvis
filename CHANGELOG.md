@@ -20,7 +20,9 @@ hub's existing aiohttp application (`WebLink.start()` mounts it when
   are generated, shown once, and stored as scrypt hashes in
   `interview-accounts.json`, which joins `interview.secret` on the
   personal brain's forbidden list. Logins are signed cookies scoped to
-  `/interview`; five failures in fifteen minutes is a 429.
+  `/interview`; five failures in fifteen minutes is a 429. Passwords can
+  also be chosen (eight characters or more) — by the owner at creation or
+  reset, and by any signed-in user for themselves, proving the old one.
 - *Three modes.* A **company** interview invents a fictional company and
   role from the candidate's request and shows a brief with likely
   questions; a **case** interview runs a consulting case from a file

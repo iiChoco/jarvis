@@ -38,6 +38,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     add = sub.add_parser("add-user", help="create an account; prints its password once")
     add.add_argument("username")
     add.add_argument("--admin", action="store_true", help="make it an owner account")
+    add.add_argument("--password", help="choose it (8+ characters) instead of generating one")
 
     for name, help_ in (
         ("reset", "new password for an account; prints it once"),
@@ -47,6 +48,8 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     ):
         one = sub.add_parser(name, help=help_)
         one.add_argument("username")
+        if name == "reset":
+            one.add_argument("--password", help="choose it (8+ characters) instead of generating one")
 
     sub.add_parser("list", help="every account, one per line")
 
@@ -152,11 +155,11 @@ def main(argv: list[str]) -> int:
 
     try:
         if args.cmd == "add-user":
-            password = accounts.create(args.username, "admin" if args.admin else "user")
+            password = accounts.create(args.username, "admin" if args.admin else "user", args.password)
             print(f"{args.username}: {password}")
             print("(shown once — the file holds only a hash)")
         elif args.cmd == "reset":
-            print(f"{args.username}: {accounts.reset(args.username)}")
+            print(f"{args.username}: {accounts.reset(args.username, args.password)}")
         elif args.cmd == "disable":
             accounts.set_disabled(args.username, True)
             print(f"{args.username} disabled")
